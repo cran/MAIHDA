@@ -2,15 +2,15 @@ Package: MAIHDA
 Type: Package
 Title: Multilevel Analysis of Individual Heterogeneity and
         Discriminatory Accuracy
-Version: 0.1.0
+Version: 0.1.7
 Authors@R: c(
-    person("Hamid", "Bulut", email = "hamid.bulut@ymail.com", role = c("aut", "cre"))
+    person("Hamid", "Bulut", email = "me@hamidbulut.com", role = c("aut", "cre"))
     )
-Description: Provides a comprehensive toolkit for conducting Multilevel Analysis 
-    of Individual Heterogeneity and Discriminatory Accuracy (MAIHDA). Methods 
-    are described in Merlo (2018) <doi:10.1016/j.socscimed.2017.12.018> and 
-    Evans et al. (2018) <doi:10.1016/j.socscimed.2017.11.011>. Automatically 
-    generates intersectional strata, fits analytical models, extracts statistics, 
+Description: Provides a comprehensive toolkit for conducting Multilevel Analysis
+    of Individual Heterogeneity and Discriminatory Accuracy (MAIHDA). Methods
+    are described in Merlo (2018) <doi:10.1016/j.socscimed.2017.12.018> and
+    Evans et al. (2018) <doi:10.1016/j.socscimed.2017.11.011>. Automatically
+    generates intersectional strata, fits analytical models, extracts statistics,
     and produces visualizations.
 License: MIT + file LICENSE
 Encoding: UTF-8
@@ -18,15 +18,16 @@ LazyData: true
 Depends: R (>= 4.1.0)
 Imports: lme4 (>= 1.1-27), ggplot2 (>= 3.3.0), dplyr (>= 1.0.0), tidyr
         (>= 1.1.0), stats, rlang (>= 0.4.0)
-Suggests: brms (>= 2.15.0), testthat (>= 3.0.0), knitr, rmarkdown, boot
-        (>= 1.3-20)
-RoxygenNote: 7.3.3
+Suggests: shiny, bslib, DT, future, promises, haven, shinyjs, brms (>=
+        2.15.0), testthat (>= 3.0.0), shinytest2, knitr, rmarkdown,
+        boot (>= 1.3-20)
 VignetteBuilder: knitr
 URL: https://github.com/hdbt/MAIHDA, https://hdbt.github.io/MAIHDA/
 BugReports: https://github.com/hdbt/MAIHDA/issues
+RoxygenNote: 7.3.3
 NeedsCompilation: no
-Packaged: 2026-03-30 17:53:10 UTC; hamid
+Packaged: 2026-04-05 07:32:43 UTC; hamid
 Author: Hamid Bulut [aut, cre]
-Maintainer: Hamid Bulut <hamid.bulut@ymail.com>
+Maintainer: Hamid Bulut <me@hamidbulut.com>
 Repository: CRAN
-Date/Publication: 2026-04-03 08:10:02 UTC
+Date/Publication: 2026-04-05 11:00:02 UTC

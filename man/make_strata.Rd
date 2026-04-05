@@ -19,7 +19,7 @@ Strata with fewer observations will be coded as NA. Default is 1.}
 }
 \value{
 A list with two elements:
-  \item{data}{The original data frame with an added 'stratum' column. The 
+  \item{data}{The original data frame with an added 'stratum' column. The
     strata_info is also attached as an attribute for use by fit_maihda()}
   \item{strata_info}{A data frame with information about each stratum including
     counts and the combination of variable values}
