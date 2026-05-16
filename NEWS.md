@@ -1,3 +1,19 @@
+# MAIHDA 0.1.8
+
+## General Updates & New Features
+
+* Added `plot_prediction_deviation_panels()` function for visualizing predicted values and identifying deviant cases.
+* Added `plot_risk_vs_effect()` function to create a quadrant scatterplot comparing overall marginal predicted risk against pure intersectional effects.
+* Added `plot_effect_decomposition()` function to visually decompose the total deviation from the overall mean into additive and intersectional components.
+* Replaced the redundant "caterpillar" plot with the "predicted" plot in `plot()` and the interactive dashboard.
+* Added automatic tertile binning (via an `autobin` parameter) for numeric grouping variables with more than 10 unique values in `make_strata()`.
+* Updated the interactive Shiny Dashboard (`run_maihda_app()`) to include the new visualizations and a toggle for auto-binning continuous strata variables.
+* Added detection for binomial data. `fit_maihda()` will now automatically detect binomial outcomes and switch to the appropriate family.
+
+## Bug Fixes
+
+* **VPC/ICC Calculation Fix**: Corrected the residual variance estimation for binomial and ordinal models. The package now accurately applies the theoretical level-1 variance ($\pi^2 / 3$ for `"logit"` links and $1$ for `"probit"` links) internally when summarizing models or bootstrapping the variance partition coefficient, avoiding deflated VPC/ICC metrics.
+
 # MAIHDA 0.1.7
 
 ## General Updates & New Features
@@ -17,9 +33,9 @@
 * Initial CRAN submission
 * Added `make_strata()` function for creating intersectional strata
 * Added `fit_maihda()` function for fitting multilevel models with lme4 (default) or brms engines
-* Added `summary_maihda()` function for variance partition and stratum estimates
+* Added `summary()` function for variance partition and stratum estimates
 * Added `predict_maihda()` function for individual and stratum-level predictions
-* Added `plot_maihda()` function with three plot types:
+* Added `plot()` function with three plot types:
   * Caterpillar plots of stratum random effects
   * Variance partition coefficient visualization
   * Observed vs. shrunken estimates comparison

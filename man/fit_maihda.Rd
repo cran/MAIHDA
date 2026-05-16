@@ -4,11 +4,23 @@
 \alias{fit_maihda}
 \title{Fit MAIHDA Model}
 \usage{
-fit_maihda(formula, data, engine = "lme4", family = "gaussian", ...)
+fit_maihda(
+  formula,
+  data,
+  engine = "lme4",
+  family = "gaussian",
+  autobin = TRUE,
+  ...
+)
 }
 \arguments{
-\item{formula}{A formula specifying the model. Should include random effect
-for stratum (e.g., \code{outcome ~ fixed_vars + (1 | stratum)}).}
+\item{formula}{A formula specifying the model. Can include a random effect
+for stratum (e.g., \code{outcome ~ fixed_vars + (1 | stratum)}) or can
+directly specify the intersection variables to be used for forming strata
+(e.g., \code{outcome ~ fixed_vars + (1 | var1:var2:var3)}). If variables
+other than "stratum" are provided in the random effect, \code{\link{make_strata}}
+will be called internally to compute the strata and the formula will be
+updated.}
 
 \item{data}{A data frame containing the variables in the formula.}
 
@@ -16,7 +28,14 @@ for stratum (e.g., \code{outcome ~ fixed_vars + (1 | stratum)}).}
 or "brms".}
 
 \item{family}{Character string or family object specifying the model family.
-Common options: "gaussian", "binomial", "poisson". Default is "gaussian".}
+Common options: "gaussian", "binomial", "poisson". Default is "gaussian".
+If the outcome variable appears to be binary and the default family is used,
+the function will automatically switch to "binomial", recode two-level
+responses to 0/1 for \code{glmer()}, and issue a warning.}
+
+\item{autobin}{Logical indicating whether numeric variables used only for
+automatic strata creation should be binned by \code{\link{make_strata}}.
+Default is TRUE.}
 
 \item{...}{Additional arguments passed to \code{lmer}/\code{glmer} (lme4) or
 \code{brm} (brms).}
@@ -36,18 +55,17 @@ Heterogeneity and Discriminatory Accuracy) using either lme4 or brms.
 }
 \examples{
 \donttest{
-# Create strata
+# Standard approach: manually create strata first
 strata_result <- make_strata(maihda_sim_data, vars = c("gender", "race", "education"))
-
-# Fit model with lme4
 model <- fit_maihda(health_outcome ~ age + (1 | stratum),
                     data = strata_result$data,
                     engine = "lme4")
 
-# Fit model with brms (if brms is available)
-# model_brms <- fit_maihda(health_outcome ~ age + (1 | stratum),
-#                          data = strata_result$data,
-#                          engine = "brms")
+# Simplified approach: specify stratifying variables directly in the grouping structure
+# The function internally calls make_strata() to create intersectionals
+model2 <- fit_maihda(health_outcome ~ age + (1 | gender:race:education),
+                     data = maihda_sim_data,
+                     engine = "lme4")
 }
 
 }

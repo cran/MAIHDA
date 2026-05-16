@@ -41,11 +41,11 @@ print(model)
 # ============================================================================
 
 # Basic summary
-summary_result <- summary_maihda(model)
+summary_result <- summary(model)
 print(summary_result)
 
 # Summary with bootstrap confidence intervals (takes longer)
-# summary_boot <- summary_maihda(model, bootstrap = TRUE, n_boot = 500)
+# summary_boot <- summary(model, bootstrap = TRUE, n_boot = 500)
 # print(summary_boot)
 
 # ============================================================================
@@ -64,16 +64,16 @@ print(pred_strata)
 # Step 5: Visualize results
 # ============================================================================
 
-# Caterpillar plot of stratum random effects
-plot_caterpillar <- plot_maihda(model, type = "caterpillar")
-print(plot_caterpillar)
+# Predicted stratum values with confidence intervals
+plot_predicted <- plot(model, type = "predicted")
+print(plot_predicted)
 
 # Variance partition coefficient visualization
-plot_vpc <- plot_maihda(model, type = "vpc")
+plot_vpc <- plot(model, type = "vpc")
 print(plot_vpc)
 
 # Observed vs. shrunken estimates
-plot_obs_shrunk <- plot_maihda(model, type = "obs_vs_shrunken")
+plot_obs_shrunk <- plot(model, type = "obs_vs_shrunken")
 print(plot_obs_shrunk)
 
 # ============================================================================

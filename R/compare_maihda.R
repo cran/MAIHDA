@@ -58,7 +58,7 @@ compare_maihda <- function(..., model_names = NULL, bootstrap = FALSE,
 
   # Calculate VPC for each model
   comparison_list <- lapply(seq_along(models), function(i) {
-    summary_obj <- summary_maihda(models[[i]], bootstrap = bootstrap,
+    summary_obj <- summary(models[[i]], bootstrap = bootstrap,
                                  n_boot = n_boot, conf_level = conf_level)
 
     if (bootstrap && summary_obj$vpc$bootstrap) {
@@ -108,8 +108,9 @@ compare_maihda <- function(..., model_names = NULL, bootstrap = FALSE,
 #' @export
 #' @import ggplot2
 plot_comparison <- function(comparison_df) {
-  if (!is.data.frame(comparison_df) || !"vpc" %in% names(comparison_df)) {
-    stop("comparison_df must be a data frame with a 'vpc' column")
+  required_cols <- c("model", "vpc")
+  if (!is.data.frame(comparison_df) || !all(required_cols %in% names(comparison_df))) {
+    stop("comparison_df must be a data frame with 'model' and 'vpc' columns")
   }
 
   has_ci <- all(c("ci_lower", "ci_upper") %in% names(comparison_df))

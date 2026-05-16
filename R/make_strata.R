@@ -6,9 +6,11 @@
 #' @param data A data frame containing the variables to create strata from.
 #' @param vars Character vector of variable names to use for creating strata.
 #' @param sep Separator to use between variable values when creating stratum labels.
-#'   Default is "_".
+#'   Default is " \\u00d7 " (a mathematical multiplication sign).
 #' @param min_n Minimum number of observations required for a stratum to be included.
 #'   Strata with fewer observations will be coded as NA. Default is 1.
+#' @param autobin Logical indicating whether to automatically bin numeric grouping variables
+#'   with more than 10 unique values into 3 categories (tertiles). Default is TRUE.
 #'
 #' @return A list with two elements:
 #'   \item{data}{The original data frame with an added 'stratum' column. The
@@ -34,7 +36,8 @@
 #' @importFrom dplyr mutate group_by summarise n ungroup
 #' @importFrom tidyr unite
 #' @importFrom rlang .data
-make_strata <- function(data, vars, sep = "_", min_n = 1) {
+#' @importFrom stats quantile na.omit
+make_strata <- function(data, vars, sep = " \u00d7 ", min_n = 1, autobin = TRUE) {
   # Input validation
   if (!is.data.frame(data)) {
     stop("'data' must be a data frame")
@@ -49,56 +52,96 @@ make_strata <- function(data, vars, sep = "_", min_n = 1) {
     stop("Variables not found in data: ", paste(missing_vars, collapse = ", "))
   }
 
-  # Create a copy of the data to avoid modifying the original
+  if (!is.numeric(min_n) || length(min_n) != 1 ||
+      is.na(min_n) || !is.finite(min_n) ||
+      min_n < 1 || min_n != floor(min_n)) {
+    stop("'min_n' must be a single positive whole number.", call. = FALSE)
+  }
+  min_n <- as.integer(min_n)
+
+  # Create a copy of the data to avoid modifying the original. Numeric
+  # auto-binning is applied only to the temporary strata-building columns so
+  # original variables remain valid for fixed-effect model terms.
   result_data <- data
+  strata_data <- data[, vars, drop = FALSE]
+
+  # Auto-bin numeric variables with >10 unique values into 3 categories
+  autobin_info <- list()
+  if (autobin) {
+    for (v in vars) {
+      val <- strata_data[[v]]
+      if (is.numeric(val) && length(unique(stats::na.omit(val))) > 10) {
+        q <- stats::quantile(val, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE)
+        labels <- c(paste0(v, "_Low"), paste0(v, "_Mid"), paste0(v, "_High"))
+        if (length(unique(q)) == 4) {
+          breaks <- as.numeric(q)
+        } else {
+          rx <- range(val, na.rm = TRUE)
+          dx <- diff(rx)
+          breaks <- seq(rx[1] - dx/1000, rx[2] + dx/1000, length.out = 4)
+        }
+        strata_data[[v]] <- cut(val, breaks = breaks, include.lowest = TRUE,
+                                labels = labels)
+        autobin_info[[v]] <- list(breaks = breaks, labels = labels)
+      }
+    }
+  }
 
   # Identify rows with any missing values in the specified variables
-  has_missing <- apply(result_data[, vars, drop = FALSE], 1, function(x) any(is.na(x)))
+  has_missing <- apply(strata_data, 1, function(x) any(is.na(x)))
 
-  # Create stratum variable by combining the specified variables
-  # Only for rows without missing values
-  result_data$stratum_label <- NA_character_
-  result_data$stratum_label[!has_missing] <- apply(
-    result_data[!has_missing, vars, drop = FALSE], 1,
-    function(x) paste(x, collapse = sep)
-  )
-
-  # Count observations per stratum (excluding rows with missing values)
-  stratum_counts <- table(result_data$stratum_label[!has_missing])
+  # Build strata from the actual variable columns, not from pasted display
+  # labels. This avoids collapsing distinct combinations whose values contain
+  # the display separator.
+  complete_strata_data <- strata_data[!has_missing, , drop = FALSE]
+  unique_strata <- unique(complete_strata_data)
+  combo_ids <- maihda_match_strata_rows(complete_strata_data, unique_strata, vars)
+  stratum_counts <- tabulate(combo_ids, nbins = nrow(unique_strata))
 
   # Filter strata based on minimum count
-  valid_strata <- names(stratum_counts[stratum_counts >= min_n])
+  valid_idx <- which(stratum_counts >= min_n)
 
   # Create numeric stratum ID
   result_data$stratum <- NA_integer_
 
   # Assign stratum IDs only to rows without missing values that meet minimum count
-  if (length(valid_strata) > 0) {
-    result_data$stratum[!has_missing] <- as.integer(
-      factor(result_data$stratum_label[!has_missing], levels = valid_strata)
+  if (length(valid_idx) > 0) {
+    result_data$stratum[!has_missing] <- match(combo_ids, valid_idx)
+  }
+
+  valid_strata <- unique_strata[valid_idx, , drop = FALSE]
+  labels <- if (nrow(valid_strata) > 0) {
+    apply(valid_strata, 1, function(x) paste(x, collapse = sep))
+  } else {
+    character()
+  }
+  duplicated_labels <- duplicated(labels) | duplicated(labels, fromLast = TRUE)
+  if (any(duplicated_labels)) {
+    labels[duplicated_labels] <- apply(
+      valid_strata[duplicated_labels, , drop = FALSE],
+      1,
+      function(x) paste(paste0(vars, "=", x), collapse = sep)
     )
   }
 
   # Create stratum information table
   strata_info <- data.frame(
-    stratum = seq_along(valid_strata),
-    label = valid_strata,
-    n = as.integer(stratum_counts[valid_strata])
+    stratum = seq_along(valid_idx),
+    label = labels,
+    n = as.integer(stratum_counts[valid_idx]),
+    stringsAsFactors = FALSE
   )
 
-  # Add the original variable values to strata_info
-  if (nrow(strata_info) > 0) {
-    for (var in vars) {
-      strata_info[[var]] <- sapply(strsplit(strata_info$label, sep, fixed = TRUE),
-                                   function(x) x[which(vars == var)])
-    }
+  # Add the stratum-defining values without parsing the display label.
+  for (var in vars) {
+    strata_info[[var]] <- valid_strata[[var]]
   }
-
-  # Remove temporary label column from result_data
-  result_data$stratum_label <- NULL
 
   # Attach strata_info as an attribute to the data for easy access
   attr(result_data, "strata_info") <- strata_info
+  attr(result_data, "strata_vars") <- vars
+  attr(result_data, "strata_sep") <- sep
+  attr(result_data, "strata_autobin_info") <- autobin_info
 
   # Return results
   structure(
@@ -107,7 +150,8 @@ make_strata <- function(data, vars, sep = "_", min_n = 1) {
       strata_info = strata_info,
       vars = vars,
       sep = sep,
-      min_n = min_n
+      min_n = min_n,
+      autobin_info = autobin_info
     ),
     class = "maihda_strata"
   )

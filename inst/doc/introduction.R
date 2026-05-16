@@ -8,7 +8,7 @@ knitr::opts_chunk$set(
 # install.packages("MAIHDA")
 # # Or for the latest development version:
 # # install.packages("remotes")
-# # remotes::install_github("hamidbulut/MAIHDA")
+# # remotes::install_github("hdbt/MAIHDA")
 
 ## ----eval=FALSE---------------------------------------------------------------
 # library(MAIHDA)
@@ -16,29 +16,28 @@ knitr::opts_chunk$set(
 # # Load the built-in NHANES dataset
 # data("maihda_health_data")
 # 
-# # Create strata from Gender, Race, and Education
-# strata_result <- make_strata(maihda_health_data, vars = c("Gender", "Race", "Education"))
+# # PVC compares variance across models, so both models must use the same
+# # analytic sample. Keep complete cases for all variables used below.
+# health_complete <- maihda_health_data[complete.cases(
+#   maihda_health_data[, c("BMI", "Age", "Gender", "Race", "Education", "Poverty")]
+# ), ]
 # 
-# # View the strata structural information
-# print(strata_result)
-
-## ----eval=FALSE---------------------------------------------------------------
-# # Fit the initial Null model
+# # Fit the initial Null model with auto-generated strata
 # model_null <- fit_maihda(
-#   BMI ~ 1 + (1 | stratum),
-#   data = strata_result$data,
+#   BMI ~ 1 + (1 | Gender:Race:Education),
+#   data = health_complete,
 #   engine = "lme4"
 # )
 # 
 # # Summarize the variance components (VPC)
-# summary_null <- summary_maihda(model_null)
+# summary_null <- summary(model_null)
 # print(summary_null)
 
 ## ----eval=FALSE---------------------------------------------------------------
 # # Fit an adjusted model
 # model_adj <- fit_maihda(
-#   BMI ~ Age + Gender + Race + Education + Poverty + (1 | stratum),
-#   data = strata_result$data
+#   BMI ~ Age + Gender + Race + Education + Poverty + (1 | Gender:Race:Education),
+#   data = health_complete
 # )
 # 
 # # Calculate PCV with Parametric Bootstrap Confidence Intervals
@@ -46,9 +45,9 @@ knitr::opts_chunk$set(
 # print(pcv_result)
 
 ## ----eval=FALSE---------------------------------------------------------------
-# # Run a stepwise variance decomposition
+# # Run a stepwise variance decomposition using the prepared data with strata
 # stepwise_results <- stepwise_pcv(
-#   data = strata_result$data,
+#   data = model_null$original_data,
 #   outcome = "BMI",
 #   vars = c("Age", "Gender", "Race", "Education", "Poverty")
 # )
@@ -56,11 +55,23 @@ knitr::opts_chunk$set(
 # print(stepwise_results)
 
 ## ----eval=FALSE---------------------------------------------------------------
-# # Caterpillar plot of stratum random effects (with 95% CIs)
-# plot_maihda(model_adj, type = "caterpillar")
+# # Predicted stratum values with 95% CIs
+# plot(model_adj, type = "predicted")
 # 
-# # Variance partition visualization
-# plot_maihda(model_adj, type = "vpc")
+# # Variance partition (VPC) visualization
+# plot(model_adj, type = "vpc")
+# 
+# # Bivariate risk against stratum-level intersectional effect
+# plot(model_adj, type = "risk_vs_effect")
+# 
+# # Additive versus Intersectional Effect decomposition
+# plot(model_adj, type = "effect_decomp")
+# 
+# # Ternary Plot of Variances
+# plot(model_adj, type = "ternary")
+# 
+# # Individual Prediction Deviance Dashboard
+# plot(model_adj, type = "prediction_deviation")
 
 ## ----eval=FALSE---------------------------------------------------------------
 # # Launch the interactive interface

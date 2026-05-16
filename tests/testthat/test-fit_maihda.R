@@ -6,12 +6,12 @@ test_that("fit_maihda works with lme4", {
     age = rnorm(100),
     outcome = rnorm(100)
   )
-  
+
   # Fit model
-  model <- fit_maihda(outcome ~ age + (1 | stratum), 
-                     data = data, 
+  model <- fit_maihda(outcome ~ age + (1 | stratum),
+                     data = data,
                      engine = "lme4")
-  
+
   # Check structure
   expect_true(inherits(model, "maihda_model"))
   expect_equal(model$engine, "lme4")
@@ -26,28 +26,48 @@ test_that("fit_maihda handles different families", {
     age = rnorm(100),
     outcome = rbinom(100, 1, 0.5)
   )
-  
+
   # Fit binomial model
   model <- fit_maihda(outcome ~ age + (1 | stratum),
                      data = data,
                      engine = "lme4",
                      family = "binomial")
-  
+
   expect_true(inherits(model, "maihda_model"))
   expect_equal(model$family$family, "binomial")
 })
 
+test_that("fit_maihda creates strata automatically when interaction is passed", {
+  set.seed(123)
+  data <- data.frame(
+    gender = sample(c("M", "F"), 100, replace = TRUE),
+    race = sample(c("W", "B"), 100, replace = TRUE),
+    age = rnorm(100),
+    outcome = rnorm(100)
+  )
+
+  # Using older manual strata way to ensure they match
+  strata_result <- make_strata(data, c("gender", "race"))
+  model1 <- fit_maihda(outcome ~ age + (1 | stratum), data = strata_result$data)
+
+  # Using auto strata way
+  model2 <- fit_maihda(outcome ~ age + (1 | gender:race), data = data)
+
+  expect_equal(summary(model1), summary(model2))
+  expect_true(!is.null(model2$strata_info))
+})
+
 test_that("fit_maihda validates inputs", {
   data <- data.frame(x = 1:10, y = 1:10)
-  
+
   # Invalid formula
   expect_error(fit_maihda("not a formula", data = data),
                "must be a formula")
-  
+
   # Invalid data
   expect_error(fit_maihda(y ~ x, data = "not a data frame"),
                "must be a data frame")
-  
+
   # Invalid engine
   expect_error(fit_maihda(y ~ x, data = data, engine = "invalid"),
                "should be one of")

@@ -1,3 +1,112 @@
+maihda_app_required_packages <- function() {
+  c("shiny", "bslib", "DT", "future", "promises", "shinyjs", "plotly", "ggtern")
+}
+
+maihda_app_ternary_plotly <- function(td) {
+  if (!requireNamespace("plotly", quietly = TRUE)) {
+    stop("Package 'plotly' is required to render the interactive ternary plot.",
+         call. = FALSE)
+  }
+
+  required_cols <- c("additive_prop", "interaction_prop", "uncertainty_prop", "label", "n")
+  missing_cols <- setdiff(required_cols, names(td))
+  if (length(missing_cols) > 0) {
+    stop("Ternary plot data is missing required columns: ",
+         paste(missing_cols, collapse = ", "), call. = FALSE)
+  }
+
+  marker_sizes <- pmax(sqrt(td$n) * 2, 4)
+  marker_colors <- as.numeric(as.factor(td$label))
+  hover_text <- paste0(
+    "<b>Stratum:</b> ", td$label, "<br>",
+    "<b>Size (N):</b> ", td$n, "<br>",
+    "<b>Additive:</b> ", round(td$additive_prop * 100, 1), "%<br>",
+    "<b>Intersection-specific:</b> ", round(td$interaction_prop * 100, 1), "%<br>",
+    "<b>Uncertainty:</b> ", round(td$uncertainty_prop * 100, 1), "%"
+  )
+
+  plotly::plot_ly(
+    data = td,
+    type = "scatterternary",
+    mode = "markers",
+    a = td$additive_prop,
+    b = td$interaction_prop,
+    c = td$uncertainty_prop,
+    text = hover_text,
+    hoverinfo = "text",
+    marker = list(
+      size = marker_sizes,
+      color = marker_colors,
+      colorscale = "Viridis",
+      opacity = 0.8,
+      line = list(color = "rgba(0,0,0,0.5)", width = 1)
+    )
+  ) |>
+    plotly::layout(
+      title = "Interactive MAIHDA Strata Effects Decomposition",
+      ternary = list(
+        sum = 1,
+        aaxis = list(title = "Additive", min = 0, linewidth = 2, ticks = "outside", tickvals = seq(0, 1, by = 0.2)),
+        baxis = list(title = "Intersection", min = 0, linewidth = 2, ticks = "outside", tickvals = seq(0, 1, by = 0.2)),
+        caxis = list(title = "Uncertainty", min = 0, linewidth = 2, ticks = "outside", tickvals = seq(0, 1, by = 0.2))
+      ),
+      margin = list(t = 50, b = 50, l = 50, r = 50)
+    )
+}
+
+maihda_app_fit_models <- function(dat, outcome_var, grouping_vars,
+                                  additional_covars = character(),
+                                  family = "gaussian", use_boot = FALSE,
+                                  n_boot = 100, autobin = TRUE,
+                                  engine = "lme4") {
+  if (!is.data.frame(dat)) {
+    stop("'dat' must be a data frame.", call. = FALSE)
+  }
+  if (!is.character(outcome_var) || length(outcome_var) != 1 || !outcome_var %in% names(dat)) {
+    stop("'outcome_var' must name one column in 'dat'.", call. = FALSE)
+  }
+  if (!is.character(grouping_vars) || length(grouping_vars) == 0) {
+    stop("'grouping_vars' must contain at least one column name.", call. = FALSE)
+  }
+
+  additional_covars <- if (is.null(additional_covars)) character() else additional_covars
+  all_required_cols <- unique(c(outcome_var, grouping_vars, additional_covars))
+  missing_cols <- setdiff(all_required_cols, names(dat))
+  if (length(missing_cols) > 0) {
+    stop("Variables not found in data: ", paste(missing_cols, collapse = ", "), call. = FALSE)
+  }
+
+  complete_dat <- dat[stats::complete.cases(dat[, all_required_cols, drop = FALSE]), , drop = FALSE]
+  if (nrow(complete_dat) == 0) {
+    stop("No complete cases remaining after omitting missing values (NAs). Please select different variables.",
+         call. = FALSE)
+  }
+
+  strata_dat <- make_strata(complete_dat, vars = grouping_vars, autobin = autobin)
+  model_dat <- complete_dat
+  model_dat$stratum <- strata_dat$data$stratum
+  attr(model_dat, "strata_info") <- strata_dat$strata_info
+  attr(model_dat, "strata_vars") <- strata_dat$vars
+  attr(model_dat, "strata_sep") <- strata_dat$sep
+  attr(model_dat, "strata_autobin_info") <- strata_dat$autobin_info
+
+  adjusted_fmla <- maihda_formula_with_stratum(outcome_var, c(grouping_vars, additional_covars))
+  null_fmla <- maihda_formula_with_stratum(outcome_var)
+
+  null_model <- fit_maihda(formula = null_fmla, data = model_dat, engine = engine, family = family)
+  adjusted_model <- fit_maihda(formula = adjusted_fmla, data = model_dat, engine = engine, family = family)
+  pvc <- calculate_pvc(null_model, adjusted_model, bootstrap = use_boot, n_boot = n_boot)
+  stepwise <- stepwise_pcv(
+    model_dat,
+    outcome = outcome_var,
+    vars = c(grouping_vars, additional_covars),
+    engine = engine,
+    family = family
+  )
+
+  list(null_model = null_model, model = adjusted_model, pvc = pvc, stepwise = stepwise)
+}
+
 #' Run MAIHDA Shiny Application
 #'
 #' @description
@@ -14,7 +123,7 @@
 #' run_maihda_app()
 #' }
 run_maihda_app <- function() {
-  required_pkgs <- c("shiny", "bslib", "DT", "future", "promises", "haven", "shinyjs")
+  required_pkgs <- maihda_app_required_packages()
   missing_pkgs <- required_pkgs[!vapply(required_pkgs, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))]
 
   if (length(missing_pkgs) > 0) {

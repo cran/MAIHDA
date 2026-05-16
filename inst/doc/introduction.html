@@ -12,7 +12,7 @@
 
 <meta name="author" content="Hamid Bulut" />
 
-<meta name="date" content="2026-04-05" />
+<meta name="date" content="2026-05-16" />
 
 <title>Introduction to MAIHDA</title>
 
@@ -341,7 +341,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 <h1 class="title toc-ignore">Introduction to MAIHDA</h1>
 <h4 class="author">Hamid Bulut</h4>
-<h4 class="date">2026-04-05</h4>
+<h4 class="date">2026-05-16</h4>
 
 
 
@@ -367,7 +367,7 @@ an interactive Shiny Dashboard for code-free analysis.</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;MAIHDA&quot;</span>)</span>
 <span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="co"># Or for the latest development version:</span></span>
 <span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a><span class="co"># install.packages(&quot;remotes&quot;)</span></span>
-<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a><span class="co"># remotes::install_github(&quot;hamidbulut/MAIHDA&quot;)</span></span></code></pre></div>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a><span class="co"># remotes::install_github(&quot;hdbt/MAIHDA&quot;)</span></span></code></pre></div>
 </div>
 <div id="real-world-example-analysis" class="section level2">
 <h2>Real-World Example Analysis</h2>
@@ -375,35 +375,35 @@ an interactive Shiny Dashboard for code-free analysis.</p>
 Nutrition Examination Survey (<code>maihda_health_data</code>). We will
 use this to examine how Body Mass Index (BMI) varies across
 intersectional demographic groups.</p>
-<div id="step-1-create-intersectional-strata" class="section level3">
-<h3>Step 1: Create Intersectional Strata</h3>
-<p>First, use <code>make_strata()</code> to combine multiple social
-categories into a single Random Effect grouping variable:</p>
+<div id="step-1-2-create-intersectional-strata-and-fit-a-null-maihda-model" class="section level3">
+<h3>Step 1 &amp; 2: Create Intersectional Strata and Fit a Null MAIHDA
+Model</h3>
+<p>Use <code>fit_maihda()</code> to combine multiple social categories
+directly in the random effect formula. Providing the variables in the
+random effect combined with <code>:</code> allows the function to
+automatically build the intersectional strata on the fly and fit the
+multilevel model.</p>
 <div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="fu">library</span>(MAIHDA)</span>
 <span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a></span>
 <span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a><span class="co"># Load the built-in NHANES dataset</span></span>
 <span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a><span class="fu">data</span>(<span class="st">&quot;maihda_health_data&quot;</span>)</span>
 <span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a></span>
-<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a><span class="co"># Create strata from Gender, Race, and Education</span></span>
-<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>strata_result <span class="ot">&lt;-</span> <span class="fu">make_strata</span>(maihda_health_data, <span class="at">vars =</span> <span class="fu">c</span>(<span class="st">&quot;Gender&quot;</span>, <span class="st">&quot;Race&quot;</span>, <span class="st">&quot;Education&quot;</span>))</span>
-<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a></span>
-<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a><span class="co"># View the strata structural information</span></span>
-<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a><span class="fu">print</span>(strata_result)</span></code></pre></div>
-</div>
-<div id="step-2-fit-a-null-maihda-model" class="section level3">
-<h3>Step 2: Fit a Null MAIHDA Model</h3>
-<p>Fit a multilevel model using the generated strata. A “Null” model
-contains only the intercept and the strata random effect.</p>
-<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="co"># Fit the initial Null model</span></span>
-<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>model_null <span class="ot">&lt;-</span> <span class="fu">fit_maihda</span>(</span>
-<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  BMI <span class="sc">~</span> <span class="dv">1</span> <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> stratum),</span>
-<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  <span class="at">data =</span> strata_result<span class="sc">$</span>data,</span>
-<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  <span class="at">engine =</span> <span class="st">&quot;lme4&quot;</span></span>
-<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>)</span>
-<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a></span>
-<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a><span class="co"># Summarize the variance components (VPC)</span></span>
-<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>summary_null <span class="ot">&lt;-</span> <span class="fu">summary_maihda</span>(model_null)</span>
-<span id="cb3-10"><a href="#cb3-10" tabindex="-1"></a><span class="fu">print</span>(summary_null)</span></code></pre></div>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a><span class="co"># PVC compares variance across models, so both models must use the same</span></span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a><span class="co"># analytic sample. Keep complete cases for all variables used below.</span></span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>health_complete <span class="ot">&lt;-</span> maihda_health_data[<span class="fu">complete.cases</span>(</span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>  maihda_health_data[, <span class="fu">c</span>(<span class="st">&quot;BMI&quot;</span>, <span class="st">&quot;Age&quot;</span>, <span class="st">&quot;Gender&quot;</span>, <span class="st">&quot;Race&quot;</span>, <span class="st">&quot;Education&quot;</span>, <span class="st">&quot;Poverty&quot;</span>)]</span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>), ]</span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a></span>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a><span class="co"># Fit the initial Null model with auto-generated strata</span></span>
+<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a>model_null <span class="ot">&lt;-</span> <span class="fu">fit_maihda</span>(</span>
+<span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a>  BMI <span class="sc">~</span> <span class="dv">1</span> <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> Gender<span class="sc">:</span>Race<span class="sc">:</span>Education),</span>
+<span id="cb2-15"><a href="#cb2-15" tabindex="-1"></a>  <span class="at">data =</span> health_complete,</span>
+<span id="cb2-16"><a href="#cb2-16" tabindex="-1"></a>  <span class="at">engine =</span> <span class="st">&quot;lme4&quot;</span></span>
+<span id="cb2-17"><a href="#cb2-17" tabindex="-1"></a>)</span>
+<span id="cb2-18"><a href="#cb2-18" tabindex="-1"></a></span>
+<span id="cb2-19"><a href="#cb2-19" tabindex="-1"></a><span class="co"># Summarize the variance components (VPC)</span></span>
+<span id="cb2-20"><a href="#cb2-20" tabindex="-1"></a>summary_null <span class="ot">&lt;-</span> <span class="fu">summary</span>(model_null)</span>
+<span id="cb2-21"><a href="#cb2-21" tabindex="-1"></a><span class="fu">print</span>(summary_null)</span></code></pre></div>
 <p><strong>Interpretation:</strong> The resulting Variance Partition
 Coefficient (VPC or ICC) tells us what percentage of the total variance
 in BMI in the population lies <em>between</em> the intersectional social
@@ -419,29 +419,29 @@ largely explained by the additive characteristics. If the variance
 remains or even <em>increases</em> (Negative PCV), it signifies strong,
 unique intersectional interactions that cannot be explained away by
 simple main effects.</p>
-<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="co"># Fit an adjusted model</span></span>
-<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>model_adj <span class="ot">&lt;-</span> <span class="fu">fit_maihda</span>(</span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  BMI <span class="sc">~</span> Age <span class="sc">+</span> Gender <span class="sc">+</span> Race <span class="sc">+</span> Education <span class="sc">+</span> Poverty <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> stratum),</span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="at">data =</span> strata_result<span class="sc">$</span>data</span>
-<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>)</span>
-<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a></span>
-<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a><span class="co"># Calculate PCV with Parametric Bootstrap Confidence Intervals</span></span>
-<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>pcv_result <span class="ot">&lt;-</span> <span class="fu">calculate_pvc</span>(model_null, model_adj, <span class="at">bootstrap =</span> <span class="cn">TRUE</span>, <span class="at">n_boot =</span> <span class="dv">500</span>)</span>
-<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a><span class="fu">print</span>(pcv_result)</span></code></pre></div>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="co"># Fit an adjusted model</span></span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>model_adj <span class="ot">&lt;-</span> <span class="fu">fit_maihda</span>(</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  BMI <span class="sc">~</span> Age <span class="sc">+</span> Gender <span class="sc">+</span> Race <span class="sc">+</span> Education <span class="sc">+</span> Poverty <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> Gender<span class="sc">:</span>Race<span class="sc">:</span>Education),</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  <span class="at">data =</span> health_complete</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>)</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a></span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a><span class="co"># Calculate PCV with Parametric Bootstrap Confidence Intervals</span></span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>pcv_result <span class="ot">&lt;-</span> <span class="fu">calculate_pvc</span>(model_null, model_adj, <span class="at">bootstrap =</span> <span class="cn">TRUE</span>, <span class="at">n_boot =</span> <span class="dv">500</span>)</span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a><span class="fu">print</span>(pcv_result)</span></code></pre></div>
 </div>
 <div id="step-4-stepwise-pcv-decomposition" class="section level3">
 <h3>Step 4: Stepwise PCV Decomposition</h3>
 <p>Often, researchers want to know exactly <em>which</em> variable
 explained the variance. Use the <code>stepwise_pcv()</code> function to
 add covariates one-by-one and track the variance dynamically.</p>
-<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="co"># Run a stepwise variance decomposition</span></span>
-<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>stepwise_results <span class="ot">&lt;-</span> <span class="fu">stepwise_pcv</span>(</span>
-<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  <span class="at">data =</span> strata_result<span class="sc">$</span>data,</span>
-<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  <span class="at">outcome =</span> <span class="st">&quot;BMI&quot;</span>,</span>
-<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>  <span class="at">vars =</span> <span class="fu">c</span>(<span class="st">&quot;Age&quot;</span>, <span class="st">&quot;Gender&quot;</span>, <span class="st">&quot;Race&quot;</span>, <span class="st">&quot;Education&quot;</span>, <span class="st">&quot;Poverty&quot;</span>)</span>
-<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>)</span>
-<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a></span>
-<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a><span class="fu">print</span>(stepwise_results)</span></code></pre></div>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="co"># Run a stepwise variance decomposition using the prepared data with strata</span></span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>stepwise_results <span class="ot">&lt;-</span> <span class="fu">stepwise_pcv</span>(</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">data =</span> model_null<span class="sc">$</span>original_data,</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="at">outcome =</span> <span class="st">&quot;BMI&quot;</span>,</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  <span class="at">vars =</span> <span class="fu">c</span>(<span class="st">&quot;Age&quot;</span>, <span class="st">&quot;Gender&quot;</span>, <span class="st">&quot;Race&quot;</span>, <span class="st">&quot;Education&quot;</span>, <span class="st">&quot;Poverty&quot;</span>)</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>)</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a></span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a><span class="fu">print</span>(stepwise_results)</span></code></pre></div>
 <p>Negative step PCVs in this table highlight “unmasking” or suppression
 effects: adding a variable caused the intersectional groups to push
 further apart mathematically, revealing hidden structural
@@ -449,14 +449,26 @@ inequalities.</p>
 </div>
 <div id="step-5-visualizations" class="section level3">
 <h3>Step 5: Visualizations</h3>
-<p>The package provides multiple pre-configured visualization options
-for checking your model estimates (using
-<code>plot_maihda()</code>):</p>
-<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="co"># Caterpillar plot of stratum random effects (with 95% CIs)</span></span>
-<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a><span class="fu">plot_maihda</span>(model_adj, <span class="at">type =</span> <span class="st">&quot;caterpillar&quot;</span>)</span>
-<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a></span>
-<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a><span class="co"># Variance partition visualization</span></span>
-<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a><span class="fu">plot_maihda</span>(model_adj, <span class="at">type =</span> <span class="st">&quot;vpc&quot;</span>)</span></code></pre></div>
+<p>The package provides multiple pre-configured, advanced visualization
+options for checking your model estimates natively mirroring the Shiny
+application logic:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="co"># Predicted stratum values with 95% CIs</span></span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a><span class="fu">plot</span>(model_adj, <span class="at">type =</span> <span class="st">&quot;predicted&quot;</span>)</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a></span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a><span class="co"># Variance partition (VPC) visualization</span></span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a><span class="fu">plot</span>(model_adj, <span class="at">type =</span> <span class="st">&quot;vpc&quot;</span>)</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a></span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a><span class="co"># Bivariate risk against stratum-level intersectional effect</span></span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a><span class="fu">plot</span>(model_adj, <span class="at">type =</span> <span class="st">&quot;risk_vs_effect&quot;</span>)</span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a></span>
+<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a><span class="co"># Additive versus Intersectional Effect decomposition</span></span>
+<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a><span class="fu">plot</span>(model_adj, <span class="at">type =</span> <span class="st">&quot;effect_decomp&quot;</span>)</span>
+<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a></span>
+<span id="cb5-13"><a href="#cb5-13" tabindex="-1"></a><span class="co"># Ternary Plot of Variances</span></span>
+<span id="cb5-14"><a href="#cb5-14" tabindex="-1"></a><span class="fu">plot</span>(model_adj, <span class="at">type =</span> <span class="st">&quot;ternary&quot;</span>)</span>
+<span id="cb5-15"><a href="#cb5-15" tabindex="-1"></a></span>
+<span id="cb5-16"><a href="#cb5-16" tabindex="-1"></a><span class="co"># Individual Prediction Deviance Dashboard</span></span>
+<span id="cb5-17"><a href="#cb5-17" tabindex="-1"></a><span class="fu">plot</span>(model_adj, <span class="at">type =</span> <span class="st">&quot;prediction_deviation&quot;</span>)</span></code></pre></div>
 </div>
 </div>
 <div id="interactive-shiny-app" class="section level2">
@@ -466,8 +478,8 @@ Dashboard.</p>
 <p>You can upload your own data (CSV, SPSS <code>.sav</code>, Stata
 <code>.dta</code>), dynamically select variables, and compute Stepwise
 PCV tables and prediction plots.</p>
-<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="co"># Launch the interactive interface</span></span>
-<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a><span class="fu">run_maihda_app</span>()</span></code></pre></div>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="co"># Launch the interactive interface</span></span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a><span class="fu">run_maihda_app</span>()</span></code></pre></div>
 </div>
 <div id="references" class="section level2">
 <h2>References</h2>

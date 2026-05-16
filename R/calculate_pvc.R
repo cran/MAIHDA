@@ -29,9 +29,9 @@
 #' model1, while a negative PVC suggests that model2 has more unexplained
 #' between-stratum variance.
 #'
-#' When bootstrap = TRUE, the function resamples the data with replacement and
-#' refits both models for each bootstrap sample to obtain confidence intervals
-#' for the PVC estimate.
+#' When bootstrap = TRUE, the function uses a parametric bootstrap: it simulates
+#' new responses from model2 and refits both models with \code{lme4::refit()} for
+#' each simulated response to obtain confidence intervals for the PVC estimate.
 #'
 #' @examples
 #' \donttest{
@@ -66,10 +66,7 @@ calculate_pvc <- function(model1, model2, bootstrap = FALSE,
     stop("Both models must use the same engine (lme4 or brms)")
   }
 
-  # Check that models were fit on compatible data
-  if (nrow(model1$data) != nrow(model2$data)) {
-    warning("Models were fit on data with different numbers of observations. Results may not be meaningful.")
-  }
+  validate_pvc_models(model1, model2)
 
   # Extract between-stratum variance from both models
   var1 <- extract_between_variance(model1)
@@ -127,25 +124,102 @@ extract_between_variance <- function(model) {
   fitted_model <- model$model
 
   if (engine == "lme4") {
-    # Extract variance components
-    vc <- lme4::VarCorr(fitted_model)
-    var_random <- as.numeric(vc[[1]][1])  # Between-stratum variance
-    return(var_random)
+    maihda_validate_intercept_only_random_effects_lme4(
+      fitted_model,
+      context = "PVC calculations"
+    )
+    return(maihda_stratum_variance_lme4(fitted_model))
 
   } else if (engine == "brms") {
-    # Verify brms is available
     if (!requireNamespace("brms", quietly = TRUE)) {
       stop("Package 'brms' is required to work with brms models. Please install it with: install.packages('brms')")
     }
-
-    # Extract variance components from brms model
-    vc <- brms::VarCorr(fitted_model)
-    var_random <- vc[[1]]$sd[1, "Estimate"]^2
-    return(var_random)
+    maihda_validate_intercept_only_random_effects_brms(
+      brms::VarCorr(fitted_model),
+      context = "PVC calculations"
+    )
+    return(maihda_stratum_variance_brms(fitted_model))
 
   } else {
     stop("Unsupported engine: ", engine, ". Only 'lme4' and 'brms' are supported.")
   }
+}
+
+validate_pvc_models <- function(model1, model2) {
+  response1 <- paste(deparse(model1$formula[[2]]), collapse = "")
+  response2 <- paste(deparse(model2$formula[[2]]), collapse = "")
+  if (!identical(response1, response2)) {
+    stop("PVC requires both models to use the same outcome. ",
+         "Model 1 uses '", response1, "' and Model 2 uses '", response2, "'.",
+         call. = FALSE)
+  }
+
+  fam1 <- maihda_family(model1$model)
+  fam2 <- maihda_family(model2$model)
+  fam_key1 <- c(
+    family = if (!is.null(fam1$family)) fam1$family else NA_character_,
+    link = if (!is.null(fam1$link)) fam1$link else NA_character_
+  )
+  fam_key2 <- c(
+    family = if (!is.null(fam2$family)) fam2$family else NA_character_,
+    link = if (!is.null(fam2$link)) fam2$link else NA_character_
+  )
+  if (!identical(fam_key1, fam_key2)) {
+    stop("PVC requires both models to use the same model family and link. ",
+         "Model 1 uses ", fam_key1[["family"]], "(", fam_key1[["link"]], ") and ",
+         "Model 2 uses ", fam_key2[["family"]], "(", fam_key2[["link"]], ").",
+         call. = FALSE)
+  }
+
+  n1 <- maihda_nobs(model1$model)
+  n2 <- maihda_nobs(model2$model)
+  if (is.finite(n1) && is.finite(n2) && n1 != n2) {
+    stop("PVC requires both models to use the same analytic sample. ",
+         "Model 1 used ", n1, " observations and Model 2 used ", n2, ".",
+         call. = FALSE)
+  }
+
+  rows1 <- maihda_row_ids(model1$model)
+  rows2 <- maihda_row_ids(model2$model)
+  if (!is.null(rows1) && !is.null(rows2) && !identical(rows1, rows2)) {
+    stop("PVC requires both models to use the same analytic sample in the same row order.",
+         call. = FALSE)
+  }
+
+  if (!"stratum" %in% names(model1$data) || !"stratum" %in% names(model2$data)) {
+    stop("PVC requires both models to include a 'stratum' column in their analytic data.",
+         call. = FALSE)
+  }
+  row_strata1 <- as.character(model1$data$stratum)
+  row_strata2 <- as.character(model2$data$stratum)
+  if (!identical(row_strata1, row_strata2)) {
+    stop("PVC requires both models to assign each analytic row to the same stratum.",
+         call. = FALSE)
+  }
+
+  strata1 <- unique(as.character(model1$data$stratum))
+  strata2 <- unique(as.character(model2$data$stratum))
+  strata1 <- sort(strata1[!is.na(strata1)])
+  strata2 <- sort(strata2[!is.na(strata2)])
+  if (!identical(strata1, strata2)) {
+    stop("PVC requires both models to use the same stratum definitions.",
+         call. = FALSE)
+  }
+
+  info1 <- model1$strata_info
+  info2 <- model2$strata_info
+  if (!is.null(info1) && !is.null(info2) &&
+      all(c("stratum", "label") %in% names(info1)) &&
+      all(c("stratum", "label") %in% names(info2))) {
+    labels1 <- info1$label[order(as.character(info1$stratum))]
+    labels2 <- info2$label[order(as.character(info2$stratum))]
+    if (!identical(labels1, labels2)) {
+      stop("PVC requires both models to use the same stratum labels.",
+           call. = FALSE)
+    }
+  }
+
+  invisible(TRUE)
 }
 
 #' Bootstrap PVC
@@ -180,25 +254,25 @@ bootstrap_pvc <- function(model1, model2, n_boot, conf_level) {
       boot_model2 <- lme4::refit(model2$model, newresp = sim_data[[i]])
 
       # Extract variances
-      vc1 <- lme4::VarCorr(boot_model1)
-      var1 <- as.numeric(vc1[[1]][1])
-
-      vc2 <- lme4::VarCorr(boot_model2)
-      var2 <- as.numeric(vc2[[1]][1])
+      var1 <- maihda_stratum_variance_lme4(boot_model1)
+      var2 <- maihda_stratum_variance_lme4(boot_model2)
 
       # Calculate PVC
-      pvc_boot[i] <- (var1 - var2) / var1
+      pvc_boot[i] <- if (is.finite(var1) && var1 > 0) (var1 - var2) / var1 else NA_real_
     }, error = function(e) {
       pvc_boot[i] <- NA
     })
   }
 
   # Remove NAs
-  pvc_boot <- pvc_boot[!is.na(pvc_boot)]
+  pvc_boot <- pvc_boot[is.finite(pvc_boot)]
 
   if (length(pvc_boot) < n_boot * 0.5) {
     warning(sprintf("More than 50%% of bootstrap samples failed. CI may be unreliable. Only %d/%d successful.",
                     length(pvc_boot), n_boot))
+  }
+  if (length(pvc_boot) == 0) {
+    stop("All PVC bootstrap refits failed or produced zero model-1 stratum variance.")
   }
 
   # Calculate confidence interval
@@ -267,6 +341,11 @@ print.pvc_result <- function(x, ...) {
 #' @return A data.frame showing the sequential models, the between-stratum
 #'   variance at each step, and both the step-specific and total PCV.
 #'
+#' @details
+#' All models are fit on the complete cases for `outcome`, `stratum`, and all
+#' variables in `vars` so that each sequential variance comparison uses the same
+#' analytic sample.
+#'
 #' @examples
 #' \donttest{
 #' strata_result <- make_strata(maihda_sim_data, c("gender", "race"))
@@ -280,6 +359,28 @@ stepwise_pcv <- function(data, outcome, vars, engine = "lme4", family = "gaussia
   if (!"stratum" %in% names(data)) {
     stop("Variable 'stratum' not found in data. Please run make_strata() first.")
   }
+  required_vars <- unique(c(outcome, "stratum", vars))
+  missing_vars <- setdiff(required_vars, names(data))
+  if (length(missing_vars) > 0) {
+    stop("Variables not found in data: ", paste(missing_vars, collapse = ", "))
+  }
+
+  strata_info <- attr(data, "strata_info")
+  strata_vars <- attr(data, "strata_vars")
+  strata_sep <- attr(data, "strata_sep")
+  strata_autobin_info <- attr(data, "strata_autobin_info")
+
+  complete_idx <- stats::complete.cases(data[, required_vars, drop = FALSE])
+  if (!any(complete_idx)) {
+    stop("No complete cases remain after filtering outcome, stratum, and stepwise variables.")
+  }
+  if (!all(complete_idx)) {
+    data <- data[complete_idx, , drop = FALSE]
+    attr(data, "strata_info") <- strata_info
+    attr(data, "strata_vars") <- strata_vars
+    attr(data, "strata_sep") <- strata_sep
+    attr(data, "strata_autobin_info") <- strata_autobin_info
+  }
 
   results <- data.frame(
     Step = integer(length(vars) + 1),
@@ -292,7 +393,7 @@ stepwise_pcv <- function(data, outcome, vars, engine = "lme4", family = "gaussia
   )
 
   # Model 0: Null Model
-  null_fmla <- as.formula(paste(outcome, "~ 1 + (1 | stratum)"))
+  null_fmla <- maihda_formula_with_stratum(outcome)
   null_mod <- fit_maihda(null_fmla, data, engine = engine, family = family)
   null_var <- extract_between_variance(null_mod)
 
@@ -314,8 +415,8 @@ stepwise_pcv <- function(data, outcome, vars, engine = "lme4", family = "gaussia
     var <- vars[i]
     current_vars <- c(current_vars, var)
 
-    fmla_str <- paste(outcome, "~", paste(current_vars, collapse = " + "), "+ (1 | stratum)")
-    mod <- fit_maihda(as.formula(fmla_str), data, engine = engine, family = family)
+    fmla <- maihda_formula_with_stratum(outcome, current_vars)
+    mod <- fit_maihda(fmla, data, engine = engine, family = family)
 
     curr_var <- extract_between_variance(mod)
 
