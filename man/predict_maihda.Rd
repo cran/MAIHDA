@@ -27,7 +27,10 @@ For backward compatibility, "link" or "response" may also be passed here
 and will be interpreted as individual-level predictions on that scale.}
 
 \item{scale}{Character string specifying the prediction scale for
-individual-level predictions: "response" (default) or "link".}
+individual-level predictions: "response" (default) or "link". For a
+cumulative (ordinal) model the "link" scale is the latent location
+\eqn{\eta} and the "response" scale is the \emph{expected category score}
+\eqn{\sum_k k P(Y = k)} (categories scored 1..K in their declared order).}
 
 \item{...}{Additional arguments passed to predict method of underlying model.}
 }
@@ -36,7 +39,11 @@ Depending on type:
   \itemize{
     \item For "individual": A numeric vector of predicted values on the
       requested scale
-    \item For "strata": A data frame with stratum ID and predicted random effect
+    \item For "strata": A data frame with stratum ID and predicted random
+      effect. When \code{newdata} is supplied, the result is restricted to the
+      strata present in \code{newdata} (and a stratum the model never saw is an
+      error, as for "individual"); when \code{newdata} is \code{NULL}, every
+      training stratum is returned.
   }
 }
 \description{

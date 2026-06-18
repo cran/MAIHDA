@@ -2,13 +2,13 @@ Package: MAIHDA
 Type: Package
 Title: Multilevel Analysis of Individual Heterogeneity and
         Discriminatory Accuracy
-Version: 0.1.8
+Version: 0.1.11
 Authors@R: c(
     person("Hamid", "Bulut", email = "me@hamidbulut.com", role = c("aut", "cre"))
     )
 Description: Provides a comprehensive toolkit for conducting Multilevel Analysis
     of Individual Heterogeneity and Discriminatory Accuracy (MAIHDA). Methods
-    are described in Merlo (2018) <doi:10.1016/j.socscimed.2017.12.018> and
+    are described in Merlo (2018) <doi:10.1016/j.socscimed.2017.12.026> and
     Evans et al. (2018) <doi:10.1016/j.socscimed.2017.11.011>. Automatically
     generates intersectional strata, fits analytical models, extracts statistics,
     and produces visualizations.
@@ -16,19 +16,19 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 LazyData: true
 Depends: R (>= 4.1.0)
-Imports: lme4 (>= 1.1-27), reformulas, ggplot2 (>= 3.3.0), dplyr (>=
-        1.0.0), tidyr (>= 1.1.0), stats, rlang (>= 0.4.0), patchwork,
-        ggrepel, tidyselect, tibble
-Suggests: shiny, bslib, DT, future, promises, plotly, haven, shinyjs,
-        brms (>= 2.15.0), testthat (>= 3.0.0), shinytest2, knitr, MASS,
-        rmarkdown, boot (>= 1.3-20), ggtern
+Imports: lme4 (>= 1.1-27), reformulas, ggplot2 (>= 3.4.0), dplyr (>=
+        1.0.0), tidyr (>= 1.1.0), generics, stats, rlang (>= 0.4.0),
+        patchwork, ggrepel, tidyselect, tibble
+Suggests: shiny, bslib (>= 0.7.0), DT, future, promises, plotly, haven,
+        shinyjs, shinycssloaders, brms (>= 2.15.0), WeMix (>= 4.0.0),
+        ordinal, testthat (>= 3.0.0), knitr, MASS, rmarkdown, ggtern
 VignetteBuilder: knitr
 URL: https://github.com/hdbt/MAIHDA, https://hdbt.github.io/MAIHDA/
 BugReports: https://github.com/hdbt/MAIHDA/issues
 RoxygenNote: 7.3.3
 NeedsCompilation: no
-Packaged: 2026-05-16 15:33:03 UTC; hamid
+Packaged: 2026-06-18 06:39:02 UTC; hamid
 Author: Hamid Bulut [aut, cre]
 Maintainer: Hamid Bulut <me@hamidbulut.com>
 Repository: CRAN
-Date/Publication: 2026-05-16 16:10:02 UTC
+Date/Publication: 2026-06-18 07:30:02 UTC

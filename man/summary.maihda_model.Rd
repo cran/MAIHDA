@@ -4,33 +4,122 @@
 \alias{summary.maihda_model}
 \title{Summarize MAIHDA Model}
 \usage{
-\method{summary}{maihda_model}(object, bootstrap = FALSE, n_boot = 1000, conf_level = 0.95, ...)
+\method{summary}{maihda_model}(
+  object,
+  bootstrap = FALSE,
+  n_boot = 1000,
+  conf_level = 0.95,
+  response_vpc = FALSE,
+  seed = NULL,
+  ...
+)
 }
 \arguments{
 \item{object}{A maihda_model object from \code{fit_maihda()}.}
 
-\item{bootstrap}{Logical indicating whether to compute bootstrap confidence
-intervals for VPC/ICC. Default is FALSE. Currently supported for lme4
-models only.}
+\item{bootstrap}{Logical indicating whether to compute parametric bootstrap
+confidence intervals for VPC/ICC. Default is FALSE. Supported for lme4
+models only; \code{brms} models always return a posterior credible interval
+(see Details), so \code{bootstrap = TRUE} is rejected for them.
+For a negative-binomial model (\code{glmer.nb}) the bootstrap refits via
+\code{lme4::refit()}, which holds the dispersion parameter theta fixed at
+its original estimate, so the interval is conditional on the estimated
+theta (theta's own sampling uncertainty is not propagated). The
+\code{ordinal} (clmm) engine has no simulate/refit machinery, so
+\code{bootstrap = TRUE} is rejected there (use \code{engine = "brms"} for
+interval estimates).}
 
 \item{n_boot}{Number of bootstrap samples if bootstrap = TRUE. Default is 1000.}
 
-\item{conf_level}{Confidence level for bootstrap intervals. Default is 0.95.}
+\item{conf_level}{Confidence level for the VPC/ICC interval -- the lme4
+bootstrap CI or the brms posterior credible interval. Default is 0.95.}
+
+\item{response_vpc}{Logical; for a binomial (lme4) model, also compute the
+response-scale VPC (\code{\link{maihda_vpc_response}}) and attach it as the
+\code{vpc_response} slot. It is estimated by simulation, so it is opt-in (default
+\code{FALSE}) and uses \code{seed} for reproducibility. Ignored for other
+families/engines.}
+
+\item{seed}{Optional integer seed for the response-scale VPC simulation when
+\code{response_vpc = TRUE}.}
 
 \item{...}{Additional arguments (not currently used).}
 }
 \value{
 A maihda_summary object containing:
-  \item{vpc}{Variance Partition Coefficient (ICC) with optional CI}
-  \item{variance_components}{Data frame of variance components}
+  \item{vpc}{Variance Partition Coefficient (ICC); for lme4 with
+    \code{bootstrap = TRUE} and for all brms models this includes
+    \code{ci_lower}/\code{ci_upper}/\code{conf_level}. For a contextual
+    cross-classified fit this is the \emph{between-stratum} share of all
+    unexplained variance (net of the context)}
+  \item{variance_components}{Data frame of variance components. For a
+    contextual cross-classified fit (\code{fit_maihda(context = )}) each
+    context appears as its own \code{Context: <name>} row}
+  \item{context}{For a contextual cross-classified fit, the stratum vs.
+    context partition: per-context variances and shares, the contexts' total
+    share (\code{vpc_context_total}, with an interval when bootstrapped or for
+    brms), and the between-stratum share (\code{vpc_stratum}); \code{NULL}
+    otherwise}
+  \item{discriminatory_accuracy}{For a binomial/Bernoulli outcome, the
+    \code{maihda_da} object (AUC + MOR) from
+    \code{\link{maihda_discriminatory_accuracy}}; \code{NULL} otherwise (and for a
+    cross-classified fit, whose single-stratum between-variance the MOR needs is
+    not defined across crossed random effects)}
+  \item{vpc_response}{The response-scale VPC (\code{maihda_vpc_response}) when
+    \code{response_vpc = TRUE} for a binomial lme4 model; \code{NULL} otherwise}
   \item{stratum_estimates}{Data frame of stratum-specific random effects with labels if available}
   \item{fixed_effects}{Fixed effects estimates}
+  \item{thresholds}{For a cumulative (ordinal) clmm fit, the threshold (cut
+    point) estimates with standard errors -- the cumulative model's
+    "intercepts"; NULL otherwise}
   \item{model_summary}{Original model summary}
+  \item{diagnostics}{Fit-quality diagnostics (singular fit / convergence)
+    carried over from the fitted model and reported by the print method}
 }
 \description{
 Provides a summary of a MAIHDA model including variance partition coefficients
 (VPC/ICC) and stratum-specific estimates.
 }
+\note{
+For \code{lme4} models a VPC/ICC interval is obtained from a parametric
+bootstrap (\code{bootstrap = TRUE}). For \code{brms} models the VPC/ICC is
+summarised directly from the posterior draws: the reported estimate is the
+posterior median of the per-draw VPC (\eqn{E[\sigma^2]}-based, not the biased
+\eqn{E[\sigma]^2}) and the interval is a central credible interval at
+\code{conf_level} (default 95\%), so no \code{bootstrap} argument is needed.
+The variance-components table reports the posterior-mean variance components,
+so the stratum proportion shown there may differ slightly from the headline
+VPC because the median of a ratio is not the ratio of means. For non-Gaussian
+\code{brms} families the level-1 (residual) variance uses the usual
+latent-scale approximation; for \code{poisson(log)} it is evaluated at the
+posterior-mean fitted values rather than per draw to avoid an expensive
+\eqn{ndraws \times nobs} computation.
+}
+\section{Interpreting the VPC/ICC}{
+ The VPC is the between-stratum variance
+  divided by the total \emph{unexplained} variance. For the canonical
+  single-stratum model that denominator is between-stratum + residual, but if the
+  model includes additional random effects (e.g. \code{(1 | site)}) their
+  variance is included in the denominator too (between-stratum + other random
+  effects + residual), so the VPC is the between-stratum \emph{share} of all
+  unexplained variance. It is a conditional/residual ICC that excludes variance
+  captured by the fixed effects, so for models with covariates it is conditional
+  on them. It is most commonly read from the null model
+  \code{outcome ~ 1 + (1 | stratum)}, where it is the total between-stratum
+  share. For non-Gaussian families the level-1 (residual) variance uses a
+  latent/distributional approximation (\eqn{\pi^2/3} for logistic,
+  \eqn{\log(1 + 1/\mu)} for Poisson per Stryhn et al. 2006, and
+  \eqn{\log(1 + 1/\mu + 1/\theta)} for the negative binomial per Nakagawa,
+  Johnson & Schielzeth 2017), so the
+  VPC is on that latent scale; for a \emph{weighted} Gaussian model the level-1
+  variance is the mean conditional residual variance,
+  \eqn{\bar{\sigma^2 / w_i}}, since the per-observation residual variance is
+  \eqn{\sigma^2 / w_i}. The stratum random effects represent the total
+  between-stratum deviation; they equal the \emph{pure} intersectional
+  (interaction) component only when the additive main effects of the strata
+  variables are included in the model.
+}
+
 \examples{
 \donttest{
 strata_result <- make_strata(maihda_sim_data, vars = c("gender", "race"))

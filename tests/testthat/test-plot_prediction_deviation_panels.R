@@ -70,6 +70,26 @@ test_that("binomial fallback residuals stay on the deviance scale", {
   expect_equal(resids, expected)
 })
 
+test_that("binomial residuals align to supplied row order", {
+  set.seed(127)
+  df <- data.frame(x = rnorm(80))
+  df$y <- rbinom(80, 1, plogis(-0.2 + 0.8 * df$x))
+  m <- glm(y ~ x, data = df, family = binomial)
+  shuffled <- df[sample(seq_len(nrow(df))), , drop = FALSE]
+
+  fitted <- MAIHDA:::maihda_prediction_panel_fitted(m, shuffled, "binomial")$fit
+  obs <- MAIHDA:::maihda_binomial_observed_01(shuffled$y, nrow(shuffled))
+  resids <- MAIHDA:::maihda_prediction_panel_binomial_residuals(
+    m,
+    shuffled,
+    fitted,
+    obs
+  )
+  expected <- MAIHDA:::maihda_binomial_abs_deviance_residual(obs, fitted)
+
+  expect_equal(resids, expected)
+})
+
 test_that("plot_prediction_deviation_panels handles factor binomial outcomes without coercion warnings", {
   set.seed(456)
   df <- data.frame(
@@ -128,8 +148,61 @@ test_that("prediction deviation auto-detects brmsfit families", {
     list(family = structure(list(family = "cumulative", link = "logit"), class = "family")),
     class = "brmsfit"
   )
+  fake_poisson <- structure(
+    list(family = structure(list(family = "poisson", link = "log"), class = "family")),
+    class = "brmsfit"
+  )
 
   expect_equal(MAIHDA:::maihda_prediction_panel_auto_type(fake_bernoulli), "binomial")
   expect_equal(MAIHDA:::maihda_prediction_panel_auto_type(fake_gaussian), "gaussian")
   expect_equal(MAIHDA:::maihda_prediction_panel_auto_type(fake_ordinal), "ordinal")
+  expect_equal(MAIHDA:::maihda_prediction_panel_auto_type(fake_poisson), "poisson")
+})
+
+test_that("ordinal stratum surprise averages per-observation surprise (log loss)", {
+  skip_if_not_installed("MASS")
+  set.seed(2108)
+  n <- 300
+  d <- data.frame(stratum = factor(rep(seq_len(6), each = 50)), x = rnorm(n))
+  eta <- 0.6 * d$x + rnorm(6, sd = 0.8)[d$stratum]
+  d$y <- factor(findInterval(eta + rlogis(n), c(-0.8, 0.8)),
+                labels = c("low", "mid", "high"), ordered = TRUE)
+  m <- MASS::polr(y ~ x, data = d, Hess = TRUE)
+
+  p <- plot_prediction_deviation_panels(m, d, type = "ordinal",
+                                        ordinal_mode = "surprise")
+  plotted <- p[[2]]$data            # the surprise panel's data, per stratum
+
+  # Reference: per-observation surprise -log(P(observed)), averaged per stratum.
+  probs <- predict(m, type = "probs")
+  obs <- as.character(d$y)
+  p_obs <- vapply(seq_len(nrow(d)),
+                  function(i) probs[i, match(obs[i], colnames(probs))], numeric(1))
+  ref <- tapply(-log(p_obs), d$stratum, mean)
+
+  m_plot <- stats::setNames(plotted$surprise, as.character(plotted$stratum))
+  common <- intersect(names(m_plot), names(ref))
+  p_mean <- tapply(p_obs, d$stratum, mean)
+  expect_gt(length(common), 0)
+  expect_equal(as.numeric(m_plot[common]), as.numeric(ref[common]), tolerance = 1e-6)
+  # The mean-of-logs differs from the (incorrect) log-of-mean it replaced.
+  expect_false(isTRUE(all.equal(as.numeric(m_plot[common]),
+                                as.numeric(-log(p_mean[common])))))
+})
+
+test_that("Poisson prediction panels use response-scale (count) fitted values", {
+  set.seed(2005)
+  df <- data.frame(x = rnorm(150))
+  df$y <- rpois(150, lambda = exp(1 + 0.3 * df$x))
+  m <- glm(y ~ x, data = df, family = poisson)
+
+  # Poisson is no longer routed through the Gaussian (link-scale) branch.
+  expect_equal(MAIHDA:::maihda_prediction_panel_auto_type(m), "poisson")
+
+  fitted_used <- MAIHDA:::maihda_prediction_panel_fitted(m, df, "poisson")$fit
+  expect_equal(fitted_used, unname(predict(m, type = "response")), tolerance = 1e-8)
+  # ...and NOT the link (log) scale the old Gaussian routing produced.
+  expect_false(isTRUE(all.equal(fitted_used, unname(predict(m, type = "link")))))
+
+  expect_s3_class(plot_prediction_deviation_panels(m, df), "patchwork")
 })

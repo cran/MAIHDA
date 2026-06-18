@@ -244,7 +244,7 @@ test_that("calculate_pvc print method works", {
   
   # Print should work without error
   expect_output(print(pvc_result), "Proportional Change in Variance")
-  expect_output(print(pvc_result), "PVC:")
+  expect_output(print(pvc_result), "PCV:")
   expect_output(print(pvc_result), "Between-stratum variance:")
 })
 
@@ -310,4 +310,54 @@ test_that("calculate_pvc handles zero variance error", {
   # Should error due to zero/negative variance
   expect_error(calculate_pvc(model1, model2),
                "Between-stratum variance")
+})
+
+test_that("maihda_bootstrap_ci requires a minimum number of successful draws", {
+  expect_error(
+    MAIHDA:::maihda_bootstrap_ci(numeric(0), n_boot = 100, conf_level = 0.95, what = "VPC"),
+    "All"
+  )
+  expect_error(
+    MAIHDA:::maihda_bootstrap_ci(rep(0.5, 5), n_boot = 100, conf_level = 0.95, what = "VPC"),
+    "at least"
+  )
+  ci <- MAIHDA:::maihda_bootstrap_ci(seq(0, 1, length.out = 50), n_boot = 100, conf_level = 0.95)
+  expect_length(ci, 2)
+  expect_true(ci[1] < ci[2])
+})
+
+test_that("calculate_pvc rejects models fitted to unrelated data of the same shape", {
+  mk <- function(seed) {
+    set.seed(seed)
+    d <- data.frame(stratum = factor(rep(seq_len(8), each = 20)), x = rnorm(160))
+    d$y <- 1 + 0.3 * d$x + rnorm(8, sd = 0.7)[d$stratum] + rnorm(160, sd = 0.4)
+    fit_maihda(y ~ x + (1 | stratum), data = d)
+  }
+  # Same n, strata and default 1:160 row names, but different outcome values.
+  m1 <- mk(101)
+  m2 <- mk(202)
+  expect_error(calculate_pvc(m1, m2), "outcome values differ")
+})
+
+test_that("calculate_pvc validates bootstrap arguments before model comparison", {
+  fake_model <- structure(
+    list(engine = "lme4"),
+    class = "maihda_model"
+  )
+
+  expect_error(
+    calculate_pvc(fake_model, fake_model, bootstrap = c(TRUE, FALSE)),
+    "'bootstrap' must be TRUE or FALSE",
+    fixed = TRUE
+  )
+  expect_error(
+    calculate_pvc(fake_model, fake_model, bootstrap = TRUE, n_boot = 0),
+    "'n_boot' must be a single whole number >= 10",
+    fixed = TRUE
+  )
+  expect_error(
+    calculate_pvc(fake_model, fake_model, bootstrap = TRUE, conf_level = 1),
+    "'conf_level' must be a single number between 0 and 1",
+    fixed = TRUE
+  )
 })

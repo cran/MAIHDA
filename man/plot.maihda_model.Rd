@@ -7,9 +7,11 @@
 \method{plot}{maihda_model}(
   x,
   type = c("all", "vpc", "obs_vs_shrunken", "predicted", "risk_vs_effect",
-    "effect_decomp", "ternary", "prediction_deviation"),
+    "effect_decomp", "ternary", "prediction_deviation", "context_vpc", "vpc_trajectory",
+    "trajectories"),
   summary_obj = NULL,
   n_strata = 50,
+  highlight_interactions = FALSE,
   ...
 )
 }
@@ -19,25 +21,57 @@
 \item{type}{Character string specifying plot type:
 \itemize{
   \item "vpc": Variance partition coefficient visualization
-  \item "obs_vs_shrunken": Observed vs. shrunken stratum means
+  \item "obs_vs_shrunken": Observed vs. shrunken stratum means. The y-axis
+    (model-based estimate) includes the fixed effects, so for a
+    covariate-adjusted model the distance from the diagonal reflects both
+    shrinkage \emph{and} covariate adjustment, not shrinkage alone; it is a
+    pure shrinkage view only for an intercept-only (null) model
   \item "predicted": Predicted values for each stratum with confidence intervals
-  \item "risk_vs_effect": Quadrant scatterplot comparing overall risk to intersectional effect
+  \item "risk_vs_effect": Quadrant scatterplot of each stratum's mean predicted outcome against its random effect
   \item "effect_decomp": Visualizes additive vs intersectional deviation from global mean
-  \item "ternary": Ternary plot analyzing the dimensional breakdown of variance
+  \item "ternary": Ternary diagnostic of the relative additive, intersectional, and uncertainty signals per stratum (a normalized-magnitude diagnostic, not a variance decomposition)
   \item "prediction_deviation": Detailed deviation panels for individuals or strata
+  \item "context_vpc": Stratum vs. context variance bars for a contextual
+    cross-classified fit (\code{fit_maihda(context = )}); errors otherwise
+  \item "vpc_trajectory": Time-varying VPC/ICC curve for a \strong{longitudinal}
+    fit (\code{fit_maihda(id =, time =)}); errors otherwise. For a longitudinal
+    model \code{"vpc"} and \code{"all"} also route here
+  \item "trajectories": Predicted per-stratum mean trajectories over time
+    (longitudinal fits only)
   \item "all": Generate all available plots (default if not specified)
 }}
 
 \item{summary_obj}{Optional maihda_summary object from \code{summary()}.
 If NULL, will be computed.}
 
-\item{n_strata}{Maximum number of strata to display in predicted plot.
-Default is 50. Use NULL for all strata.}
+\item{n_strata}{Maximum number of strata to display in the predicted plot.
+When there are more strata than this, the first \code{n_strata} (in stratum
+order) are shown and the plot caption notes how many were omitted. Default
+is 50. Use NULL for all strata.}
+
+\item{highlight_interactions}{Highlight the strata that carry a credibly
+non-zero intersectional interaction (from \code{\link{maihda_interactions}})
+on the BLUP-based views (\code{"effect_decomp"}, \code{"predicted"},
+\code{"obs_vs_shrunken"}); other views ignore it. \code{FALSE} (default) off;
+\code{TRUE} computes the flags with \code{maihda_interactions()} defaults; or
+pass a multiple-testing method such as \code{"BH"} or a
+\code{maihda_interactions} object to reuse a specific \code{conf_level}/
+\code{adjust}. For the pure-interaction reading the model should be the
+adjusted (or crossed-dimensions) model -- e.g. via
+\code{plot()} on a \code{\link{maihda}} analysis, which routes these views to
+the adjusted model automatically.}
 
 \item{...}{Additional arguments (not currently used).}
 }
 \value{
-A ggplot2 object, or a list of ggplot2 objects if type = "all".
+For a single \code{type}, a \pkg{ggplot2} object that you can extend
+  with the usual \code{+} grammar (themes, \code{\link[ggplot2]{labs}()},
+  added layers, or a replacement fill/colour scale). Two types return a richer
+  object: \code{"prediction_deviation"} returns a \pkg{patchwork} of two
+  panels (theme every panel at once with \code{& theme_*()}), and
+  \code{"ternary"} returns a \pkg{ggtern} object (use the
+  \code{ggtern::theme_*()} family rather than the standard ggplot2 themes).
+  \code{type = "all"} returns a named list of ggplot2 objects.
 }
 \description{
 Creates various plots for visualizing MAIHDA model results including
@@ -52,8 +86,14 @@ model <- fit_maihda(health_outcome ~ age + (1 | stratum), data = strata_result$d
 # VPC plot
 plot(model, type = "vpc")
 
-# Generate all plots
+# Single-type plots are ggplot objects -- restyle them with ggplot2:
+plot(model, type = "vpc") +
+  ggplot2::theme_classic() +
+  ggplot2::labs(title = "Variance partition, restyled")
+
+# Generate all plots (a named list); pick one out to restyle it:
 plots <- plot(model)
+plots$predicted + ggplot2::theme_bw()
 }
 
 }

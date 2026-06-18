@@ -2,7 +2,7 @@
 % Please edit documentation in R/calculate_pvc.R
 \name{calculate_pvc}
 \alias{calculate_pvc}
-\title{Calculate Proportional Change in Between-Stratum Variance (PVC)}
+\title{Calculate Proportional Change in Between-Stratum Variance (PCV)}
 \usage{
 calculate_pvc(
   model1,
@@ -20,7 +20,7 @@ reference model (typically a simpler or baseline model).}
 comparison model (typically a more complex model with additional predictors).}
 
 \item{bootstrap}{Logical indicating whether to compute bootstrap confidence
-intervals for PVC. Default is FALSE.}
+intervals for the PCV. Default is FALSE.}
 
 \item{n_boot}{Number of bootstrap samples if bootstrap = TRUE. Default is 1000.}
 
@@ -36,21 +36,42 @@ A list containing:
   \item{bootstrap}{Logical indicating if bootstrap was used}
 }
 \description{
-Calculates the proportional change in between-stratum variance (PVC) between
-two MAIHDA models. The PVC measures how much the between-stratum variance
+Calculates the proportional change in between-stratum variance (PCV) between
+two MAIHDA models. The PCV measures how much the between-stratum variance
 changes when moving from one model to another, and is calculated as:
-PVC = (Var_model1 - Var_model2) / Var_model1
+PCV = (Var_model1 - Var_model2) / Var_model1.
+(The function and result object retain the historical "pvc" naming;
+\dQuote{PVC} and \dQuote{PCV} refer to the same quantity.)
 }
 \details{
-The PVC is interpreted as the proportional reduction (or increase if negative)
-in between-stratum variance when moving from model1 to model2. A positive PVC
-indicates that model2 explains some of the between-stratum variance present in
-model1, while a negative PVC suggests that model2 has more unexplained
-between-stratum variance.
+The PVC is the proportional change in between-stratum variance when moving from
+model1 to model2: a positive value means model2 has lower between-stratum
+variance, a negative value means higher. It is the share of model1's
+between-stratum variance \emph{explained} by model2 only in the canonical nested
+case, where model2 adds fixed-effect predictors to model1 on the same outcome,
+analytic sample and strata. The function does not require nesting, so for
+non-nested models the PVC is simply a model-dependent difference in variance,
+not an explained proportion.
+
+\strong{REML vs ML.} \code{lmer} fits Gaussian models by REML, whose
+between-stratum variance estimate is \emph{not} comparable across models with
+different fixed effects -- exactly the canonical null-vs-adjusted PCV, where the
+adjusted model adds the dimensions' main effects. \code{calculate_pvc()} therefore
+refits any REML \code{lmer} model with maximum likelihood
+(\code{\link[lme4]{refitML}}) before reading the variances (and before the
+parametric bootstrap, so the interval matches), matching \code{\link{maihda_ic}}
+and \code{anova()} on \code{lme4} models. Using REML estimates here biases the PCV
+(it overstates the residual between-stratum variance of the adjusted model). GLMM
+fits (\code{glmer}) and the brms/wemix/ordinal engines are already on the
+maximum-likelihood scale and are unaffected; single-model VPC/ICC summaries keep
+their REML fit, since that comparison-free quantity is not subject to the pitfall.
 
 When bootstrap = TRUE, the function uses a parametric bootstrap: it simulates
 new responses from model2 and refits both models with \code{lme4::refit()} for
 each simulated response to obtain confidence intervals for the PVC estimate.
+For negative-binomial models (\code{glmer.nb}) \code{refit()} holds the
+dispersion parameter theta fixed at its original estimate, so the interval is
+conditional on the estimated theta.
 }
 \examples{
 \donttest{

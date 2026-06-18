@@ -9,7 +9,8 @@ compare_maihda(
   model_names = NULL,
   bootstrap = FALSE,
   n_boot = 1000,
-  conf_level = 0.95
+  conf_level = 0.95,
+  ic = TRUE
 )
 }
 \arguments{
@@ -17,36 +18,59 @@ compare_maihda(
 
 \item{model_names}{Optional character vector of names for the models.}
 
-\item{bootstrap}{Logical indicating whether to compute bootstrap confidence
-intervals. Default is FALSE.}
+\item{bootstrap}{Logical; for \strong{lme4} models, compute parametric-bootstrap
+VPC confidence intervals. Default FALSE. It does not apply to \strong{brms}
+models, which always return a posterior credible interval (so passing
+\code{bootstrap = TRUE} with brms models errors) -- their interval is included
+regardless.}
 
 \item{n_boot}{Number of bootstrap samples if bootstrap = TRUE. Default is 1000.}
 
-\item{conf_level}{Confidence level for bootstrap intervals. Default is 0.95.}
+\item{conf_level}{Confidence level for the VPC interval (lme4 bootstrap CI or
+brms credible interval). Default is 0.95.}
+
+\item{ic}{Logical; append relative-fit information criteria to the table for
+comparing model \emph{structures}: \code{AIC}/\code{BIC} for the likelihood
+engines (lme4, ordinal) and \code{WAIC}/\code{LOOIC} for brms (see
+\code{\link{maihda_ic}}). Default TRUE. REML \code{lmer} fits are refitted with
+ML so AIC/BIC are comparable across different fixed effects. Set FALSE for the
+lean VPC-only table.}
 }
 \value{
-A data frame comparing VPC/ICC across models with optional confidence intervals.
+A \code{maihda_comparison} data frame of VPC/ICC by model. Interval
+  columns (\code{ci_lower}/\code{ci_upper}) are included when any model supplies
+  an interval -- an lme4 bootstrap CI or a brms posterior credible interval. When
+  \code{ic = TRUE}, information-criteria columns (\code{AIC}/\code{BIC} or
+  \code{WAIC}/\code{LOOIC}, whichever apply) are appended.
 }
 \description{
 Compares variance partition coefficients (VPC/ICC) across multiple MAIHDA models,
 with optional bootstrap confidence intervals.
 }
+\details{
+VPCs are only directly comparable when the models share an outcome,
+family/link, analytic sample, and strata -- the canonical use is nested models
+(e.g. null vs covariate-adjusted) on the \emph{same} data and strata, to show
+how the VPC attenuates. If the supplied models differ in any of these,
+\code{compare_maihda()} still returns the table but issues a single warning,
+because the VPCs are then not directly comparable. The same comparability caveat
+applies to the appended information criteria (see \code{\link{maihda_ic}}).
+}
 \examples{
 \donttest{
-# Create strata and models using simulated data
-strata_1 <- make_strata(maihda_sim_data, vars = c("gender", "race"))
-strata_2 <- make_strata(maihda_sim_data, vars = c("gender", "race", "education"))
+# Canonical use: nested models on the SAME data and strata (null vs adjusted)
+strata <- make_strata(maihda_sim_data, vars = c("gender", "race"))
 
-model1 <- fit_maihda(health_outcome ~ age + (1 | stratum), data = strata_1$data)
-model2 <- fit_maihda(health_outcome ~ age + gender + (1 | stratum), data = strata_2$data)
+null_model <- fit_maihda(health_outcome ~ 1 + (1 | stratum), data = strata$data)
+adj_model  <- fit_maihda(health_outcome ~ age + (1 | stratum), data = strata$data)
 
 # Compare without bootstrap
-comparison <- compare_maihda(model1, model2,
-                            model_names = c("Base", "With Gender"))
+comparison <- compare_maihda(null_model, adj_model,
+                            model_names = c("Null", "Adjusted"))
 
 # Compare with bootstrap CI
-comparison_boot <- compare_maihda(model1, model2,
-                                 model_names = c("Base", "With Gender"),
+comparison_boot <- compare_maihda(null_model, adj_model,
+                                 model_names = c("Null", "Adjusted"),
                                  bootstrap = TRUE, n_boot = 500)
 }
 

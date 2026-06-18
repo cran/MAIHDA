@@ -1,7 +1,6 @@
 #' Compute Ternary Data for MAIHDA Models
 #'
 #' @param model A fitted MAIHDA model object from `fit_maihda()`.
-#' @param summary_obj Optional output from `summary()`.
 #' @param scale Character, either "link" or "response".
 #' @param reference_values List or data.frame of reference values for covariates.
 #' @param uncertainty_method Character indicating how to extract uncertainty.
@@ -17,7 +16,6 @@
 #' @importFrom stats predict
 compute_maihda_ternary_data <- function(
     model,
-    summary_obj = NULL,
     scale = c("link", "response"),
     reference_values = NULL,
     uncertainty_method = c("auto", "se", "ci_width", "posterior_sd"),
@@ -34,6 +32,13 @@ compute_maihda_ternary_data <- function(
   engine <- model$engine
   if (is.null(engine)) engine <- "unknown"
 
+  if (identical(engine, "ordinal")) {
+    stop("The ternary diagnostic is not yet supported for the ordinal (clmm) ",
+         "engine. Use plot(type = \"predicted\"), \"risk_vs_effect\", ",
+         "\"effect_decomp\", or plot_prediction_deviation_panels() for a ",
+         "cumulative MAIHDA model.", call. = FALSE)
+  }
+
   if (verbose && scale == "response") {
     warning("Ternary decomposition is most coherent on the link scale.")
   }
@@ -41,10 +46,9 @@ compute_maihda_ternary_data <- function(
   fitted_mod <- model$model
   if (is.null(fitted_mod)) stop("Could not find fitted model within maihda_model object.")
 
-  # Try to retrieve strata info
-  has_strata_info <- exists("strata_info", where = model) || !is.null(model$strata_info) || exists("data", where = model)
-
-  if (has_strata_info && !is.null(model$strata_info)) {
+  # Retrieve strata info: prefer the stored strata_info table, otherwise rebuild
+  # minimal stratum counts from the model data below.
+  if (!is.null(model$strata_info)) {
       strata_info_df <- model$strata_info
   } else if (!is.null(model$data) && "stratum" %in% names(model$data)) {
       strata_counts <- table(model$data$stratum)
@@ -89,12 +93,21 @@ compute_maihda_ternary_data <- function(
   }
 
   pred_data <- model$data
-  pred_data <- pred_data[!is.na(pred_data$stratum), , drop = FALSE]
+  stratum_keep <- !is.na(pred_data$stratum)
+  pred_data <- pred_data[stratum_keep, , drop = FALSE]
+  # Prior/precision weights aligned to pred_data, so the per-stratum aggregation
+  # and the reference centre below are weighted for a weighted fit (consistent with
+  # the weighted VPC and the other stratum-level plots). Unit weights reduce both
+  # to the previous plain/size-weighted means. These are lme4 prior/precision
+  # weights, not a complex survey design (no design-based variance is computed).
+  prior_w_full <- maihda_prior_weights(model)
+  pred_w <- prior_w_full[stratum_keep]
 
   if (!is.null(reference_values)) {
     strata_levels <- re_df$stratum
     first_idx <- match(strata_levels, as.character(pred_data$stratum))
     pred_data <- pred_data[first_idx, , drop = FALSE]
+    pred_w <- pred_w[first_idx]
 
     if (is.data.frame(reference_values)) {
       ref <- reference_values
@@ -135,6 +148,19 @@ compute_maihda_ternary_data <- function(
   re_idx <- match(as.character(pred_data$stratum), as.character(re_df$stratum))
   u_by_row <- re_df$u_j[re_idx]
 
+  # Cross-classified model: fold the dimension random effects into the additive
+  # baseline so the "additive signal" reflects the dimensions' (random) main effects,
+  # not just the fixed covariates. fe_link becomes fixed + dimension REs =
+  # eta(all REs) - u_stratum; the interaction signal (u_j, the stratum RE) is unchanged.
+  if (!is.null(model$cc_info)) {
+    total_link <- if (engine == "brms" || inherits(fitted_mod, "brmsfit")) {
+      brms::posterior_linpred(fitted_mod, newdata = pred_data, summary = TRUE)[, "Estimate"]
+    } else {
+      stats::predict(fitted_mod, newdata = pred_data, type = "link")
+    }
+    fe_link <- as.numeric(total_link) - u_by_row
+  }
+
   if (scale == "response") {
     additive_values <- linkinv(fe_link)
     full_values <- linkinv(fe_link + u_by_row)
@@ -156,15 +182,19 @@ compute_maihda_ternary_data <- function(
     uncertainty_values <- re_df$uncertainty[re_idx]
   }
 
-  additive_by_stratum <- stats::aggregate(
-    x = list(
+  # Prior-weight-weighted per-stratum means, so a weighted fit's stratum
+  # additive/full predictions match the weighted VPC; reduces to plain means when
+  # the fit is unweighted.
+  additive_by_stratum <- maihda_weighted_stratum_aggregate(
+    data.frame(
+      stratum = as.character(pred_data$stratum),
       additive_only = as.numeric(additive_values),
       full_prediction = as.numeric(full_values),
-      uncertainty = as.numeric(uncertainty_values)
+      uncertainty = as.numeric(uncertainty_values),
+      weight = pred_w,
+      stringsAsFactors = FALSE
     ),
-    by = list(stratum = as.character(pred_data$stratum)),
-    FUN = mean,
-    na.rm = TRUE
+    c("additive_only", "full_prediction", "uncertainty")
   )
   re_df$additive_only <- additive_by_stratum$additive_only[
     match(as.character(re_df$stratum), additive_by_stratum$stratum)
@@ -178,7 +208,29 @@ compute_maihda_ternary_data <- function(
     ]
   }
 
-  grand_mean_additive <- mean(re_df$additive_only, na.rm = TRUE)
+  # Reference is the mean additive prediction across strata, weighted so rare and
+  # common strata are not given equal weight. For a weighted fit use each stratum's
+  # summed prior weights (so the centre is on the same weighted footing as the
+  # per-stratum aggregation above); otherwise use the stratum size. Both reduce to
+  # the plain mean when neither is available.
+  is_weighted <- !isTRUE(all.equal(prior_w_full, rep(1, length(prior_w_full))))
+  strata_w <- if (is_weighted) {
+    pop_w <- tapply(prior_w_full[stratum_keep],
+                    as.character(model$data$stratum[stratum_keep]),
+                    sum, na.rm = TRUE)
+    as.numeric(pop_w[as.character(re_df$stratum)])
+  } else if (!is.null(strata_info_df) &&
+             all(c("stratum", "n") %in% names(strata_info_df))) {
+    strata_info_df$n[match(as.character(re_df$stratum),
+                           as.character(strata_info_df$stratum))]
+  } else {
+    NULL
+  }
+  grand_mean_additive <- if (!is.null(strata_w) && any(is.finite(strata_w))) {
+    stats::weighted.mean(re_df$additive_only, strata_w, na.rm = TRUE)
+  } else {
+    mean(re_df$additive_only, na.rm = TRUE)
+  }
 
   res <- re_df
   res$grand_mean_additive <- grand_mean_additive
@@ -217,7 +269,11 @@ compute_maihda_ternary_data <- function(
   res <- res[order(res$interaction_signal, decreasing = TRUE), ]
   rownames(res) <- NULL
 
-  tibble::as_tibble(res)
+  out <- tibble::as_tibble(res)
+  # Class the result so plot() dispatches to plot.maihda_ternary(). It remains a
+  # tibble/data.frame, so existing column access is unaffected.
+  class(out) <- c("maihda_ternary", class(out))
+  out
 }
 
 maihda_ternary_uncertainty <- function(re_stratum, uncertainty_method, engine) {
@@ -245,23 +301,41 @@ maihda_ternary_uncertainty <- function(re_stratum, uncertainty_method, engine) {
 
 #' Plot MAIHDA Ternary Diagram
 #'
-#' @param ternary_data Data output from \code{compute_maihda_ternary_data}.
+#' Renders the ternary decomposition produced by
+#' \code{\link{compute_maihda_ternary_data}}. Dispatched via \code{plot()} on the
+#' classed result.
+#'
+#' @note This method \strong{attaches the \pkg{ggtern} package to the search
+#'   path} (as if by \code{library(ggtern)}) if it is not already attached. This
+#'   is a deliberate, unavoidable side effect: \pkg{ggtern} replaces several
+#'   \pkg{ggplot2} build/print internals at attach time, and without it the
+#'   ternary coordinate system and themes do not render (you get a blank or
+#'   distorted plot). The attachment persists after the call so the returned
+#'   object can still be printed later in the session; it is not detached on
+#'   exit. If you need a pristine search path, attach \pkg{ggtern} yourself
+#'   before plotting and manage its lifecycle, or run plotting in a separate
+#'   session.
+#'
+#' @param x A \code{maihda_ternary} object from \code{compute_maihda_ternary_data}.
 #' @param size_var Column name for point sizing.
 #' @param color_var Column name for point colors.
 #' @param label_top_n Number of top strata to label.
 #' @param label_by Variable used to determine top strata.
 #' @param alpha Point transparency.
+#' @param ... Additional arguments (not used).
 #'
 #' @return A plot object.
 #' @export
-plot_maihda_ternary <- function(
-    ternary_data,
+plot.maihda_ternary <- function(
+    x,
     size_var = "n",
     color_var = "label",
     label_top_n = 5,
     label_by = c("interaction_signal", "uncertainty", "n"),
-    alpha = 0.7
+    alpha = 0.7,
+    ...
 ) {
+  ternary_data <- x
   label_by <- match.arg(label_by)
 
   if (!requireNamespace("ggtern", quietly = TRUE)) {
@@ -306,27 +380,47 @@ plot_maihda_ternary <- function(
   return(p)
 }
 
+#' Plot MAIHDA Ternary Diagram (deprecated)
+#'
+#' Deprecated. Use \code{plot()} on the \code{\link{compute_maihda_ternary_data}}
+#' result instead, e.g. \code{plot(compute_maihda_ternary_data(model))}.
+#'
+#' @param ternary_data Data output from \code{compute_maihda_ternary_data}.
+#' @param ... Further arguments passed to \code{plot()} (e.g. \code{size_var}).
+#' @return A plot object.
+#' @keywords internal
+#' @export
+plot_maihda_ternary <- function(ternary_data, ...) {
+  .Deprecated("plot", msg = paste(
+    "'plot_maihda_ternary()' is deprecated.",
+    "Use plot() on the compute_maihda_ternary_data() result, e.g.",
+    "plot(compute_maihda_ternary_data(model))."
+  ))
+  if (!inherits(ternary_data, "maihda_ternary")) {
+    class(ternary_data) <- c("maihda_ternary", class(ternary_data))
+  }
+  plot(ternary_data, ...)
+}
+
 #' Generate Ternary Plot from MAIHDA Model
 #'
 #' @param model A fitted MAIHDA model.
-#' @param summary_obj Optional output from \code{summary_maihda}.
-#' @param ... Additional arguments passed to \code{compute_maihda_ternary_data} and \code{plot_maihda_ternary}.
+#' @param ... Additional arguments passed to \code{compute_maihda_ternary_data} and \code{\link{plot.maihda_ternary}}.
 #'
 #' @return A list containing \code{data} and \code{plot}.
 #' @export
-maihda_ternary_plot <- function(model, summary_obj = NULL, ...) {
+maihda_ternary_plot <- function(model, ...) {
   args <- list(...)
 
   compute_args <- args[names(args) %in% names(formals(compute_maihda_ternary_data))]
-  plot_args <- args[names(args) %in% names(formals(plot_maihda_ternary))]
+  plot_args <- args[names(args) %in% names(formals(plot.maihda_ternary))]
 
   compute_args$model <- model
-  compute_args$summary_obj <- summary_obj
 
   ternary_data <- do.call(compute_maihda_ternary_data, compute_args)
 
-  plot_args$ternary_data <- ternary_data
-  p <- do.call(plot_maihda_ternary, plot_args)
+  plot_args$x <- ternary_data
+  p <- do.call(plot.maihda_ternary, plot_args)
 
   list(
     data = ternary_data,

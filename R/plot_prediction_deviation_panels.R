@@ -23,8 +23,33 @@ maihda_binomial_abs_deviance_residual <- function(obs_outcome_01, fitted) {
   out
 }
 
+# Prior/precision weights aligned to `data`'s rows, used to make the per-stratum
+# aggregation a weighted mean for weighted fits (consistent with the weighted VPC
+# and the other stratum-level plots). Falls back to unit weights -- so the
+# weighted means reduce EXACTLY to plain means -- when the model is unweighted,
+# the weights cannot be recovered, or they do not align with `data` (e.g.
+# user-supplied prediction data). These are lme4 prior/precision weights, not a
+# complex survey design (no design-based variance is computed).
+maihda_prediction_panel_prior_weights <- function(maihda_obj, model, data) {
+  n <- nrow(data)
+  w <- NULL
+  if (!is.null(maihda_obj)) {
+    w <- tryCatch(maihda_prior_weights(maihda_obj), error = function(e) NULL)
+  }
+  if (is.null(w)) {
+    w <- tryCatch(stats::weights(model, type = "prior"), error = function(e) NULL)
+  }
+  if (is.null(w) || !is.numeric(w) || length(w) != n) {
+    return(rep(1, n))
+  }
+  w <- as.numeric(w)
+  w[!is.finite(w)] <- NA_real_
+  w
+}
+
 maihda_prediction_panel_auto_type <- function(model) {
-  if (inherits(model, "polr") || inherits(model, "clm") || inherits(model, "ordinal")) {
+  if (inherits(model, "polr") || inherits(model, "clm") ||
+      inherits(model, "clmm") || inherits(model, "ordinal")) {
     return("ordinal")
   }
 
@@ -35,6 +60,12 @@ maihda_prediction_panel_auto_type <- function(model) {
   }
   if (!is.null(fam_name) && fam_name %in% c("cumulative", "sratio", "cratio", "acat", "ordinal")) {
     return("ordinal")
+  }
+  # Count models must predict on the response (count) scale: routing them through
+  # the Gaussian branch would plot link-scale (log) predictions under Gaussian
+  # labels and calculations.
+  if (!is.null(fam_name) && fam_name %in% c("poisson", "quasipoisson", "negbinomial")) {
+    return("poisson")
   }
 
   "gaussian"
@@ -50,16 +81,36 @@ maihda_prediction_panel_fitted <- function(model, data, type) {
     if (is.null(dim(fit)) || !"Estimate" %in% colnames(fit)) {
       stop("Could not extract fitted estimates from brms model.", call. = FALSE)
     }
-    se <- if ("Est.Error" %in% colnames(fit)) fit[, "Est.Error"] else rep(0, nrow(data))
+    # Derive the interval half-width from the posterior 2.5/97.5% quantiles so the
+    # downstream `estimate +/- 1.96 * se` reflects the actual posterior spread
+    # rather than assuming Est.Error (the posterior SD) describes a normal
+    # interval. (This still renders a symmetric bar; full asymmetric posterior
+    # intervals would require carrying the quantiles through the aggregation.)
+    se <- if (all(c("Q2.5", "Q97.5") %in% colnames(fit))) {
+      (fit[, "Q97.5"] - fit[, "Q2.5"]) / (2 * stats::qnorm(0.975))
+    } else if ("Est.Error" %in% colnames(fit)) {
+      fit[, "Est.Error"]
+    } else {
+      # NA (not 0) so downstream CI bars are omitted rather than collapsed.
+      rep(NA_real_, nrow(data))
+    }
     return(list(fit = as.numeric(fit[, "Estimate"]), se.fit = as.numeric(se)))
   }
 
-  if (type == "binomial") {
+  # SE fallbacks below are NA_real_ — not 0 — because predict() for lme4::merMod
+  # (and some other mixed-model classes) does not implement se.fit. Returning 0
+  # produced ci_lower == ci_upper == fitted, i.e. fake zero-width "95% CI" bars.
+  # NA propagates through fitted +/- 1.96 * se and ggplot drops the geom_errorbar
+  # layer for those rows, which honestly communicates "no SE available".
+  if (type == "binomial" || type == "poisson") {
+    # Count and binary models are summarised on the response scale (expected count
+    # / probability), not the link scale that predict() returns by default for a
+    # GLM(M).
     preds <- tryCatch(
       predict(model, newdata = data, type = "response", se.fit = TRUE),
       error = function(e) list(
         fit = predict(model, newdata = data, type = "response"),
-        se.fit = rep(0, nrow(data))
+        se.fit = rep(NA_real_, nrow(data))
       )
     )
   } else {
@@ -67,13 +118,13 @@ maihda_prediction_panel_fitted <- function(model, data, type) {
       predict(model, newdata = data, se.fit = TRUE),
       error = function(e) list(
         fit = predict(model, newdata = data),
-        se.fit = rep(0, nrow(data))
+        se.fit = rep(NA_real_, nrow(data))
       )
     )
   }
 
   if (is.numeric(preds)) {
-    preds <- list(fit = preds, se.fit = rep(0, nrow(data)))
+    preds <- list(fit = preds, se.fit = rep(NA_real_, nrow(data)))
   }
   preds$fit <- as.numeric(preds$fit)
   if (length(preds$fit) != nrow(data)) {
@@ -82,7 +133,7 @@ maihda_prediction_panel_fitted <- function(model, data, type) {
          call. = FALSE)
   }
   if (is.null(preds$se.fit) || length(preds$se.fit) != nrow(data)) {
-    preds$se.fit <- rep(0, nrow(data))
+    preds$se.fit <- rep(NA_real_, nrow(data))
   } else {
     preds$se.fit <- as.numeric(preds$se.fit)
   }
@@ -90,6 +141,44 @@ maihda_prediction_panel_fitted <- function(model, data, type) {
 }
 
 maihda_prediction_panel_ordinal_probs <- function(model, data) {
+  if (inherits(model, "clmm")) {
+    # predict.clmm does not exist: rebuild the location eta = x'beta + u from
+    # the stored components (fixed-effects-only $terms, $xlevels, $beta, and the
+    # stratum conditional modes) and difference the cumulative probabilities.
+    # Including the random effect matches the other branches of this panel,
+    # whose predict() calls include random effects by default.
+    maihda_require_ordinal()
+    tt <- stats::delete.response(model$terms)
+    mf <- stats::model.frame(tt, data, xlev = model$xlevels,
+                             na.action = stats::na.pass)
+    X <- stats::model.matrix(tt, mf)
+    beta <- model$beta
+    eta <- if (is.null(beta) || length(beta) == 0) {
+      rep(0, nrow(data))
+    } else {
+      missing_cols <- setdiff(names(beta), colnames(X))
+      if (length(missing_cols) > 0) {
+        stop("Could not rebuild the clmm design matrix; missing column(s): ",
+             paste(missing_cols, collapse = ", "), call. = FALSE)
+      }
+      drop(X[, names(beta), drop = FALSE] %*% beta)
+    }
+    re_list <- tryCatch(ordinal::ranef(model), error = function(e) NULL)
+    if (!is.null(re_list) && "stratum" %in% names(re_list) &&
+        "stratum" %in% names(data)) {
+      tab <- re_list[["stratum"]]
+      re_col <- intersect(c("(Intercept)", "Intercept"), colnames(tab))
+      if (length(re_col) > 0) {
+        u <- stats::setNames(as.numeric(tab[[re_col[1]]]), rownames(tab))
+        u <- u[as.character(data$stratum)]
+        u[is.na(u)] <- 0
+        eta <- eta + unname(u)
+      }
+    }
+    probs <- maihda_ordinal_category_probs(eta, model$alpha, model$link)
+    return(as.data.frame(probs))
+  }
+
   probs <- tryCatch(
     predict(model, newdata = data, type = "probs"),
     error = function(e) NULL
@@ -131,8 +220,24 @@ maihda_prediction_panel_ordinal_probs <- function(model, data) {
 }
 
 maihda_prediction_panel_binomial_residuals <- function(model, data, fitted, obs_outcome_01) {
+  aligned_obs <- length(obs_outcome_01) == length(fitted)
+  aligned_resids <- if (aligned_obs) {
+    maihda_binomial_abs_deviance_residual(obs_outcome_01, fitted)
+  } else {
+    rep(0, length(fitted))
+  }
+  has_aligned_obs <- aligned_obs && any(
+    !is.na(obs_outcome_01) &
+      obs_outcome_01 %in% c(0L, 1L) &
+      is.finite(fitted)
+  )
+
+  if (has_aligned_obs) {
+    return(aligned_resids)
+  }
+
   if (inherits(model, "brmsfit")) {
-    return(maihda_binomial_abs_deviance_residual(obs_outcome_01, fitted))
+    return(aligned_resids)
   }
 
   model_resids <- tryCatch(abs(residuals(model, type = "deviance")), error = function(e) NULL)
@@ -140,19 +245,36 @@ maihda_prediction_panel_binomial_residuals <- function(model, data, fitted, obs_
     return(model_resids)
   }
 
-  maihda_binomial_abs_deviance_residual(obs_outcome_01, fitted)
+  aligned_resids
 }
 
 #' Plot Prediction Deviation Panels
 #'
-#' @description Creates an advanced, publication-ready two-panel dashboard for visualizing
-#' predicted values and identifying deviant cases in linear, binomial, or ordinal models.
+#' @description Creates an advanced, publication-ready two-panel dashboard for
+#' visualizing predicted values and highlighting the most notable cases or strata.
+#' What "notable" means depends on the model type, and the labelled points are
+#' \emph{not} statistical outliers in the regression-diagnostic sense:
+#' \itemize{
+#'   \item Gaussian and Poisson (and the ordinal \code{"expected_score"} mode):
+#'     the cases/strata whose prediction sits furthest from the mean prediction
+#'     (largest deviation), ranked by absolute deviation.
+#'   \item Binomial: the cases/strata with the largest absolute deviance residual,
+#'     i.e. where the observed 0/1 outcome is least consistent with the fitted
+#'     probability (worst-fit points), ranked by \eqn{|deviance residual|}.
+#'   \item Ordinal \code{"surprise"} mode: the cases/strata with the highest
+#'     surprise \eqn{-\log P(\text{observed category})}, i.e. the least probable
+#'     observations under the model.
+#' }
 #'
 #' @param model A fitted model object (e.g., from `lm()`, `glm()`, `MASS::polr()`, or `lme4::glmer()`).
 #' @param data The original data frame used to fit the model. If `NULL`, attempts to extract from the model.
-#' @param type Model type: "auto" (default), "gaussian", "binomial", or "ordinal".
+#' @param type Model type: "auto" (default), "gaussian", "poisson", "binomial", or "ordinal".
 #' @param ordinal_mode For ordinal models: "surprise" (default, based on observation probability) or "expected_score".
-#' @param top_n_labels Number of extreme/deviant cases to label on the plot. Default is 5.
+#' @param top_n_labels Number of points to label on the plot. The ranking metric
+#'   depends on the model type (see Description): deviation from the mean
+#'   prediction for Gaussian/Poisson and the ordinal expected-score mode, absolute
+#'   deviance residual for binomial, and surprise for the ordinal surprise mode.
+#'   Default is 5.
 #' @param strata_info Optional data frame of strata labels, generally extracted from `maihda_model` objects.
 #'
 #' @return A `patchwork` object containing two `ggplot2` panels.
@@ -167,7 +289,7 @@ maihda_prediction_panel_binomial_residuals <- function(model, data, fitted, obs_
 #' @export
 #'
 plot_prediction_deviation_panels <- function(model, data = NULL,
-                                             type = c("auto", "gaussian", "binomial", "ordinal"),
+                                             type = c("auto", "gaussian", "poisson", "binomial", "ordinal"),
                                              ordinal_mode = c("surprise", "expected_score"),
                                              top_n_labels = 5,
                                              strata_info = NULL) {
@@ -177,8 +299,11 @@ plot_prediction_deviation_panels <- function(model, data = NULL,
   type <- match.arg(type)
   ordinal_mode <- match.arg(ordinal_mode)
 
-  # Check if model is a maihda_model
+  # Check if model is a maihda_model. Keep the wrapper so prior/precision weights
+  # can be recovered for the weighted stratum aggregation before unwrapping.
+  maihda_obj <- NULL
   if (inherits(model, "maihda_model")) {
+    maihda_obj <- model
     if (is.null(data)) data <- model$data
     strata_info <- model$strata_info
     model <- model$model
@@ -197,6 +322,10 @@ plot_prediction_deviation_panels <- function(model, data = NULL,
     )
   }
 
+  # Prior/precision weights for the per-stratum aggregation (unit weights for an
+  # unweighted fit, so the weighted means below reduce to plain means).
+  prior_w <- maihda_prediction_panel_prior_weights(maihda_obj, model, data)
+
   # Auto-detect model type if requested
   if (type == "auto") {
     type <- maihda_prediction_panel_auto_type(model)
@@ -206,26 +335,30 @@ plot_prediction_deviation_panels <- function(model, data = NULL,
     df |> dplyr::arrange(dplyr::desc(abs(.data[[metric_col]]))) |> utils::head(n)
   }
 
-  if (type == "gaussian") {
-    # GAUSSIAN / LINEAR LOGIC
-    # Approximate predict, some packages handle se.fit differently, so wrap safely
-    preds <- maihda_prediction_panel_fitted(model, data, "gaussian")
+  if (type == "gaussian" || type == "poisson") {
+    # GAUSSIAN / LINEAR (and POISSON / COUNT) LOGIC. Both rank strata/cases by how
+    # far their prediction sits from the mean prediction; counts are summarised on
+    # the response (expected-count) scale with count labels, and the symmetric
+    # interval is clamped at 0.
+    is_count <- type == "poisson"
+    preds <- maihda_prediction_panel_fitted(model, data, type)
+
+    value_dist_title <- if (is_count) "Distribution of Predicted Counts" else "Distribution of Fitted Values"
+    value_axis_label <- if (is_count) "Predicted Count" else "Fitted Value"
 
     df <- data |>
       dplyr::mutate(
         id = dplyr::row_number(),
         fitted = preds$fit,
-        se = preds$se.fit
+        se = preds$se.fit,
+        weight = prior_w
       )
 
     if ("stratum" %in% names(df)) {
-      df <- df |>
-        dplyr::group_by(.data$stratum) |>
-        dplyr::summarize(
-          fitted = mean(.data$fitted, na.rm = TRUE),
-          se = mean(.data$se, na.rm = TRUE),
-          .groups = "drop"
-        )
+      # Prior-weight-weighted per-stratum means so a weighted fit's stratum
+      # summary is consistent with the weighted VPC; reduces to plain means when
+      # the fit is unweighted.
+      df <- maihda_weighted_stratum_aggregate(df, c("fitted", "se"))
 
       if (!is.null(strata_info) && "label" %in% names(strata_info)) {
         id_map <- setNames(strata_info$label, strata_info$stratum)
@@ -240,7 +373,7 @@ plot_prediction_deviation_panels <- function(model, data = NULL,
 
     df <- df |>
       dplyr::mutate(
-        ci_lower = .data$fitted - 1.96 * .data$se,
+        ci_lower = if (is_count) pmax(0, .data$fitted - 1.96 * .data$se) else .data$fitted - 1.96 * .data$se,
         ci_upper = .data$fitted + 1.96 * .data$se,
         mean_fitted = mean(.data$fitted, na.rm = TRUE),
         deviation = .data$fitted - .data$mean_fitted,
@@ -256,7 +389,7 @@ plot_prediction_deviation_panels <- function(model, data = NULL,
       ggplot2::geom_density(fill = "gray80", alpha = 0.5) +
       ggplot2::geom_vline(ggplot2::aes(xintercept = .data$mean_fitted[1]), linetype = "dashed", color = "black") +
       ggplot2::geom_rug(data = label_df, color = "red", linewidth = 1) +
-      ggplot2::labs(title = "Distribution of Fitted Values", x = NULL, y = "Density") +
+      ggplot2::labs(title = value_dist_title, x = NULL, y = "Density") +
       ggplot2::theme_minimal()
 
     p2 <- ggplot2::ggplot(df, ggplot2::aes(x = .data$rank, y = .data$fitted)) +
@@ -266,7 +399,18 @@ plot_prediction_deviation_panels <- function(model, data = NULL,
       ggplot2::geom_hline(ggplot2::aes(yintercept = .data$mean_fitted[1]), linetype = "dashed") +
       ggrepel::geom_label_repel(data = label_df, ggplot2::aes(label = .data$id), size = 3, min.segment.length = 0) +
       ggplot2::scale_color_manual(values = c("Above Mean" = "#0072B2", "Below Mean" = "#D55E00")) +
-      ggplot2::labs(x = x_label, y = "Fitted Value", color = "Direction", size = "Deviation\nMagnitude") +
+      ggplot2::labs(
+        x = x_label, y = value_axis_label, color = "Direction", size = "Deviation\nMagnitude",
+        # Only describe the stratum interval when one is actually drawn: for lme4
+        # predict.merMod returns no se.fit, so the per-row SEs (and the bars) are
+        # NA -- in that case omit the caption rather than promising an interval.
+        caption = if (identical(x_label, "Stratum Rank") && any(is.finite(df$se))) {
+          paste("Stratum intervals are approximate: the mean of the individual",
+                "prediction SEs, not the SE of the stratum-mean prediction.")
+        } else {
+          NULL
+        }
+      ) +
       ggplot2::theme_minimal()
 
     return(patchwork::wrap_plots(p1, p2, ncol = 1, heights = c(1, 2)))
@@ -302,20 +446,18 @@ plot_prediction_deviation_panels <- function(model, data = NULL,
         obs_outcome_01 = obs_outcome_01,
         fitted = preds$fit,
         se = preds$se.fit,
-        abs_res_dev = resids
+        abs_res_dev = resids,
+        weight = prior_w
       )
 
 is_aggregated <- "stratum" %in% names(df)
 
     if (is_aggregated) {
-      df <- df |>
-        dplyr::group_by(.data$stratum) |>
-        dplyr::summarize(
-          fitted = mean(.data$fitted, na.rm = TRUE),
-          se = mean(.data$se, na.rm = TRUE),
-          abs_res_dev = mean(.data$abs_res_dev, na.rm = TRUE),
-          .groups = "drop"
-        )
+      # Prior-weight-weighted per-stratum means (fitted probability, SE, and
+      # absolute deviance residual); reduces to plain means when unweighted.
+      df <- maihda_weighted_stratum_aggregate(
+        df, c("fitted", "se", "abs_res_dev")
+      )
 
       if (!is.null(strata_info) && "label" %in% names(strata_info)) {
         id_map <- setNames(strata_info$label, strata_info$stratum)
@@ -369,7 +511,17 @@ is_aggregated <- "stratum" %in% names(df)
     if (is_aggregated) {
       p2 <- p2 +
         ggplot2::geom_point(ggplot2::aes(color = .data$direction, size = .data$abs_res_dev), alpha = 0.8) +
-        ggplot2::labs(x = x_label, y = "Predicted Probability", color = "Direction", size = "|Deviance\nResidual|")
+        ggplot2::labs(
+          x = x_label, y = "Predicted Probability", color = "Direction", size = "|Deviance\nResidual|",
+          # Omit the interval caption when no finite SE is available (e.g. lme4,
+          # whose predict() has no se.fit), so the bars and the note stay in sync.
+          caption = if (any(is.finite(df$se))) {
+            paste("Stratum intervals are approximate: the mean of the individual",
+                  "prediction SEs, not the SE of the stratum-mean prediction.")
+          } else {
+            NULL
+          }
+        )
     } else {
       p2 <- p2 +
         ggplot2::geom_point(ggplot2::aes(color = .data$direction, size = .data$abs_res_dev, shape = .data$obs_outcome), alpha = 0.8)
@@ -420,16 +572,22 @@ is_aggregated <- "stratum" %in% names(df)
         }
       }
 
+      # Per-observation surprise (negative log-likelihood of the observed
+      # category). The stratum-level value is the MEAN of this -- average surprise
+      # / log loss = mean(-log(p)). Collapsing probabilities first and taking
+      # -log(mean(p)) is a different (smaller, by Jensen) quantity that can change
+      # the stratum ranking, so surprise is computed per row and then averaged.
+      df$surprise <- -log(df$observed_prob)
+
       if ("stratum" %in% names(data)) {
         df$stratum <- data$stratum
-        df <- df |>
-          dplyr::group_by(.data$stratum) |>
-          dplyr::summarize(
-            dplyr::across(tidyselect::all_of(prob_cols), \(x) mean(x, na.rm = TRUE)),
-            expected_score = mean(.data$expected_score, na.rm = TRUE),
-            observed_prob = mean(.data$observed_prob, na.rm = TRUE),
-            .groups = "drop"
-          )
+        df$weight <- prior_w
+        # Prior-weight-weighted per-stratum means of the category probabilities and
+        # the surprise/score summaries (the stratum surprise stays the average of
+        # the per-row -log P, now weighted); reduces to plain means when unweighted.
+        df <- maihda_weighted_stratum_aggregate(
+          df, c(prob_cols, "expected_score", "observed_prob", "surprise")
+        )
 
         if (!is.null(strata_info) && "label" %in% names(strata_info)) {
           id_map <- setNames(strata_info$label, strata_info$stratum)
@@ -442,7 +600,9 @@ is_aggregated <- "stratum" %in% names(df)
         x_label <- "Case Rank (Ordered by Expected Category Score)"
       }
 
-      df$surprise <- -log(df$observed_prob)
+      # df$surprise is already the per-observation value (case-level) or its
+      # per-stratum mean (stratum-level); do not recompute it from a collapsed
+      # probability here.
 
       df <- df |>
         dplyr::arrange(.data$expected_score) |>
@@ -479,16 +639,14 @@ is_aggregated <- "stratum" %in% names(df)
       df <- data |>
         dplyr::mutate(
           id = dplyr::row_number(),
-          fitted = exp_scores
+          fitted = exp_scores,
+          weight = prior_w
         )
 
       if ("stratum" %in% names(df)) {
-        df <- df |>
-          dplyr::group_by(.data$stratum) |>
-          dplyr::summarize(
-            fitted = mean(.data$fitted, na.rm = TRUE),
-            .groups = "drop"
-          )
+        # Prior-weight-weighted per-stratum mean expected score; reduces to the
+        # plain mean when the fit is unweighted.
+        df <- maihda_weighted_stratum_aggregate(df, c("fitted"))
 
         if (!is.null(strata_info) && "label" %in% names(strata_info)) {
           id_map <- setNames(strata_info$label, strata_info$stratum)

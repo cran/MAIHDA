@@ -10,6 +10,12 @@ fit_maihda(
   engine = "lme4",
   family = "gaussian",
   autobin = TRUE,
+  context = NULL,
+  sampling_weights = NULL,
+  id = NULL,
+  time = NULL,
+  time_degree = 1,
+  interactions = FALSE,
   ...
 )
 }
@@ -24,34 +30,169 @@ updated.}
 
 \item{data}{A data frame containing the variables in the formula.}
 
-\item{engine}{Character string specifying which engine to use: "lme4" (default)
-or "brms".}
+\item{engine}{Character string specifying which engine to use: "lme4"
+(default), "brms", "wemix" (design-weighted pseudo-maximum-likelihood via
+\code{WeMix::mix()}; requires \code{sampling_weights}), or "ordinal"
+(cumulative link mixed model via \code{ordinal::clmm()}; requires an
+ordinal family). When \code{sampling_weights} is supplied and \code{engine}
+is left at its default, the engine switches to "wemix" automatically (with
+a message); likewise an ordinal family (or an auto-detected ordered-factor
+outcome) switches the default engine to "ordinal".}
 
-\item{family}{Character string or family object specifying the model family.
-Common options: "gaussian", "binomial", "poisson". Default is "gaussian".
+\item{family}{Character string, family object, or family function specifying
+the model family. Common options: "gaussian", "binomial", "poisson",
+"negbinomial". Default is "gaussian".
+\code{family = "negbinomial"} fits an overdispersed count model with the
+dispersion parameter theta \emph{estimated} from the data: lme4 via
+\code{lme4::glmer.nb()} and brms via its \code{shape} parameter (log link
+only; not supported by the wemix engine). A fixed-theta
+\code{MASS::negative.binomial(theta)} family object is also accepted with
+\code{engine = "lme4"} and is fitted with \code{glmer()}, honouring the
+supplied theta.
+\code{family = "ordinal"} (alias \code{"cumulative"}; or
+\code{\link{maihda_cumulative}("probit")} / \code{brms::cumulative()} for a
+non-logit link) fits a cumulative (proportional-odds) model for an
+\emph{ordered-factor} outcome: \code{ordinal::clmm()} under the automatic
+"ordinal" engine, \code{brms::cumulative()} under \code{engine = "brms"}.
+The VPC/ICC lives on the latent scale (level-1 variance \eqn{\pi^2/3}
+logit / 1 probit, as for binomial models) and response-scale predictions
+are \emph{expected category scores} (categories scored 1..K in order). An
+ordered-factor outcome with 3+ levels under the default family selects
+this model automatically, with a warning. The logit and probit links are
+supported; \code{sampling_weights}, \code{context}, and lme4-style
+\code{weights}/\code{subset}/\code{offset} arguments are not available on
+the clmm path.
 If the outcome variable appears to be binary and the default family is used,
 the function will automatically switch to "binomial", recode two-level
-responses to 0/1 for \code{glmer()}, and issue a warning.}
+responses to 0/1 for \code{glmer()}, and issue a warning.
+When a two-level non-0/1 response is recoded (on either the auto-detected or
+an explicit \code{family = "binomial"} path), the mapping follows the usual
+convention -- the first level becomes 0 (reference) and the second becomes 1
+(the modeled event), where "first/second" means alphabetical order for a
+character outcome and the declared order for a factor. The chosen mapping is
+reported via a \code{message()} and stored on the result as
+\code{$response_recoding}; set the factor levels (or supply a 0/1 outcome) to
+control which level is the event.
+Although any valid family object is accepted for fitting, the MAIHDA variance
+summaries (\code{\link{summary.maihda_model}}, VPC/ICC, PCV) are only defined
+for \code{gaussian("identity")}, the binomial/Bernoulli families with a logit
+or probit link, \code{poisson("log")}, and the negative binomial with a log
+link (level-1 variance \code{log(1 + 1/mu + 1/theta)}; Nakagawa, Johnson &
+Schielzeth 2017). Other families (for example \code{Gamma(link = "log")})
+will fit, but \code{summary()} and the VPC/PCV helpers will stop with an
+"not implemented" error because no level-1 variance is defined for them.}
 
 \item{autobin}{Logical indicating whether numeric variables used only for
 automatic strata creation should be binned by \code{\link{make_strata}}.
 Default is TRUE.}
 
-\item{...}{Additional arguments passed to \code{lmer}/\code{glmer} (lme4) or
-\code{brm} (brms).}
+\item{context}{Optional character vector naming one or more higher-level
+\emph{context} columns in \code{data} (e.g. \code{"school"},
+\code{"hospital"}, \code{"region"}). Each enters the model as a crossed
+intercept-only random effect alongside the intersectional stratum effect --
+\code{outcome ~ covars + (1 | stratum) + (1 | context)} -- giving the
+\emph{contextual cross-classified MAIHDA} of the literature (individuals
+cross-classified by stratum and place/institution). \code{\link{summary.maihda_model}}
+then partitions the unexplained variance into between-stratum vs.
+between-context vs. residual, and the headline VPC/ICC remains the
+between-stratum share (now net of the context). A context variable may not be
+a stratum dimension or \code{"stratum"} itself, and may not already appear as
+a fixed-effect term (its variance would then be absorbed by the fixed part).
+A context with few levels (say < 10) weakly identifies its variance and often
+yields a singular lme4 fit; the \code{brms} engine handles this better.
+Writing the random effect directly in the formula (\code{... + (1 | school)})
+fits the same model but is summarised generically as "Other random effects";
+only \code{context =} activates the labelled contextual partition.
+Not supported by the \code{wemix} engine.}
+
+\item{sampling_weights}{Optional single character string naming a numeric
+column of \code{data} holding individual \emph{sampling} (survey/design)
+weights, for a \strong{design-weighted MAIHDA} on complex-survey data
+(e.g. NHANES, PISA). Sampling weights are not the same thing as lme4's
+\code{weights=} (precision weights, which rescale the residual variance), so
+combining \code{sampling_weights} with \code{engine = "lme4"} is an error.
+Two engines support them:
+\itemize{
+  \item \code{engine = "wemix"} (chosen automatically when \code{engine} is
+    left at its default): weighted pseudo-maximum-likelihood via
+    \code{WeMix::mix()} (Rabe-Hesketh & Skrondal 2006), the estimator used
+    for NAEP/PISA analysis. The individual weights enter at level 1
+    unchanged and the level-2 (stratum) weights are 1, because
+    intersectional strata are exhaustive population cells included with
+    certainty. Supports \code{gaussian(identity)} and
+    \code{binomial(logit)} models with the canonical single
+    \code{(1 | stratum)} random intercept. Fixed-effect standard errors are
+    design-consistent (sandwich); the VPC/PCV are reported as point
+    estimates (no bootstrap -- see \code{\link{summary.maihda_model}}).
+  \item \code{engine = "brms"}: the weights enter the model as likelihood
+    weights (\code{y | weights(w)}), normalized to mean 1, giving a
+    \emph{pseudo-posterior}: point estimates are design-consistent but
+    credible intervals are not design-based -- interpret them cautiously.
+}
+Rows with a missing or non-positive sampling weight are dropped with a
+warning. Default \code{NULL} (unweighted).}
+
+\item{id}{Optional single character string naming a person/unit identifier
+column for a \strong{longitudinal (growth-curve) MAIHDA} on long-format data
+(one row per measurement occasion). Supplied together with \code{time}, it
+makes the model a 3-level growth curve -- occasions within individuals
+(\code{id}) within intersectional strata -- with a random intercept and slope
+on \code{time} at \emph{both} the individual and stratum levels. The growth
+random effects are added automatically: write the strata shorthand
+\code{(1 | var1:var2)} (or \code{(1 | stratum)}) only, not the slopes. The
+between-stratum variance (and hence the VPC) then becomes a function of time;
+\code{\link{summary.maihda_model}} reports the time-varying VPC. Longitudinal
+fits are supported by \code{engine = "lme4"}/\code{"brms"} only (not
+\code{wemix}/\code{ordinal}), and are incompatible with \code{context} and
+\code{sampling_weights}. Default \code{NULL} (cross-sectional). See
+Bell, Evans, Holman & Leckie (2024).}
+
+\item{time}{Optional single character string naming a numeric measurement-time
+column (e.g. wave 0, 1, 2, ... or age), required for a longitudinal MAIHDA;
+see \code{id}. Default \code{NULL}.}
+
+\item{time_degree}{Polynomial degree of the growth curve when \code{time} is
+supplied: 1 (default) linear, 2 quadratic, etc. The brms engine supports
+degree 1 only.}
+
+\item{interactions}{Opt-in per-stratum interaction diagnostic
+(\code{\link{maihda_interactions}}), attached as the \code{interactions} slot
+and shown by \code{print()}. \code{FALSE} (default) skips it; \code{TRUE}
+computes it with \code{adjust = "none"}; or pass a \code{\link[stats]{p.adjust}}
+method name (e.g. \code{"BH"}). It is meaningful only on an \emph{adjusted}
+model (the dimensions' main effects in the fixed part); on a null model
+\code{maihda_interactions} warns. This is the single-fit parallel to the
+default-on \code{interactions} of \code{\link{maihda}}.}
+
+\item{...}{Additional arguments passed to \code{lmer}/\code{glmer} (lme4),
+\code{brm} (brms), or \code{WeMix::mix()} (wemix; e.g. \code{nQuad},
+\code{fast}). The lme4-style \code{weights}/\code{subset}/\code{offset}
+arguments are not supported by the wemix engine.}
 }
 \value{
 A maihda_model object containing:
-  \item{model}{The fitted model object (lme4 or brms)}
-  \item{engine}{The engine used ("lme4" or "brms")}
+  \item{model}{The fitted model object (lme4, brms, or WeMix)}
+  \item{engine}{The engine used ("lme4", "brms", or "wemix")}
+  \item{sampling_weights}{The sampling-weight column name when supplied,
+    NULL otherwise}
   \item{formula}{The model formula}
   \item{data}{The data used for fitting}
   \item{family}{The family used}
   \item{strata_info}{The strata information from make_strata() if available, NULL otherwise}
+  \item{context_vars}{The context variable name(s) when \code{context} was
+    supplied, NULL otherwise}
+  \item{interactions}{The \code{maihda_interactions} diagnostic when
+    \code{interactions} is not \code{FALSE}, NULL otherwise}
+  \item{response_recoding}{For a recoded two-level outcome, a data frame mapping
+    each original level to its 0/1 value and role (reference/event); NULL when no
+    recoding occurred}
+  \item{diagnostics}{Fit-quality diagnostics (singular fit / convergence) for
+    lme4 models, surfaced by the print and summary methods}
 }
 \description{
 Fits a multilevel model for MAIHDA (Multilevel Analysis of Individual
-Heterogeneity and Discriminatory Accuracy) using either lme4 or brms.
+Heterogeneity and Discriminatory Accuracy) using lme4, brms, or -- for
+design-weighted (survey) data -- WeMix.
 }
 \examples{
 \donttest{
@@ -66,6 +207,14 @@ model <- fit_maihda(health_outcome ~ age + (1 | stratum),
 model2 <- fit_maihda(health_outcome ~ age + (1 | gender:race:education),
                      data = maihda_sim_data,
                      engine = "lme4")
+
+# Contextual cross-classified MAIHDA: strata crossed with a higher-level
+# context (here country) -- the literature's cross-classified MAIHDA.
+data(maihda_country_data)
+model3 <- fit_maihda(math ~ 1 + (1 | gender:ses),
+                     data = maihda_country_data,
+                     context = "country")
+summary(model3)  # between-stratum vs. between-country vs. residual
 }
 
 }

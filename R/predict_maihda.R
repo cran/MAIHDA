@@ -14,14 +14,21 @@
 #'   For backward compatibility, "link" or "response" may also be passed here
 #'   and will be interpreted as individual-level predictions on that scale.
 #' @param scale Character string specifying the prediction scale for
-#'   individual-level predictions: "response" (default) or "link".
+#'   individual-level predictions: "response" (default) or "link". For a
+#'   cumulative (ordinal) model the "link" scale is the latent location
+#'   \eqn{\eta} and the "response" scale is the \emph{expected category score}
+#'   \eqn{\sum_k k P(Y = k)} (categories scored 1..K in their declared order).
 #' @param ... Additional arguments passed to predict method of underlying model.
 #'
 #' @return Depending on type:
 #'   \itemize{
 #'     \item For "individual": A numeric vector of predicted values on the
 #'       requested scale
-#'     \item For "strata": A data frame with stratum ID and predicted random effect
+#'     \item For "strata": A data frame with stratum ID and predicted random
+#'       effect. When \code{newdata} is supplied, the result is restricted to the
+#'       strata present in \code{newdata} (and a stratum the model never saw is an
+#'       error, as for "individual"); when \code{newdata} is \code{NULL}, every
+#'       training stratum is returned.
 #'   }
 #'
 #' @examples
@@ -61,7 +68,16 @@ predict_maihda <- function(object, newdata = NULL,
   } else {
     newdata <- maihda_prepare_prediction_data(object, newdata)
   }
-  
+
+  # Longitudinal (growth-curve) model: a stratum is a TRAJECTORY, so the
+  # stratum-level prediction is the random intercept and slope(s), not a single
+  # value. Individual-level predictions flow through the engine branches below
+  # (predict()/posterior_linpred handle the random slopes).
+  if (type == "strata" && !is.null(object$longitudinal_info)) {
+    res <- maihda_longitudinal_strata_predictions(object)
+    return(maihda_filter_strata_predictions(res, newdata))
+  }
+
   if (engine == "lme4") {
     if (type == "individual") {
       # Individual-level predictions including random effects
@@ -73,30 +89,113 @@ predict_maihda <- function(object, newdata = NULL,
       result <- maihda_stratum_ranef_lme4(model)
       result$predicted <- result$random_effect
       result <- result[, c("stratum", "predicted", "se", "lower_95", "upper_95")]
-      return(result)
+      return(maihda_filter_strata_predictions(result, newdata))
     }
     
+  } else if (engine == "wemix") {
+    if (type == "individual") {
+      # Built from coef + the stored stratum effects (WeMix's own predict() needs
+      # the grouping re-resolved and offers no scale argument).
+      eta <- maihda_wemix_linpred(object, newdata = newdata, include_re = TRUE)
+      if (scale == "response") {
+        return(maihda_linkinv(object$family)(eta))
+      }
+      return(eta)
+
+    } else if (type == "strata") {
+      result <- maihda_wemix_stratum_ranef(object)
+      result$predicted <- result$random_effect
+      result <- result[, c("stratum", "predicted", "se", "lower_95", "upper_95")]
+      return(maihda_filter_strata_predictions(result, newdata))
+    }
+
+  } else if (engine == "ordinal") {
+    if (type == "individual") {
+      # predict.clmm does not exist; the latent location eta = x'beta + u is
+      # built from the stored coefficients and stratum conditional modes. The
+      # "link" scale is that latent location; the "response" scale is the
+      # expected category score sum_k k * P(Y = k) (categories scored 1..K in
+      # order), the package's response-scale summary of a cumulative model.
+      eta <- maihda_clmm_linpred(object, newdata = newdata, include_re = TRUE)
+      if (scale == "response") {
+        return(maihda_ordinal_eta_to_score(eta, object$model$alpha,
+                                           object$family$link))
+      }
+      return(eta)
+
+    } else if (type == "strata") {
+      result <- maihda_clmm_stratum_ranef(object)
+      result$predicted <- result$random_effect
+      result <- result[, c("stratum", "predicted", "se", "lower_95", "upper_95")]
+      return(maihda_filter_strata_predictions(result, newdata))
+    }
+
   } else if (engine == "brms") {
     # Verify brms is available
     if (!requireNamespace("brms", quietly = TRUE)) {
       stop("Package 'brms' is required to predict from brms models. Please install it with: install.packages('brms')")
     }
-    
+
+    # A sampling-weighted brms fit carries a weights() addition term, and brms
+    # requires its column in newdata even though predictions do not depend on it;
+    # supply a unit weight when the caller's newdata lacks it.
+    if (!is.null(object$sampling_weights) && ".maihda_sw" %in% all.vars(object$formula) &&
+        !".maihda_sw" %in% names(newdata)) {
+      newdata$.maihda_sw <- 1
+    }
+
     if (type == "individual") {
       # Individual-level predictions
       predictions <- if (scale == "response") {
-        stats::fitted(model, newdata = newdata, summary = TRUE, ...)[, "Estimate"]
+        f <- stats::fitted(model, newdata = newdata, summary = TRUE, ...)
+        if (length(dim(f)) == 3) {
+          # A categorical-likelihood fit (e.g. cumulative/ordinal) returns an
+          # nobs x summary x category ARRAY of per-category probabilities;
+          # collapse it to the expected category score (categories scored 1..K
+          # in order), the package's response-scale summary of such models.
+          est <- f[, "Estimate", ]
+          drop(est %*% seq_len(ncol(est)))
+        } else {
+          f[, "Estimate"]
+        }
       } else {
         brms::posterior_linpred(model, newdata = newdata, summary = TRUE, ...)[, "Estimate"]
       }
       return(predictions)
-      
+
     } else if (type == "strata") {
       # Stratum-level predictions
       result <- maihda_stratum_ranef_brms(model)
       result$predicted <- result$random_effect
       result <- result[, c("stratum", "predicted", "se", "lower_95", "upper_95")]
-      return(result)
+      return(maihda_filter_strata_predictions(result, newdata))
     }
   }
+}
+
+# Restrict a per-stratum prediction table to the strata present in `newdata` so
+# type = "strata" respects newdata the way type = "individual" does (instead of
+# always returning every training stratum). A stratum in newdata that the model
+# never saw is an error, matching the individual path. When newdata carries no
+# stratum column the table is returned unchanged. When it carries a stratum column
+# whose values are all missing it names no training stratum to keep, so the result
+# is empty -- not silently every training stratum.
+maihda_filter_strata_predictions <- function(result, newdata) {
+  if (is.null(newdata) || !"stratum" %in% names(newdata)) {
+    return(result)
+  }
+  wanted <- unique(as.character(newdata$stratum))
+  wanted <- wanted[!is.na(wanted)]
+  if (length(wanted) == 0) {
+    return(result[0, , drop = FALSE])
+  }
+  known <- as.character(result$stratum)
+  unknown <- setdiff(wanted, known)
+  if (length(unknown) > 0) {
+    stop("newdata contains strata not present in the fitted model: ",
+         paste(utils::head(unknown, 5), collapse = ", "),
+         if (length(unknown) > 5) ", ..." else "",
+         call. = FALSE)
+  }
+  result[known %in% wanted, , drop = FALSE]
 }

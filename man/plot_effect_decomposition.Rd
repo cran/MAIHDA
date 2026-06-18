@@ -4,7 +4,12 @@
 \alias{plot_effect_decomposition}
 \title{Effect Decomposition Plot}
 \usage{
-plot_effect_decomposition(object, summary_obj, top_n_labels = 10)
+plot_effect_decomposition(
+  object,
+  summary_obj,
+  top_n_labels = 10,
+  highlight = NULL
+)
 }
 \arguments{
 \item{object}{A maihda_model object}
@@ -12,6 +17,10 @@ plot_effect_decomposition(object, summary_obj, top_n_labels = 10)
 \item{summary_obj}{A maihda_summary object}
 
 \item{top_n_labels}{Number of most extreme strata to label}
+
+\item{highlight}{Optional character vector of stratum ids to highlight. When
+supplied, labels are restricted to these strata rather than the most extreme
+overall deviations.}
 }
 \value{
 A ggplot2 object

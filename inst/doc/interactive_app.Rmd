@@ -48,7 +48,7 @@ This will automatically launch the dashboard in your default web browser or the 
 ### 1. Data Import
 
 * **Upload Own Data:** Easily upload datasets in `.csv`, Stata (`.dta`), or SPSS (`.sav`) formats.
-* **Use Included Data:** Try out the app instantly by selecting the pre-loaded `maihda_health_data` or `maihda_sim_data`.
+* **Use Included Data:** Try out the app instantly by selecting the pre-loaded built-in **NHANES health data** (`maihda_health_data`) or **PISA country data** (`maihda_country_data`).
 * **View Data:** The app includes an interactive data table letting you sort, filter, and inspect variables before analyzing.
 
 
@@ -61,7 +61,7 @@ This will automatically launch the dashboard in your default web browser or the 
 
 * Fit models with the **lme4** engine used by the interactive dashboard. Bayesian **brms** models remain available from R code via `fit_maihda(engine = "brms")`.
 * Select covariates to control for within your models.
-* Choose whether to calculate **bootstrap confidence intervals** to get robust uncertainty metrics for your Variance Partition Coefficient (VPC / ICC).
+* Choose whether to calculate **parametric bootstrap confidence intervals** to quantify uncertainty. When enabled, the dashboard reports bootstrap intervals for both the Variance Partition Coefficient (VPC / ICC) -- shown in the Model Summary and Interactive Explorer tabs -- and the Proportional Change in Variance (PCV), shown in the PCV Results tab.
 
 ### 4. Interactive Visualizations
 
@@ -75,7 +75,7 @@ Once a model is fit, you can navigate across multiple tabs:
 
 The dashboard calculates stepwise Proportional Change in Variance (**PCV**) tables:
 
-* See how much inequality is "explained away" by adding covariates sequentially.
+* See the proportional change in between-stratum variance as covariates are added sequentially (a model-dependent, descriptive comparison, not a causal decomposition of inequality).
 * Uncover masking/suppression effects directly inside the app by comparing partial PCV values across models.
 
 ## Summary

@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+<meta name="author" content="Hamid Bulut" />
+
+<meta name="date" content="2026-06-18" />
+
+<title>Bayesian MAIHDA for sparse intersections</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Bayesian MAIHDA for sparse
+intersections</h1>
+<h4 class="author">Hamid Bulut</h4>
+<h4 class="date">2026-06-18</h4>
+
+
+
+<div id="sparse-intersectional-cells" class="section level2">
+<h2>Sparse intersectional cells</h2>
+<p>Intersectional MAIHDA decomposes the between-stratum variation into
+an additive part (the constituent dimensions’ main effects) and an
+interaction part (the model-implied departure from additivity). That
+conclusion is defensible only when each intersectional stratum is
+populated well enough to estimate its effect. In practice it often is
+not. Crossing several dimensions multiplies the strata while the sample
+size stays fixed, so cell counts fall away quickly. Estimating an
+interaction variance from cells like these is hard.</p>
+</div>
+<div id="a-dataset-with-a-known-interaction" class="section level2">
+<h2>A dataset with a known interaction</h2>
+<p><code>maihda_sparse_data</code> is simulated for exactly that: 4
+dimensions form 36 intersectional strata, and the interaction is
+constructed to account for <strong>40% of the between-stratum
+variance</strong> – on a Gaussian outcome <code>y</code> and on the
+latent scale of a binary outcome <code>event</code>. Individuals are
+allocated to strata unevenly, reproducing the skewed cell sizes of real
+survey data.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">data</span>(maihda_sparse_data)</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a>d <span class="ot">&lt;-</span> maihda_sparse_data</span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a></span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>cells <span class="ot">&lt;-</span> <span class="fu">table</span>(<span class="fu">interaction</span>(d<span class="sc">$</span>gender, d<span class="sc">$</span>ethnicity, d<span class="sc">$</span>education, d<span class="sc">$</span>age_group, <span class="at">drop =</span> <span class="cn">TRUE</span>))</span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a><span class="fu">summary</span>(<span class="fu">as.numeric</span>(cells))                    <span class="co"># cell-size distribution</span></span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a><span class="co">#&gt;    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. </span></span>
+<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a><span class="co">#&gt;   1.000   4.000   6.000   6.667   9.250  17.000</span></span>
+<span id="cb1-8"><a href="#cb1-8" tabindex="-1"></a><span class="fu">sum</span>(cells <span class="sc">&lt;</span> <span class="dv">5</span>)                                <span class="co"># how many strata have &lt; 5 people</span></span>
+<span id="cb1-9"><a href="#cb1-9" tabindex="-1"></a><span class="co">#&gt; [1] 12</span></span>
+<span id="cb1-10"><a href="#cb1-10" tabindex="-1"></a><span class="fu">attr</span>(d, <span class="st">&quot;truth&quot;</span>)<span class="sc">$</span>gaussian<span class="sc">$</span>interaction_share   <span class="co"># the true interaction share: 0.40</span></span>
+<span id="cb1-11"><a href="#cb1-11" tabindex="-1"></a><span class="co">#&gt; [1] 0.4</span></span></code></pre></div>
+<p>A third of the strata hold fewer than five individuals. This is not
+an unusual case, as it is often the situation once more than two or
+three dimensions are crossed, and it is precisely where maximum
+likelihood becomes unreliable.</p>
+</div>
+<div id="what-lme4-reports" class="section level2">
+<h2>What lme4 reports</h2>
+<p>We fit the crossed-dimensions decomposition with
+<code>engine = &quot;lme4&quot;</code> on both outcomes.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>m_g <span class="ot">&lt;-</span> <span class="fu">maihda</span>(y <span class="sc">~</span> <span class="dv">1</span> <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> gender<span class="sc">:</span>ethnicity<span class="sc">:</span>education<span class="sc">:</span>age_group),</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>              <span class="at">data =</span> d, <span class="at">decomposition =</span> <span class="st">&quot;crossed-dimensions&quot;</span>, <span class="at">engine =</span> <span class="st">&quot;lme4&quot;</span>)</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>m_b <span class="ot">&lt;-</span> <span class="fu">maihda</span>(event <span class="sc">~</span> <span class="dv">1</span> <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> gender<span class="sc">:</span>ethnicity<span class="sc">:</span>education<span class="sc">:</span>age_group),</span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>              <span class="at">data =</span> d, <span class="at">decomposition =</span> <span class="st">&quot;crossed-dimensions&quot;</span>,</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>              <span class="at">engine =</span> <span class="st">&quot;lme4&quot;</span>, <span class="at">family =</span> <span class="st">&quot;binomial&quot;</span>)</span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a></span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a><span class="fu">c</span>(<span class="at">gaussian =</span> m_g<span class="sc">$</span>decomposition<span class="sc">$</span>interaction_share,</span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>  <span class="at">binary   =</span> m_b<span class="sc">$</span>decomposition<span class="sc">$</span>interaction_share)</span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a><span class="co">#&gt;  gaussian    binary </span></span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a><span class="co">#&gt; 0.2338021 0.0306199</span></span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a><span class="fu">c</span>(<span class="at">gaussian_singular =</span> <span class="fu">isTRUE</span>(m_g<span class="sc">$</span>model<span class="sc">$</span>diagnostics<span class="sc">$</span>singular),</span>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>  <span class="at">binary_singular   =</span> <span class="fu">isTRUE</span>(m_b<span class="sc">$</span>model<span class="sc">$</span>diagnostics<span class="sc">$</span>singular))</span>
+<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a><span class="co">#&gt; gaussian_singular   binary_singular </span></span>
+<span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a><span class="co">#&gt;              TRUE              TRUE</span></span></code></pre></div>
+<p>Both fits are singular: maximum likelihood has placed the interaction
+variance at the boundary. The Gaussian interaction share is pulled down
+to 23%, and the binary share to 3% – against a true 40%, the binary fit
+reports a substantial interaction as effectively absent. Crucially,
+neither estimate carries an interval. The estimate is not only biased
+but reported with unwarranted precision, because the model has no way to
+express how little the sparse cells determine.</p>
+</div>
+<div id="what-brms-adds-posterior-uncertainty" class="section level2">
+<h2>What brms adds: posterior uncertainty</h2>
+<p>Refitting with <code>engine = &quot;brms&quot;</code> and a weakly-informative
+prior on the random-effect standard deviations changes the output in one
+important respect. The prior regularises the between-stratum standard
+deviations away from the boundary (so the fit is not singular) and the
+posterior yields a credible interval in place of a single number. The
+call is shown but not evaluated here (<code>brms</code> requires Stan
+and several minutes; see the note on precomputation below).</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>m_g_brms <span class="ot">&lt;-</span> <span class="fu">maihda</span>(</span>
+<span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  y <span class="sc">~</span> <span class="dv">1</span> <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> gender<span class="sc">:</span>ethnicity<span class="sc">:</span>education<span class="sc">:</span>age_group),</span>
+<span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>  <span class="at">data =</span> d, <span class="at">decomposition =</span> <span class="st">&quot;crossed-dimensions&quot;</span>, <span class="at">engine =</span> <span class="st">&quot;brms&quot;</span>,</span>
+<span id="cb3-4"><a href="#cb3-4" tabindex="-1"></a>  <span class="at">prior =</span> brms<span class="sc">::</span><span class="fu">set_prior</span>(<span class="st">&quot;normal(0, 0.5)&quot;</span>, <span class="at">class =</span> <span class="st">&quot;sd&quot;</span>),</span>
+<span id="cb3-5"><a href="#cb3-5" tabindex="-1"></a>  <span class="at">chains =</span> <span class="dv">4</span>, <span class="at">iter =</span> <span class="dv">2000</span>, <span class="at">warmup =</span> <span class="dv">1000</span>, <span class="at">cores =</span> <span class="dv">4</span>, <span class="at">seed =</span> <span class="dv">1</span>,</span>
+<span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a>  <span class="at">control =</span> <span class="fu">list</span>(<span class="at">adapt_delta =</span> <span class="fl">0.97</span>)</span>
+<span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a>)</span>
+<span id="cb3-8"><a href="#cb3-8" tabindex="-1"></a>m_g_brms<span class="sc">$</span>decomposition<span class="sc">$</span>interaction_share</span>
+<span id="cb3-9"><a href="#cb3-9" tabindex="-1"></a>m_g_brms<span class="sc">$</span>decomposition<span class="sc">$</span>interaction_share_ci</span></code></pre></div>
+<p>The cached posterior summaries:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>bg <span class="ot">&lt;-</span> pc<span class="sc">$</span>brms<span class="sc">$</span>gaussian; bb <span class="ot">&lt;-</span> pc<span class="sc">$</span>brms<span class="sc">$</span>binary</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a><span class="fu">data.frame</span>(</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">outcome      =</span> <span class="fu">c</span>(<span class="st">&quot;Gaussian&quot;</span>, <span class="st">&quot;Binary&quot;</span>),</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>  <span class="at">true_share   =</span> <span class="fu">c</span>(pc<span class="sc">$</span>truth<span class="sc">$</span>gaussian<span class="sc">$</span>interaction_share, pc<span class="sc">$</span>truth<span class="sc">$</span>binary_latent<span class="sc">$</span>interaction_share),</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  <span class="at">brms_share   =</span> <span class="fu">c</span>(bg<span class="sc">$</span>share, bb<span class="sc">$</span>share),</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  <span class="at">ci_low       =</span> <span class="fu">c</span>(bg<span class="sc">$</span>ci[<span class="dv">1</span>], bb<span class="sc">$</span>ci[<span class="dv">1</span>]),</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>  <span class="at">ci_high      =</span> <span class="fu">c</span>(bg<span class="sc">$</span>ci[<span class="dv">2</span>], bb<span class="sc">$</span>ci[<span class="dv">2</span>]),</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>  <span class="at">max_rhat     =</span> <span class="fu">c</span>(bg<span class="sc">$</span>diag<span class="sc">$</span>max_rhat, bb<span class="sc">$</span>diag<span class="sc">$</span>max_rhat),</span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>  <span class="at">divergences  =</span> <span class="fu">c</span>(bg<span class="sc">$</span>diag<span class="sc">$</span>divergences, bb<span class="sc">$</span>diag<span class="sc">$</span>divergences)</span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>)</span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a><span class="co">#&gt;    outcome true_share brms_share       ci_low   ci_high max_rhat divergences</span></span>
+<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a><span class="co">#&gt; 1 Gaussian        0.4 0.13704351 0.0050517071 0.5180674 1.004302           0</span></span>
+<span id="cb4-13"><a href="#cb4-13" tabindex="-1"></a><span class="co">#&gt; 2   Binary        0.4 0.05027529 0.0001234149 0.4206628 1.002563           0</span></span></code></pre></div>
+<p>The posterior point remains low: the interaction is weakly identified
+at this density, so <code>brms</code> does not recover the 40% either,
+and we should not expect it to. The credible interval, however, runs
+from near zero to past the true value, reflecting posterior uncertainty
+about the interaction share. This is the substantive difference. Maximum
+likelihood reported a singular point as if it were certain;
+<code>brms</code> reports an interval that includes the true share in
+this simulation and makes the uncertainty explicit. The diagnostics
+(<code>max_rhat</code> close to 1, no divergent transitions) suggest the
+posterior is well-sampled.</p>
+</div>
+<div id="comparison" class="section level2">
+<h2>Comparison</h2>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>fig <span class="ot">&lt;-</span> <span class="fu">data.frame</span>(</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>  <span class="at">outcome =</span> <span class="fu">factor</span>(<span class="fu">rep</span>(<span class="fu">c</span>(<span class="st">&quot;Gaussian&quot;</span>, <span class="st">&quot;Binary&quot;</span>), <span class="at">each =</span> <span class="dv">2</span>), <span class="at">levels =</span> <span class="fu">c</span>(<span class="st">&quot;Gaussian&quot;</span>, <span class="st">&quot;Binary&quot;</span>)),</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a>  <span class="at">method  =</span> <span class="fu">rep</span>(<span class="fu">c</span>(<span class="st">&quot;lme4 (ML)&quot;</span>, <span class="st">&quot;brms (Bayesian)&quot;</span>), <span class="dv">2</span>),</span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a>  <span class="at">share   =</span> <span class="fu">c</span>(pc<span class="sc">$</span>lme4<span class="sc">$</span>gaussian<span class="sc">$</span>share, pc<span class="sc">$</span>brms<span class="sc">$</span>gaussian<span class="sc">$</span>share,</span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a>              pc<span class="sc">$</span>lme4<span class="sc">$</span>binary<span class="sc">$</span>share,   pc<span class="sc">$</span>brms<span class="sc">$</span>binary<span class="sc">$</span>share),</span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a>  <span class="at">lo      =</span> <span class="fu">c</span>(<span class="cn">NA</span>, pc<span class="sc">$</span>brms<span class="sc">$</span>gaussian<span class="sc">$</span>ci[<span class="dv">1</span>], <span class="cn">NA</span>, pc<span class="sc">$</span>brms<span class="sc">$</span>binary<span class="sc">$</span>ci[<span class="dv">1</span>]),</span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a>  <span class="at">hi      =</span> <span class="fu">c</span>(<span class="cn">NA</span>, pc<span class="sc">$</span>brms<span class="sc">$</span>gaussian<span class="sc">$</span>ci[<span class="dv">2</span>], <span class="cn">NA</span>, pc<span class="sc">$</span>brms<span class="sc">$</span>binary<span class="sc">$</span>ci[<span class="dv">2</span>])</span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a>)</span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a>truth <span class="ot">&lt;-</span> pc<span class="sc">$</span>truth<span class="sc">$</span>gaussian<span class="sc">$</span>interaction_share</span>
+<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a></span>
+<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a><span class="fu">ggplot</span>(fig, <span class="fu">aes</span>(method, share, <span class="at">colour =</span> method)) <span class="sc">+</span></span>
+<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a>  <span class="fu">geom_hline</span>(<span class="at">yintercept =</span> truth, <span class="at">linetype =</span> <span class="st">&quot;dashed&quot;</span>) <span class="sc">+</span></span>
+<span id="cb5-13"><a href="#cb5-13" tabindex="-1"></a>  <span class="fu">geom_pointrange</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> lo, <span class="at">ymax =</span> hi), <span class="at">na.rm =</span> <span class="cn">TRUE</span>, <span class="at">linewidth =</span> <span class="fl">0.8</span>) <span class="sc">+</span></span>
+<span id="cb5-14"><a href="#cb5-14" tabindex="-1"></a>  <span class="fu">geom_point</span>(<span class="at">size =</span> <span class="fl">2.5</span>) <span class="sc">+</span></span>
+<span id="cb5-15"><a href="#cb5-15" tabindex="-1"></a>  <span class="fu">facet_wrap</span>(<span class="sc">~</span> outcome) <span class="sc">+</span></span>
+<span id="cb5-16"><a href="#cb5-16" tabindex="-1"></a>  <span class="fu">scale_y_continuous</span>(<span class="st">&quot;Interaction share of between-stratum variance&quot;</span>,</span>
+<span id="cb5-17"><a href="#cb5-17" tabindex="-1"></a>                     <span class="at">labels =</span> <span class="cf">function</span>(x) <span class="fu">paste0</span>(<span class="fu">round</span>(<span class="dv">100</span> <span class="sc">*</span> x), <span class="st">&quot;%&quot;</span>)) <span class="sc">+</span></span>
+<span id="cb5-18"><a href="#cb5-18" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="cn">NULL</span>, <span class="at">colour =</span> <span class="cn">NULL</span>,</span>
+<span id="cb5-19"><a href="#cb5-19" tabindex="-1"></a>       <span class="at">title =</span> <span class="st">&quot;A singular ML point estimate vs. a brms posterior interval&quot;</span>,</span>
+<span id="cb5-20"><a href="#cb5-20" tabindex="-1"></a>       <span class="at">subtitle =</span> <span class="st">&quot;Dashed line: true interaction share (40%)&quot;</span>) <span class="sc">+</span></span>
+<span id="cb5-21"><a href="#cb5-21" tabindex="-1"></a>  <span class="fu">theme_minimal</span>() <span class="sc">+</span> <span class="fu">theme</span>(<span class="at">legend.position =</span> <span class="st">&quot;none&quot;</span>)</span></code></pre></div>
+<p><img role="img" src="data:image/png;base64,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" /><!-- --></p>
+<p>Both point estimates fall below the true value; neither engine can
+locate an interaction the sparse data do not pin down. They differ in
+what is reported alongside the point. The <code>brms</code> credible
+interval spans the true 40%, whereas <code>lme4</code> provides a single
+value with no uncertainty. Reading the <code>lme4</code> point at face
+value (an interaction of roughly 3–23%, or none at all) is the error the
+singular fit invites.</p>
+</div>
+<div id="why-the-interval-not-the-point-is-what-changes" class="section level2">
+<h2>Why the interval, not the point, is what changes</h2>
+<p>The per-stratum effects (the stratum random intercepts) are similar
+under the two engines as both apply partial pooling, shrinking
+thinly-estimated strata toward the additive prediction. What differs is
+the treatment of uncertainty. Maximum likelihood commits to a single
+variance decomposition and, at the boundary, reports it without a
+standard error. <code>brms</code> propagates the full posterior, so the
+interaction share is accompanied by an interval whose width reflects how
+little the sparse cells constrain it. Summarising the posterior by its
+point discards exactly the information that matters: the degree of
+uncertainty. When intersectional cells are sparse, a regularised
+Bayesian fit with an explicit interval is the more defensible
+summary.</p>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

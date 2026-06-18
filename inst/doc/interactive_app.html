@@ -12,7 +12,7 @@
 
 <meta name="author" content="Hamid Bulut" />
 
-<meta name="date" content="2026-05-16" />
+<meta name="date" content="2026-06-18" />
 
 <title>Interactive Data Analysis with MAIHDA</title>
 
@@ -341,7 +341,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 <h1 class="title toc-ignore">Interactive Data Analysis with MAIHDA</h1>
 <h4 class="author">Hamid Bulut</h4>
-<h4 class="date">2026-05-16</h4>
+<h4 class="date">2026-06-18</h4>
 
 
 
@@ -385,8 +385,9 @@ Shiny Dashboard
 <code>.csv</code>, Stata (<code>.dta</code>), or SPSS
 (<code>.sav</code>) formats.</li>
 <li><strong>Use Included Data:</strong> Try out the app instantly by
-selecting the pre-loaded <code>maihda_health_data</code> or
-<code>maihda_sim_data</code>.</li>
+selecting the pre-loaded built-in <strong>NHANES health data</strong>
+(<code>maihda_health_data</code>) or <strong>PISA country data</strong>
+(<code>maihda_country_data</code>).</li>
 <li><strong>View Data:</strong> The app includes an interactive data
 table letting you sort, filter, and inspect variables before
 analyzing.</li>
@@ -408,9 +409,12 @@ race, education) to automatically generate intersectional strata.</li>
 interactive dashboard. Bayesian <strong>brms</strong> models remain
 available from R code via <code>fit_maihda(engine = &quot;brms&quot;)</code>.</li>
 <li>Select covariates to control for within your models.</li>
-<li>Choose whether to calculate <strong>bootstrap confidence
-intervals</strong> to get robust uncertainty metrics for your Variance
-Partition Coefficient (VPC / ICC).</li>
+<li>Choose whether to calculate <strong>parametric bootstrap confidence
+intervals</strong> to quantify uncertainty. When enabled, the dashboard
+reports bootstrap intervals for both the Variance Partition Coefficient
+(VPC / ICC) – shown in the Model Summary and Interactive Explorer tabs –
+and the Proportional Change in Variance (PCV), shown in the PCV Results
+tab.</li>
 </ul>
 </div>
 <div id="interactive-visualizations" class="section level3">
@@ -433,8 +437,9 @@ protective mechanism of multilevel modeling.</li>
 <p>The dashboard calculates stepwise Proportional Change in Variance
 (<strong>PCV</strong>) tables:</p>
 <ul>
-<li>See how much inequality is “explained away” by adding covariates
-sequentially.</li>
+<li>See the proportional change in between-stratum variance as
+covariates are added sequentially (a model-dependent, descriptive
+comparison, not a causal decomposition of inequality).</li>
 <li>Uncover masking/suppression effects directly inside the app by
 comparing partial PCV values across models.</li>
 </ul>
