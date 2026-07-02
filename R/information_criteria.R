@@ -248,6 +248,16 @@ maihda_ic_primary <- function(df) {
   NA_character_
 }
 
+# TRUE when a set of information-criterion column names spans BOTH the likelihood
+# scale (AIC/BIC, from lme4/ordinal) and the Bayesian scale (WAIC/LOOIC, from
+# brms). Such a table puts criteria from different scales side by side, which are
+# not comparable to each other (see the maihda_ic Details). This happens for a
+# same-family lme4-vs-brms comparison -- a case the family/link check in
+# compare_maihda() does not flag -- so compare_maihda() uses this to warn.
+maihda_ic_spans_scales <- function(cols) {
+  any(c("AIC", "BIC") %in% cols) && any(c("WAIC", "LOOIC") %in% cols)
+}
+
 #' Print MAIHDA information criteria
 #'
 #' @param x A \code{maihda_ic} object from \code{\link{maihda_ic}}.
@@ -255,22 +265,23 @@ maihda_ic_primary <- function(df) {
 #' @return No return value, called for side effects.
 #' @export
 print.maihda_ic <- function(x, ...) {
-  cat("MAIHDA Information Criteria\n")
+  pal <- maihda_palette()
+  cat(pal$bold("MAIHDA Information Criteria"), "\n", sep = "")
   cat("===========================\n\n")
   print(as.data.frame(x), row.names = FALSE, digits = 4)
 
   primary <- attr(x, "ic_primary")
   if ("delta" %in% names(x) && !is.na(primary)) {
-    cat(sprintf("\ndelta = difference from the best model on %s (lower is better).\n",
-                primary))
+    cat(pal$muted(sprintf("\ndelta = difference from the best model on %s (lower is better).\n",
+                primary)))
   }
   if (!is.null(x$estimator) && any(grepl("refit from REML", x$estimator))) {
-    cat("REML lmer fit(s) were refitted with ML so AIC/BIC are comparable across ",
-        "different fixed effects.\n", sep = "")
+    cat(pal$muted(paste0("REML lmer fit(s) were refitted with ML so AIC/BIC are comparable across ",
+        "different fixed effects.\n")))
   }
   if (any(c("AIC", "BIC", "WAIC", "LOOIC") %in% names(x))) {
-    cat("Information criteria are only comparable across models fitted to the same ",
-        "analytic sample (and, for AIC/BIC, the same family).\n", sep = "")
+    cat(pal$muted(paste0("Information criteria are only comparable across models fitted to the same ",
+        "analytic sample (and, for AIC/BIC, the same family).\n")))
   }
   invisible(x)
 }

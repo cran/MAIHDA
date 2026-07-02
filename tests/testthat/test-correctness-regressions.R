@@ -494,6 +494,67 @@ test_that("calculate_pvc rejects random-slope models for PVC accounting", {
   )
 })
 
+test_that("calculate_pvc refits with ML when a non-stratum RE is on the boundary", {
+  # A fit can be globally singular because an EXTRA grouping factor ((1 | site))
+  # sits on the boundary while the stratum variance is comfortably nonzero. The ML
+  # refit must still run there -- testing global isSingular() wrongly skipped it and
+  # left REML-based variances in the PCV.
+  set.seed(2)
+  d <- expand.grid(stratum = factor(seq_len(25)),
+                   site    = factor(seq_len(4)),
+                   rep     = seq_len(6))
+  d$x <- rnorm(nrow(d))
+  stratum_u <- rnorm(25, sd = 1)[d$stratum]   # stratum SD ~ 1
+  # No site effect -> site variance estimated at the boundary (exactly 0).
+  d$y <- 1 + 0.6 * d$x + stratum_u + rnorm(nrow(d), sd = 1.2)
+
+  m1 <- suppressWarnings(fit_maihda(y ~ (1 | stratum) + (1 | site), data = d))
+  m2 <- suppressWarnings(fit_maihda(y ~ x + (1 | stratum) + (1 | site), data = d))
+
+  # Document/require the scenario: both fits singular via the site boundary, but the
+  # stratum variance is clearly nonzero. (A loud failure here flags a setup that no
+  # longer reproduces the bug, rather than a silent false pass.)
+  expect_true(lme4::isSingular(m1$model))
+  expect_true(lme4::isSingular(m2$model))
+  expect_equal(as.numeric(as.matrix(lme4::VarCorr(m1$model)$site)[1, 1]), 0)
+  expect_gt(as.numeric(as.matrix(lme4::VarCorr(m1$model)$stratum)[1, 1]), 0.3)
+
+  # Reference PCVs from the raw REML fits and from explicit ML refits.
+  st_var <- function(m) as.numeric(as.matrix(lme4::VarCorr(m)$stratum)[1, 1])
+  reml_pcv <- (st_var(m1$model) - st_var(m2$model)) / st_var(m1$model)
+  ml1 <- lme4::refitML(m1$model); ml2 <- lme4::refitML(m2$model)
+  ml_pcv <- (st_var(ml1) - st_var(ml2)) / st_var(ml1)
+
+  # The two genuinely differ here, so the comparison below is meaningful.
+  expect_false(isTRUE(all.equal(reml_pcv, ml_pcv)))
+
+  pcv <- calculate_pvc(m1, m2)$pvc
+  expect_equal(pcv, ml_pcv, tolerance = 1e-8)               # uses the ML refit
+  expect_false(isTRUE(all.equal(pcv, reml_pcv)))            # not the REML estimate
+})
+
+test_that("maihda_pcv_refit_ml skips the refit when the stratum is at the boundary", {
+  # When the STRATUM itself is on the boundary, the refit is skipped: its variance is
+  # ~0 under either criterion, and re-optimising would nudge an exact zero off the
+  # boundary, masking the zero-variance guard in calculate_pvc().
+  set.seed(2)
+  d <- data.frame(stratum = factor(rep(seq_len(12), each = 8)))
+  d$x <- rnorm(nrow(d))
+  # No stratum effect -> stratum variance estimated at the boundary (exactly 0).
+  d$y <- 1 + 0.5 * d$x + rnorm(nrow(d), sd = 1.5)
+
+  m <- suppressWarnings(fit_maihda(y ~ x + (1 | stratum), data = d))
+  expect_true(lme4::isSingular(m$model))
+  expect_equal(MAIHDA:::maihda_stratum_variance_lme4(m$model), 0)
+  expect_true(MAIHDA:::maihda_stratum_at_boundary_lme4(m$model))
+
+  # The fit is left untouched (still REML), so the exact-zero variance is preserved
+  # for the downstream guard rather than being nudged positive by a boundary refit.
+  refit <- MAIHDA:::maihda_pcv_refit_ml(m)
+  expect_true(lme4::isREML(refit$model))
+  expect_equal(MAIHDA:::maihda_stratum_variance_lme4(refit$model), 0)
+})
+
 test_that("predict_maihda reuses training bins for numeric automatic strata", {
   set.seed(1009)
   n <- 120
@@ -534,6 +595,37 @@ test_that("predict_maihda errors clearly for out-of-range numeric auto-bins", {
     predict_maihda(model, newdata = out_of_range),
     "outside the training auto-bin ranges",
     fixed = TRUE
+  )
+})
+
+test_that("adjusted-model prediction works after numeric stratum auto-binning", {
+  # The adjusted model carries reconstructed .maihda_dim_<var> fixed effects for an
+  # auto-binned numeric dimension; raw newdata (numeric column, no stratum) must have
+  # those columns rebuilt before predict(), or the formula references a missing column.
+  set.seed(1009)
+  n <- 200
+  d <- data.frame(
+    age    = runif(n, 18, 80),
+    gender = sample(c("F", "M"), n, replace = TRUE)
+  )
+  strata <- interaction(cut(d$age, breaks = 3), d$gender, drop = TRUE)
+  d$y <- 2 + 0.1 * d$age + rnorm(nlevels(strata), sd = 0.6)[strata] + rnorm(n, sd = 0.4)
+
+  ana <- maihda(y ~ (1 | age:gender), data = d)
+  adj <- ana$model_adjusted
+  expect_true(any(grepl(".maihda_dim_age", deparse(adj$formula), fixed = TRUE)))
+
+  raw_newdata <- d[1:25, c("age", "gender")]
+  expect_silent(p_raw <- predict_maihda(adj, newdata = raw_newdata))
+  expect_length(p_raw, 25L)
+
+  # Identical to supplying the stratum (and rebuilt .maihda_dim_age) explicitly.
+  explicit <- raw_newdata
+  explicit$stratum <- adj$original_data$stratum[1:25]
+  expect_equal(
+    as.numeric(p_raw),
+    as.numeric(predict_maihda(adj, newdata = explicit)),
+    tolerance = 1e-8
   )
 })
 
@@ -710,6 +802,201 @@ test_that("stratum predictions honour prior weights; unweighted aggregation unch
   expect_equal(pu$w_sum, as.numeric(pu$n))
 })
 
+test_that("aggregated-binomial stratum predictions are trial-weighted, not row-weighted", {
+  # Regression for the audit finding: for a cbind(success, failure) fit the rows of
+  # a stratum carry DIFFERENT trial counts, so averaging the fitted probabilities
+  # must weight each row by its trials -- a 200-trial row should dominate a 5-trial
+  # row -- not count every row equally. Each stratum has one large-trial and one
+  # small-trial row with opposite covariate values so the two weightings disagree.
+  set.seed(515)
+  K <- 10
+  strata <- factor(rep(seq_len(K), each = 2))
+  x      <- rep(c(-1.5, 1.5), times = K)        # within-stratum covariate contrast
+  trials <- rep(c(200L, 5L), times = K)         # the big-trial row should dominate
+  eta <- -0.2 + 0.9 * x + rnorm(K, sd = 0.6)[strata]
+  succ <- rbinom(length(eta), size = trials, prob = stats::plogis(eta))
+  d <- data.frame(succ = succ, fail = trials - succ, x = x, stratum = strata)
+
+  m <- suppressWarnings(
+    fit_maihda(cbind(succ, fail) ~ x + (1 | stratum), data = d, family = "binomial")
+  )
+
+  # Prediction weights ARE the binomial trial counts; the observed-summary prior
+  # weights stay unit (that path is numerator/denominator based, so the trials are
+  # already in the denominator and must not be double-counted).
+  expect_equal(MAIHDA:::maihda_prediction_weights(m), as.numeric(trials))
+  expect_equal(MAIHDA:::maihda_prior_weights(m), rep(1, length(trials)))
+
+  ph <- MAIHDA:::maihda_stratum_predictions_lme4(m, summary(m), scale = "response")
+  helper <- stats::setNames(ph$predicted_row, as.character(ph$stratum))
+
+  fit_incl <- as.numeric(stats::predict(m$model, type = "response"))
+  strat <- as.character(m$data$stratum)
+  prw   <- as.numeric(stats::weights(m$model, type = "prior"))
+  trial_w <- tapply(seq_along(fit_incl), strat,
+                    function(i) stats::weighted.mean(fit_incl[i], prw[i]))
+  row_w   <- tapply(seq_along(fit_incl), strat,
+                    function(i) mean(fit_incl[i]))   # the OLD (buggy) row-weighting
+
+  # The helper matches the TRIAL-weighted mean...
+  expect_equal(as.numeric(helper[names(trial_w)]), as.numeric(trial_w),
+               tolerance = 1e-8)
+  # ...and the fix actually changes the answer (trial- vs row-weighting disagree).
+  expect_false(isTRUE(all.equal(as.numeric(trial_w), as.numeric(row_w))))
+  # w_sum is the summed TRIAL count per stratum (205), not the row count (2).
+  expect_equal(unname(ph$w_sum), rep(sum(c(200, 5)), K))
+})
+
+test_that("brms y | trials(n) prediction weights are trial-weighted (Stan-free)", {
+  # Regression for the audit finding: brms exposes model.frame.brmsfit but NO
+  # weights.brmsfit, so a brms aggregated-binomial `y | trials(n)` fit could not
+  # recover its trial counts through stats::weights(type = "prior") the way an
+  # lme4 cbind() fit does -- its prediction weights silently fell back to unit row
+  # weights, contradicting NEWS/helper docs that promised both engines were
+  # trial-weighted. The counts are now parsed from the trials() addition term of
+  # the stored formula and evaluated on the analytic frame. No Stan: the weight
+  # helpers never call into brms (only inherits(model, "brmsfit") and a formula
+  # parse), so a bare fake brmsfit exercises the whole path.
+  trials <- c(200, 5, 50, 100)
+  d <- data.frame(
+    y = c(120, 2, 30, 40),
+    n = trials,
+    stratum = c("s1", "s1", "s2", "s2"),
+    stringsAsFactors = FALSE
+  )
+  m <- structure(
+    list(
+      model = structure(list(), class = "brmsfit"),
+      engine = "brms",
+      formula = y | trials(n) ~ x + (1 | stratum),
+      data = d,
+      family = list(family = "binomial", link = "logit"),
+      sampling_weights = NULL
+    ),
+    class = "maihda_model"
+  )
+
+  # Prediction weights ARE the binomial trial counts; the observed-summary prior
+  # weights stay unit (numerator/denominator path -- trials already in the
+  # denominator, so multiplying would double-count).
+  expect_equal(MAIHDA:::maihda_prediction_weights(m), trials)
+  expect_equal(MAIHDA:::maihda_prior_weights(m), rep(1, nrow(d)))
+
+  # A combined `trials(n) + weights(w)` addition term still finds the trials, and
+  # the trials fold on top of the (mean-1) sampling weights, exactly as an lme4
+  # cbind() + sampling-weighted fit folds them.
+  d2 <- d
+  d2$.maihda_sw <- c(2, 0.5, 1, 1)
+  m2 <- m
+  m2$data <- d2
+  m2$formula <- y | trials(n) + weights(.maihda_sw) ~ x + (1 | stratum)
+  m2$sampling_weights <- "w"
+  expect_equal(MAIHDA:::maihda_prediction_weights(m2), d2$.maihda_sw * trials)
+
+  # A brms fit with no trials() term (e.g. a plain Gaussian) is untouched: unit
+  # prediction weights, never spuriously trial-weighted.
+  m3 <- m
+  m3$formula <- y ~ x + (1 | stratum)
+  expect_equal(MAIHDA:::maihda_prediction_weights(m3), rep(1, nrow(d)))
+})
+
+test_that("brms aggregated-binomial response prediction is normalised to a probability (Stan-free)", {
+  # Regression for the audit finding: brms's fitted()/posterior_epred() return the
+  # expected success COUNT (trials * p) for a `y | trials(n)` fit, whereas lme4's
+  # type = "response" for a cbind() fit returns the per-trial probability. So
+  # predict_maihda(scale = "response") used to return counts on brms and probabilities
+  # on lme4 -- the same call, two different scales. maihda_brms_response_to_prob()
+  # divides the expected count by the per-row trial counts to recover the probability.
+  # No Stan: the helper only parses the formula's trials() term and divides (it never
+  # calls into brms), so a bare fake brmsfit exercises the whole path.
+  trials <- c(200, 5, 50, 100)
+  d <- data.frame(
+    y = c(120, 2, 30, 40),
+    n = trials,
+    stratum = c("s1", "s1", "s2", "s2"),
+    stringsAsFactors = FALSE
+  )
+  m <- structure(
+    list(
+      model = structure(list(), class = "brmsfit"),
+      engine = "brms",
+      formula = y | trials(n) ~ x + (1 | stratum),
+      data = d,
+      family = list(family = "binomial", link = "logit"),
+      sampling_weights = NULL
+    ),
+    class = "maihda_model"
+  )
+
+  # Expected counts trials * p (here p = 0.3 on every row) normalise back to p.
+  p <- rep(0.3, nrow(d))
+  expected_counts <- trials * p
+  expect_equal(MAIHDA:::maihda_brms_response_to_prob(m, expected_counts, d), p)
+
+  # Trial counts are read off the SUPPLIED frame, not object$data, so a prediction
+  # newdata with its own trials column normalises by its own counts.
+  nd <- data.frame(y = c(0, 0), n = c(10, 4), stratum = c("s1", "s2"),
+                   stringsAsFactors = FALSE)
+  expect_equal(MAIHDA:::maihda_brms_trial_counts(m, nd), c(10, 4))
+  expect_equal(MAIHDA:::maihda_brms_response_to_prob(m, c(5, 1), nd), c(0.5, 0.25))
+
+  # A Bernoulli fit (no trials() term) has NULL trial counts, so the estimate is
+  # returned unchanged -- a Bernoulli response prediction is already a probability.
+  m_bern <- m
+  m_bern$formula <- y ~ x + (1 | stratum)
+  expect_null(MAIHDA:::maihda_brms_trial_counts(m_bern))
+  est <- c(0.1, 0.9, 0.5, 0.2)
+  expect_equal(MAIHDA:::maihda_brms_response_to_prob(m_bern, est, d), est)
+
+  # Guards: a length mismatch or a non-positive trial count leaves the estimate
+  # untouched rather than producing a misaligned division or an Inf/NaN.
+  expect_equal(MAIHDA:::maihda_brms_response_to_prob(m, c(1, 2), d), c(1, 2))
+  d0 <- d; d0$n <- c(200, 0, 50, 100)
+  expect_equal(MAIHDA:::maihda_brms_response_to_prob(m, expected_counts, d0),
+               expected_counts)
+})
+
+test_that("maihda_brms_unseen_re_formula drops only the stratum term (Stan-free)", {
+  # The unseen-stratum brms prediction drops the stratum random effect (treated as
+  # zero) but must KEEP any other random effect the row participates in -- a
+  # contextual (1 | school) intercept or a longitudinal (poly | id) growth term --
+  # matching lme4's allow.new.levels, which zeroes only the unseen level's effect.
+  # The helper builds the re_formula that does this from the stored formula alone
+  # (no brms call), so a bare object exercises it.
+  mk <- function(formula) {
+    structure(list(model = structure(list(), class = "brmsfit"),
+                   engine = "brms", formula = formula),
+              class = "maihda_model")
+  }
+  grp_vars <- function(re) {
+    bars <- reformulas::findbars(re)
+    sort(unlist(lapply(bars, function(b) all.vars(b[[3]])), use.names = FALSE))
+  }
+
+  # Single-stratum model: stratum is the only random effect, so the excluding
+  # re_formula is NA (drop all group terms -> fixed-effects-only population average).
+  expect_true(is.na(MAIHDA:::maihda_brms_unseen_re_formula(
+    mk(y ~ x + (1 | stratum)))))
+
+  # Context model: keep (1 | school), drop (1 | stratum).
+  re_ctx <- MAIHDA:::maihda_brms_unseen_re_formula(
+    mk(y ~ x + (1 | stratum) + (1 | school)))
+  expect_s3_class(re_ctx, "formula")
+  expect_equal(grp_vars(re_ctx), "school")           # school kept, stratum dropped
+
+  # Longitudinal-style model: keep the (poly | id) growth term, drop (poly | stratum).
+  re_long <- MAIHDA:::maihda_brms_unseen_re_formula(
+    mk(y ~ time + (1 + time | id) + (1 + time | stratum)))
+  expect_s3_class(re_long, "formula")
+  expect_equal(grp_vars(re_long), "id")
+  # The kept term retains its random slope, not just the intercept.
+  expect_true("time" %in% all.vars(reformulas::findbars(re_long)[[1]]))
+
+  # No random effects (or a non-formula) -> NA, the all-fixed-effects re_formula.
+  expect_true(is.na(MAIHDA:::maihda_brms_unseen_re_formula(mk(y ~ x))))
+  expect_true(is.na(MAIHDA:::maihda_brms_unseen_re_formula(mk("not a formula"))))
+})
+
 test_that("binary detection respects negative subset indices and NA weights", {
   set.seed(2113)
   n <- 150
@@ -824,27 +1111,3 @@ test_that("bootstrap n_boot must clear the 10-refit minimum up front", {
   )
 })
 
-test_that("ternary additive component is invariant to row order", {
-  set.seed(1007)
-  d <- data.frame(
-    stratum = factor(rep(seq_len(6), each = 20)),
-    age = rep(seq(-2, 2, length.out = 20), 6)
-  )
-  stratum_u <- rnorm(6, sd = 0.5)[d$stratum]
-  d$y <- 10 + 3 * d$age + stratum_u + rnorm(nrow(d), sd = 0.2)
-
-  model <- fit_maihda(y ~ age + (1 | stratum), data = d)
-  reordered <- model
-  reordered$data <- model$data[order(model$data$stratum, -model$data$age), ]
-
-  td1 <- compute_maihda_ternary_data(model, verbose = FALSE)
-  td2 <- compute_maihda_ternary_data(reordered, verbose = FALSE)
-  comp <- merge(
-    as.data.frame(td1[, c("stratum", "additive_only")]),
-    as.data.frame(td2[, c("stratum", "additive_only")]),
-    by = "stratum",
-    suffixes = c("_original", "_reordered")
-  )
-
-  expect_equal(comp$additive_only_original, comp$additive_only_reordered, tolerance = 1e-8)
-})

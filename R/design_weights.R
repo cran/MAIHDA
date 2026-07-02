@@ -14,8 +14,32 @@
 # unconditional level-1 weights coincide).
 
 # Reserved column names added to the analytic data by the weighted engines.
+# These are package-internal: '.maihda_l2wt' is the constant level-2 weight WeMix
+# is handed, and '.maihda_sw' is the normalized likelihood-weight column injected
+# into the brms formula. They must not collide with a user variable the model
+# uses (see maihda_guard_reserved_weight_col()).
 .maihda_wemix_l2_col <- ".maihda_l2wt"
 .maihda_brms_weights_col <- ".maihda_sw"
+
+# Guard a reserved internal weight column against silently overwriting a user
+# variable. The weighted engines write '.maihda_sw' / '.maihda_l2wt' into the
+# analytic data; if the user's data already carries a column of that name AND the
+# model formula references it, fitting would clobber their variable with the
+# internal weight (a brms covariate '.maihda_sw' or a WeMix covariate
+# '.maihda_l2wt' would change value mid-fit). Reject that case with a rename hint.
+# A reserved column merely present but NOT referenced by the formula -- e.g. one
+# carried along in a prior fit's '$original_data' when maihda() refits the null /
+# adjusted models -- is overwritten harmlessly and allowed.
+maihda_guard_reserved_weight_col <- function(col, data, formula, engine) {
+  if (col %in% names(data) && col %in% all.vars(formula)) {
+    stop("'", col, "' is a reserved internal column name for the design-weighted ",
+         engine, " path, but your 'data' already contains it and the model formula ",
+         "references it; fitting would overwrite that variable with the internal ",
+         "weight column. Rename your '", col, "' column before fitting.",
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
 
 #' Validate a sampling-weights specification
 #'
@@ -141,12 +165,24 @@ maihda_wemix_check_family <- function(family) {
 #'   (the analytic data frame actually fitted, including the weight columns).
 #' @keywords internal
 maihda_fit_wemix <- function(formula, data, family, sampling_weights, dot_vals) {
-  model_vars <- unique(c(all.vars(formula), sampling_weights))
-  model_vars <- intersect(model_vars, names(data))
-  complete <- stats::complete.cases(data[, model_vars, drop = FALSE])
+  maihda_guard_reserved_weight_col(.maihda_wemix_l2_col, data, formula, "wemix")
   w <- as.numeric(data[[sampling_weights]])
-  positive <- is.finite(w) & w > 0
-  keep <- complete & positive
+  # Keep exactly the rows WeMix::mix() will fit: the evaluated analytic frame (fixed-
+  # effect transformations applied, rows missing AFTER them dropped) intersected with
+  # finite, positive sampling weights. Passing the weight mask makes the analytic-frame
+  # helper drop non-positive/NA-weight rows too (maihda_sampling_weight_mask maps them
+  # to NA). A raw complete.cases() over the formula's columns misses NAs introduced by
+  # a transformed term (e.g. log(x) of x <= 0), which left the weight vector longer than
+  # the model matrix and triggered a weight/X row-count mismatch in mix(). Fall back to
+  # the raw check only when the analytic frame cannot be built.
+  keep <- maihda_analytic_keep_mask(formula, data,
+                                    weights = maihda_sampling_weight_mask(w))
+  if (is.null(keep)) {
+    model_vars <- intersect(unique(c(all.vars(formula), sampling_weights)),
+                            names(data))
+    keep <- stats::complete.cases(data[, model_vars, drop = FALSE]) &
+      is.finite(w) & w > 0
+  }
   if (!any(keep)) {
     stop("No usable rows remain for the wemix fit after dropping rows with ",
          "missing model variables or non-positive sampling weights.", call. = FALSE)
@@ -218,8 +254,12 @@ maihda_wemix_variances <- function(object) {
 #' and offers no fixed-only form, so predictions are built directly from the
 #' coefficient vector and the stored stratum effects: the fixed design matrix is
 #' constructed with the training data's factor levels and multiplied by
-#' \code{coef}, and \code{include_re} adds each row's stratum effect (conditional
-#' mode). Everything is on the link scale.
+#' \code{coef}, any formula offset term is evaluated on \code{newdata} and added,
+#' and \code{include_re} adds each row's stratum effect (conditional
+#' mode; an unseen stratum contributes 0 -- the population-average fallback that
+#' \code{\link{predict_maihda}} only reaches when \code{allow_new_levels = TRUE},
+#' having otherwise rejected unseen strata upstream). Everything is on the link
+#' scale.
 #'
 #' @param object A \code{maihda_model} with engine \code{"wemix"}.
 #' @param newdata Data to predict for; defaults to the analytic data.
@@ -241,6 +281,15 @@ maihda_wemix_linpred <- function(object, newdata = NULL, include_re = TRUE) {
          paste(missing_cols, collapse = ", "), call. = FALSE)
   }
   eta <- drop(X[, names(beta), drop = FALSE] %*% beta)
+
+  # A formula offset term (offset(.) in the model formula) is part of the linear
+  # predictor WeMix::mix() fits but is NOT a column of X, so model.matrix() never
+  # rebuilds it -- add it back explicitly from the model frame, evaluated on
+  # newdata, or response-scale predictions would be off by the offset.
+  off <- stats::model.offset(mf)
+  if (!is.null(off)) {
+    eta <- eta + off
+  }
 
   if (include_re) {
     re <- maihda_wemix_ranef_vector(object)
@@ -348,7 +397,7 @@ maihda_stratum_predictions_wemix <- function(object, summary_obj,
   }
 
   linkinv <- maihda_linkinv(object$family)
-  prior_w <- maihda_prior_weights(object)
+  prior_w <- maihda_prediction_weights(object)
   eta_fixed <- maihda_wemix_linpred(object, include_re = FALSE)
 
   stratum_est <- summary_obj$stratum_estimates
@@ -416,10 +465,13 @@ maihda_brms_weights_formula <- function(formula, wcol) {
 #' @param data The model data.
 #' @param formula The model formula.
 #' @param sampling_weights Name of the sampling-weight column.
-#' @return A list with \code{data} (weights column \code{.maihda_sw} added) and
-#'   \code{formula} (rewritten).
+#' @return A list with \code{data} (weights column \code{.maihda_sw} added),
+#'   \code{formula} (rewritten), and \code{keep} (a logical mask over the input
+#'   rows marking those retained, so the caller can re-slice any row-aligned
+#'   forwarded arguments to the same rows).
 #' @keywords internal
 maihda_prepare_brms_sampling_weights <- function(data, formula, sampling_weights) {
+  maihda_guard_reserved_weight_col(.maihda_brms_weights_col, data, formula, "brms")
   w <- as.numeric(data[[sampling_weights]])
   keep <- is.finite(w) & w > 0
   if (!any(keep)) {
@@ -436,6 +488,7 @@ maihda_prepare_brms_sampling_weights <- function(data, formula, sampling_weights
   data[[.maihda_brms_weights_col]] <- w * length(w) / sum(w)
   list(
     data = data,
-    formula = maihda_brms_weights_formula(formula, .maihda_brms_weights_col)
+    formula = maihda_brms_weights_formula(formula, .maihda_brms_weights_col),
+    keep = keep
   )
 }

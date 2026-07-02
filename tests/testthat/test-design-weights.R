@@ -40,6 +40,50 @@ test_that("maihda_validate_sampling_weights validates the specification", {
                "no positive finite values")
 })
 
+test_that("maihda_guard_reserved_weight_col rejects formula collisions only", {
+  d <- data.frame(a = 1:3, .maihda_sw = 4:6, check.names = FALSE)
+
+  # Present in data AND referenced by the formula -> would be overwritten -> error.
+  expect_error(
+    maihda_guard_reserved_weight_col(".maihda_sw", d, y ~ .maihda_sw, "brms"),
+    "reserved internal column"
+  )
+  # Present in data but NOT referenced by the formula (the carry-along case, e.g.
+  # maihda() refitting from a prior fit's $original_data) -> allowed.
+  expect_true(maihda_guard_reserved_weight_col(".maihda_sw", d, y ~ a, "brms"))
+  # Referenced by the formula but absent from the data -> no collision to guard
+  # (an ordinary missing variable, caught later by the engine).
+  expect_true(maihda_guard_reserved_weight_col(
+    ".maihda_sw", data.frame(a = 1:3), y ~ .maihda_sw, "brms"))
+})
+
+test_that("the weighted engines reject a reserved column used in the formula", {
+  d <- data.frame(y = rnorm(4), stratum = rep(c("a", "b"), 2),
+                  w = c(1, 2, 3, 4),
+                  .maihda_sw = c(10, 20, 30, 40),
+                  .maihda_l2wt = c(50, 60, 70, 80),
+                  check.names = FALSE)
+
+  # brms path: a covariate named .maihda_sw would be clobbered by the normalized
+  # likelihood weights, so fitting errors instead.
+  expect_error(
+    maihda_prepare_brms_sampling_weights(d, y ~ .maihda_sw + (1 | stratum), "w"),
+    "reserved internal column"
+  )
+  # wemix path: the guard fires before WeMix::mix(), so no WeMix install needed.
+  expect_error(
+    maihda_fit_wemix(y ~ .maihda_l2wt + (1 | stratum), d,
+                     stats::gaussian(), "w", list()),
+    "reserved internal column"
+  )
+
+  # A reserved column merely present (not in the formula) is overwritten, not
+  # rejected -- this keeps maihda()'s null/adjusted refits working when the column
+  # rides along in $original_data.
+  prep <- maihda_prepare_brms_sampling_weights(d, y ~ (1 | stratum), "w")
+  expect_equal(mean(prep$data$.maihda_sw), 1)
+})
+
 test_that("fit_maihda rejects sampling weights with the lme4 engine", {
   d <- make_dw_data()
   expect_error(
@@ -295,6 +339,27 @@ test_that("wemix rows with missing or non-positive weights are dropped", {
   expect_equal(nrow(m$data), nrow(d) - 3)
 })
 
+test_that("wemix prefilters on the evaluated frame, not raw complete.cases", {
+  skip_on_cran()
+  skip_if_not_installed("WeMix")
+
+  d <- make_dw_data(n = 400)
+  # Two rows whose transformed predictor log(age) is NaN. age itself is non-missing, so
+  # a raw complete.cases() on the formula columns keeps them -- leaving the sampling
+  # weight vector longer than the model matrix and erroring in WeMix::mix() with a
+  # weight/X row-count mismatch. The evaluated analytic frame drops them up front.
+  d$age[c(5, 9)] <- -1
+
+  expect_warning(
+    m <- suppressMessages(
+      fit_maihda(y ~ log(age) + (1 | gender:race:edu), data = d,
+                 engine = "wemix", sampling_weights = "w")),
+    "dropped 2 row"
+  )
+  expect_equal(nrow(m$data), nrow(d) - 2)
+  expect_true(all(is.finite(log(m$data$age))))   # no NaN-producing rows survived
+})
+
 test_that("predict_maihda works for wemix fits (individual and strata)", {
   skip_on_cran()
   skip_if_not_installed("WeMix")
@@ -326,6 +391,32 @@ test_that("predict_maihda works for wemix fits (individual and strata)", {
 
   # Predictions including the stratum effect track the conditional means.
   expect_gt(stats::cor(p_ind, m$data$y), 0.3)
+})
+
+test_that("wemix predictions add the formula offset", {
+  skip_on_cran()
+  skip_if_not_installed("WeMix")
+
+  d <- make_dw_data()
+  d$expo <- runif(nrow(d), 0.5, 4)
+  m <- suppressMessages(
+    fit_maihda(y ~ age + offset(log(expo)) + (1 | gender:race:edu), data = d,
+               engine = "wemix", sampling_weights = "w"))
+
+  # Rebuild the link-scale prediction independently as X %*% beta + offset + u.
+  off <- log(m$data$expo)
+  beta <- m$model$coef
+  tt <- stats::delete.response(stats::terms(reformulas::nobars(m$formula)))
+  mf <- stats::model.frame(tt, m$data, na.action = stats::na.pass)
+  X <- stats::model.matrix(tt, mf)
+  re <- maihda_wemix_ranef_vector(m)
+  u <- re[as.character(m$data$stratum)]; u[is.na(u)] <- 0
+  ref <- drop(X[, names(beta), drop = FALSE] %*% beta) + off + unname(u)
+
+  eta <- predict_maihda(m, type = "link")
+  expect_equal(unname(eta), unname(ref), tolerance = 1e-8)
+  # A fit that dropped the offset would differ by max|offset| (> 0.5 here).
+  expect_gt(max(abs(off)), 0.5)
 })
 
 test_that("calculate_pvc works across wemix fits and guards mismatched weights", {
@@ -432,7 +523,7 @@ test_that("plot types build on a wemix fit", {
     fit_maihda(y ~ age + (1 | gender:race:edu), data = d,
                engine = "wemix", sampling_weights = "w"))
   s <- summary(m)
-  for (t in c("vpc", "predicted", "obs_vs_shrunken", "risk_vs_effect",
+  for (t in c("vpc", "predicted", "obs_vs_shrunken",
               "effect_decomp")) {
     p <- plot(m, type = t, summary_obj = s)
     expect_s3_class(p, "ggplot")
@@ -672,6 +763,10 @@ test_that("maihda_prior_weights resolves design weights from either column", {
 
   expect_equal(maihda_prior_weights(m), c(2, 3, 4, 5))
 
+  # For a non-aggregated-binomial response the prediction weights coincide with the
+  # prior weights (trial-weighting only kicks in for a cbind/trials() response).
+  expect_equal(maihda_prediction_weights(m), maihda_prior_weights(m))
+
   # A brms analytic frame carries the normalized .maihda_sw column instead.
   m_brms <- m
   m_brms$data$w <- NULL
@@ -737,7 +832,55 @@ test_that("fit_maihda routes sampling weights into a brms fit (Stan-free)", {
                captured$data$w / captured$data$w[1])
 })
 
-test_that("wemix individual predictions treat an unseen stratum as zero effect", {
+test_that("maihda_reslice_dot_args slices only row-aligned forwarded values", {
+  env <- new.env()
+  dot_vals <- list(subset = 1:5, chains = 4L, mat = matrix(1:10, nrow = 5))
+  for (nm in names(dot_vals)) {
+    assign(paste0(".maihda_arg_", nm), dot_vals[[nm]], envir = env)
+  }
+  keep <- c(TRUE, FALSE, TRUE, FALSE, TRUE)
+
+  maihda_reslice_dot_args(dot_vals, keep, 5L, env)
+
+  # Row-aligned vector and matrix are sliced to the kept rows...
+  expect_equal(get(".maihda_arg_subset", env), c(1L, 3L, 5L))
+  expect_equal(get(".maihda_arg_mat", env),
+               matrix(1:10, nrow = 5)[keep, , drop = FALSE])
+  # ...a scalar (length != n) is left untouched.
+  expect_equal(get(".maihda_arg_chains", env), 4L)
+})
+
+test_that("fit_maihda re-slices row-aligned dots after the brms weight drop", {
+  skip_if_not_installed("brms")
+
+  d <- make_dw_data(n = 12)
+  # Force two rows out of the fit via a zero and a missing weight.
+  d$w[3] <- 0
+  d$w[7] <- NA
+  s <- make_strata(d, vars = c("gender", "race", "edu"))
+
+  captured <- NULL
+  local_mocked_bindings(
+    brm = function(formula, data, family, ...) {
+      captured <<- list(data = data, dots = list(...))
+      structure(list(), class = "brmsfit")
+    },
+    .package = "brms"
+  )
+
+  # `subset` is forwarded and row-aligned to the pre-drop data (12 rows); after the
+  # weight drop the data is 10 rows, so the bound subset must be re-sliced to match
+  # -- otherwise brms gets a 12-long subset against a 10-row data frame.
+  sub <- rep(TRUE, nrow(s$data))
+  suppressMessages(suppressWarnings(
+    fit_maihda(y ~ age + (1 | stratum), data = s$data,
+               engine = "brms", sampling_weights = "w", subset = sub)
+  ))
+  expect_equal(nrow(captured$data), 10L)
+  expect_length(captured$dots$subset, 10L)
+})
+
+test_that("wemix unseen stratum: helper maps to zero, public path gates it", {
   ranefMat <- list(stratum = stats::setNames(
     data.frame(c(0.5, -0.5), row.names = c("s1", "s2")), "(Intercept)"))
   varDF <- data.frame(grp = c("stratum", "Residual"),
@@ -748,8 +891,142 @@ test_that("wemix individual predictions treat an unseen stratum as zero effect",
                              coef = c("(Intercept)" = 2, x = 1), data = d)
 
   nd <- data.frame(x = c(0, 0), stratum = c("s1", "unseen"))
+
+  # The internal linpred primitive maps an unseen stratum to a zero random effect
+  # (eta = fixed part). This is the population-average fallback, NOT the public
+  # default: the seen stratum keeps its 0.5 effect, the unseen one drops to 0.
   eta <- maihda_wemix_linpred(m, newdata = nd, include_re = TRUE)
   expect_equal(unname(eta), c(2.5, 2))
+
+  # Public individual predictions reject the unseen stratum by default, instead of
+  # silently returning that fixed-only prediction.
+  expect_error(
+    predict_maihda(m, newdata = nd, type = "individual"),
+    "not present in the fitted model"
+  )
+
+  # allow_new_levels = TRUE opts into the population average. The gaussian identity
+  # link makes the response scale equal the latent eta computed above.
+  pa <- predict_maihda(m, newdata = nd, type = "individual",
+                       allow_new_levels = TRUE)
+  expect_equal(unname(pa), c(2.5, 2))
+})
+
+test_that("brms unseen stratum honours the zero-effect population-average fallback", {
+  # Regression for the audit finding: allow_new_levels = TRUE promises a population-
+  # average (fixed-effects-only) prediction for an unseen stratum -- the stratum
+  # random effect treated as zero. Forwarding allow_new_levels to brms is NOT enough:
+  # its default sample_new_levels = "uncertainty" DRAWS a new-level effect from the
+  # random-effects distribution instead of zeroing it. The fix predicts unseen rows
+  # with re_formula = NA, so the unseen prediction must match a manual re_formula = NA
+  # (fixed-only) prediction, while seen rows keep their estimated stratum effect.
+  # Compiles a Stan model, so OPT-IN like the other brms tests.
+  skip_on_cran()
+  skip_if(Sys.getenv("MAIHDA_TEST_BRMS") != "true",
+          "brms Stan tests are opt-in; set MAIHDA_TEST_BRMS=true to run them")
+  skip_if_not_installed("brms")
+
+  set.seed(717)
+  n <- 800
+  d <- data.frame(
+    gender = sample(c("F", "M"), n, replace = TRUE),
+    race   = sample(c("A", "B", "C"), n, replace = TRUE),
+    x      = stats::rnorm(n)
+  )
+  sk <- interaction(d$gender, d$race, drop = TRUE)
+  d$y <- 0.4 * d$x + stats::rnorm(nlevels(sk), sd = 0.8)[sk] + stats::rnorm(n, sd = 0.5)
+  strata <- make_strata(d, vars = c("gender", "race"))
+  d$stratum <- strata$data$stratum
+  d <- d[!is.na(d$stratum), , drop = FALSE]
+
+  m <- suppressWarnings(suppressMessages(
+    fit_maihda(y ~ x + (1 | stratum), data = d, engine = "brms",
+               chains = 1, iter = 300, refresh = 0)
+  ))
+
+  # One row in a SEEN stratum, one in a brand-new stratum.
+  seen_stratum <- as.character(d$stratum[1])
+  nd <- data.frame(x = c(0.5, 0.5),
+                   stratum = c(seen_stratum, "ZZ-unseen"),
+                   stringsAsFactors = FALSE)
+
+  # The unseen stratum is rejected by default.
+  expect_error(
+    predict_maihda(m, newdata = nd, type = "individual", scale = "response"),
+    "not present in the fitted model"
+  )
+
+  pa <- predict_maihda(m, newdata = nd, type = "individual", scale = "response",
+                       allow_new_levels = TRUE)
+
+  # Unseen row == the population-average (re_formula = NA) prediction: fixed effects
+  # only, stratum random effect zero (NOT a sampled new-level effect).
+  popavg <- stats::fitted(m$model, newdata = nd, re_formula = NA,
+                         summary = TRUE)[, "Estimate"]
+  expect_equal(unname(pa[2]), unname(popavg[2]))
+
+  # Seen row keeps its estimated stratum effect, so it differs from the fixed-only
+  # prediction and matches the full-random-effects prediction.
+  seen_full <- stats::fitted(m$model, newdata = nd[1, , drop = FALSE],
+                            summary = TRUE)[, "Estimate"]
+  expect_equal(unname(pa[1]), unname(seen_full))
+  expect_false(isTRUE(all.equal(unname(pa[1]), unname(popavg[1]))))
+})
+
+test_that("brms unseen stratum keeps a seen context random effect (lme4 parity)", {
+  # An unseen stratum drops only the STRATUM random effect; any other random effect
+  # the row participates in (here a contextual (1 | school) intercept) is kept, the
+  # way lme4's allow.new.levels zeroes only the unseen level and keeps seen ones. So
+  # the unseen-row prediction must match brms's re_formula = ~ (1 | school) (stratum
+  # dropped, school kept), NOT re_formula = NA (which would drop the school effect
+  # too). Compiles a Stan model, so OPT-IN like the other brms tests.
+  skip_on_cran()
+  skip_if(Sys.getenv("MAIHDA_TEST_BRMS") != "true",
+          "brms Stan tests are opt-in; set MAIHDA_TEST_BRMS=true to run them")
+  skip_if_not_installed("brms")
+
+  set.seed(818)
+  n <- 1000
+  n_school <- 8
+  school_eff <- stats::rnorm(n_school, sd = 1.2)   # sizeable, so dropping it shows
+  d <- data.frame(
+    gender = sample(c("F", "M"), n, replace = TRUE),
+    race   = sample(c("A", "B", "C"), n, replace = TRUE),
+    school = factor(sample(seq_len(n_school), n, replace = TRUE)),
+    x      = stats::rnorm(n)
+  )
+  sk <- interaction(d$gender, d$race, drop = TRUE)
+  d$y <- 0.4 * d$x + stats::rnorm(nlevels(sk), sd = 0.6)[sk] +
+    school_eff[as.integer(d$school)] + stats::rnorm(n, sd = 0.5)
+  strata <- make_strata(d, vars = c("gender", "race"))
+  d$stratum <- strata$data$stratum
+  d <- d[!is.na(d$stratum), , drop = FALSE]
+
+  m <- suppressWarnings(suppressMessages(
+    fit_maihda(y ~ x + (1 | stratum), data = d, engine = "brms",
+               context = "school", chains = 1, iter = 400, refresh = 0)
+  ))
+  expect_equal(m$context_vars, "school")
+
+  seen_stratum <- as.character(d$stratum[1])
+  seen_school  <- d$school[1]
+  nd <- data.frame(x = c(0.5, 0.5),
+                   stratum = c(seen_stratum, "ZZ-unseen"),
+                   school  = c(seen_school, seen_school),
+                   stringsAsFactors = FALSE)
+
+  pa <- predict_maihda(m, newdata = nd, type = "individual", scale = "response",
+                       allow_new_levels = TRUE)
+
+  keep_school <- stats::fitted(m$model, newdata = nd, re_formula = ~ (1 | school),
+                              summary = TRUE)[, "Estimate"]
+  drop_all    <- stats::fitted(m$model, newdata = nd, re_formula = NA,
+                              summary = TRUE)[, "Estimate"]
+
+  # Unseen row == keep-school prediction (stratum dropped, school kept) ...
+  expect_equal(unname(pa[2]), unname(keep_school[2]))
+  # ... and NOT the fixed-only prediction that would also drop the seen school.
+  expect_false(isTRUE(all.equal(unname(pa[2]), unname(drop_all[2]))))
 })
 
 test_that("predict_maihda supplies the brms weight column for user newdata", {

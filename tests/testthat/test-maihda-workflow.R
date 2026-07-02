@@ -26,6 +26,36 @@ test_that("maihda() returns a consistent bundle; groups NULL without group", {
   expect_equal(a$summary$vpc$estimate, summary(m_direct)$vpc$estimate, tolerance = 1e-8)
 })
 
+test_that("the formula builders quote non-syntactic dimension names safely", {
+  # Regression: maihda_adjusted_formula() (two-model path) and remove_terms()
+  # (crossed-dimensions path) built RHS terms with sprintf("`%s`", .), which breaks
+  # a legal name containing a backtick. maihda_quote_name() escapes it correctly.
+  expect_identical(maihda_quote_name("a`b"), "`a\\`b`")
+  expect_identical(maihda_quote_name("gender var"), "`gender var`")
+
+  set.seed(4101)
+  n <- 900
+  gv <- sample(c("F", "M"), n, TRUE)
+  rc <- sample(c("A", "B", "C"), n, TRUE)
+  sk <- interaction(gv, rc, drop = TRUE)
+  d <- data.frame(
+    y = 2 + 0.8 * (gv == "M") + rnorm(nlevels(sk), sd = 1.2)[sk] + rnorm(n, sd = 1),
+    `gender var` = gv, race = rc, check.names = FALSE
+  )
+
+  # Two-model path: the adjusted formula must add the backtick-quoted main effects.
+  a2 <- suppressMessages(suppressWarnings(maihda(y ~ (1 | `gender var`:race), data = d)))
+  expect_match(paste(deparse(a2$adjusted_formula), collapse = " "), "`gender var`",
+               fixed = TRUE)
+  expect_true(is.finite(a2$pcv$pvc))
+
+  # Crossed-dimensions path strips the explicit main effects via remove_terms().
+  a3 <- suppressMessages(suppressWarnings(
+    maihda(y ~ `gender var` + race + (1 | `gender var`:race), data = d,
+           decomposition = "crossed-dimensions")))
+  expect_true(is.finite(a3$summary$vpc$estimate))
+})
+
 test_that("maihda() with group attaches a comparison equal to compare_maihda_groups()", {
   d <- make_workflow_data(4002)
   a <- suppressMessages(maihda(y ~ age + (1 | gender:race), data = d, group = "country"))
@@ -85,18 +115,6 @@ test_that("plot.maihda_analysis dispatches to model and group plots", {
   # group plots require a group argument
   a_nogroup <- suppressMessages(maihda(y ~ age + (1 | gender:race), data = d))
   expect_error(plot(a_nogroup, type = "group_vpc"), "group", ignore.case = TRUE)
-})
-
-test_that("compute_maihda_ternary_data is classed and plots via plot()", {
-  skip_if_not_installed("ggtern")
-  d <- make_workflow_data(4006)
-  model <- fit_maihda(y ~ age + (1 | gender:race), data = d)
-
-  td <- compute_maihda_ternary_data(model, verbose = FALSE)
-  expect_s3_class(td, "maihda_ternary")
-  expect_s3_class(plot(td), "ggplot")
-
-  expect_warning(plot_maihda_ternary(td), "deprecated")
 })
 
 test_that("maihda() fits the adjusted model and reports a PCV", {
@@ -221,6 +239,81 @@ test_that("maihda() accepts the dimensions' main effects in the formula (no PCV-
   a <- suppressMessages(maihda(y ~ age + (1 | gender:race), data = d))
   expect_equal(b$pcv$pvc, a$pcv$pvc, tolerance = 1e-8)
   expect_equal(b$summary$vpc$estimate, a$summary$vpc$estimate, tolerance = 1e-8)
+})
+
+test_that("maihda() rejects a fixed interaction among the stratum dimensions", {
+  d <- make_workflow_data(4205)
+  # `gender * race` is R shorthand for gender + race + gender:race. The fixed
+  # gender:race interaction duplicates the (1 | gender:race) stratum random
+  # intercept: the old behaviour stripped only the main effects, leaving gender:race
+  # in BOTH the derived null and adjusted formulas (NULL/invalid PCV). maihda() must
+  # reject it up front rather than return a corrupt decomposition.
+  expect_error(
+    suppressMessages(suppressWarnings(
+      maihda(y ~ age + gender * race + (1 | gender:race), data = d))),
+    "interaction term"
+  )
+  # The explicit colon form (gender:race written out) is the same expansion.
+  expect_error(
+    suppressMessages(suppressWarnings(
+      maihda(y ~ age + gender + race + gender:race + (1 | gender:race), data = d))),
+    "interaction term"
+  )
+  # Variable order in the interaction must not matter (race:gender == gender:race).
+  expect_error(
+    suppressMessages(suppressWarnings(
+      maihda(y ~ age + race * gender + (1 | gender:race), data = d))),
+    "interaction term"
+  )
+  # The additive form is unaffected (no false positive).
+  a <- suppressMessages(maihda(y ~ age + gender + race + (1 | gender:race), data = d))
+  expect_true(is.finite(a$pcv$pvc))
+})
+
+test_that("maihda_dimension_interaction_terms() flags only dimension-only interactions", {
+  sv <- c("gender", "race")
+  # A dimension-by-dimension interaction is flagged, in either variable order.
+  expect_length(
+    maihda_dimension_interaction_terms(y ~ age + gender:race + (1 | gender:race), sv),
+    1)
+  expect_length(
+    maihda_dimension_interaction_terms(y ~ age + race:gender + (1 | gender:race), sv),
+    1)
+  # A covariate-by-dimension interaction (age:gender) is a legitimate adjustment,
+  # not a stratum-cell interaction, so it is NOT flagged.
+  expect_length(
+    maihda_dimension_interaction_terms(y ~ age * gender + race + (1 | gender:race), sv),
+    0)
+  # The purely additive adjusted formula is clean.
+  expect_length(
+    maihda_dimension_interaction_terms(y ~ age + gender + race + (1 | gender:race), sv),
+    0)
+  # Non-syntactic dimension names are matched in their backtick-quoted form.
+  expect_length(
+    maihda_dimension_interaction_terms(
+      y ~ age + `gender var` * race + (1 | `gender var`:race),
+      c("gender var", "race")),
+    1)
+})
+
+test_that("compare_maihda_groups() rejects a fixed dimension interaction", {
+  d <- make_workflow_data(4207)
+  expect_error(
+    suppressWarnings(compare_maihda_groups(
+      y ~ age + gender * race + (1 | gender:race), data = d,
+      group = "country", min_group_n = 10)),
+    "interaction term"
+  )
+})
+
+test_that("maihda_interactions() warns on a model carrying a fixed dimension interaction", {
+  d <- make_workflow_data(4208)
+  m <- suppressMessages(suppressWarnings(
+    fit_maihda(y ~ age + gender * race + (1 | gender:race), data = d)))
+  expect_warning(
+    maihda_interactions(m),
+    "absorbs the intersectional effect"
+  )
 })
 
 test_that("maihda() adds the dimensions' main effects with a message when omitted", {

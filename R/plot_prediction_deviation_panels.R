@@ -23,18 +23,20 @@ maihda_binomial_abs_deviance_residual <- function(obs_outcome_01, fitted) {
   out
 }
 
-# Prior/precision weights aligned to `data`'s rows, used to make the per-stratum
+# Prediction weights aligned to `data`'s rows, used to make the per-stratum
 # aggregation a weighted mean for weighted fits (consistent with the weighted VPC
-# and the other stratum-level plots). Falls back to unit weights -- so the
-# weighted means reduce EXACTLY to plain means -- when the model is unweighted,
-# the weights cannot be recovered, or they do not align with `data` (e.g.
-# user-supplied prediction data). These are lme4 prior/precision weights, not a
-# complex survey design (no design-based variance is computed).
+# and the other stratum-level plots); for an aggregated-binomial fit each row is
+# weighted by its binomial TRIAL count, matching the trial-weighting the raw-model
+# fallback below already applies via weights(type = "prior"). Falls back to unit
+# weights -- so the weighted means reduce EXACTLY to plain means -- when the model
+# is unweighted, the weights cannot be recovered, or they do not align with `data`
+# (e.g. user-supplied prediction data). These are prior/precision (and trial)
+# weights, not a complex survey design (no design-based variance is computed).
 maihda_prediction_panel_prior_weights <- function(maihda_obj, model, data) {
   n <- nrow(data)
   w <- NULL
   if (!is.null(maihda_obj)) {
-    w <- tryCatch(maihda_prior_weights(maihda_obj), error = function(e) NULL)
+    w <- tryCatch(maihda_prediction_weights(maihda_obj), error = function(e) NULL)
   }
   if (is.null(w)) {
     w <- tryCatch(stats::weights(model, type = "prior"), error = function(e) NULL)
@@ -162,6 +164,12 @@ maihda_prediction_panel_ordinal_probs <- function(model, data) {
              paste(missing_cols, collapse = ", "), call. = FALSE)
       }
       drop(X[, names(beta), drop = FALSE] %*% beta)
+    }
+    # A formula offset term is part of the latent location clmm fits but is not a
+    # column of X, so add it explicitly or the rebuilt probabilities omit it.
+    off <- stats::model.offset(mf)
+    if (!is.null(off)) {
+      eta <- eta + off
     }
     re_list <- tryCatch(ordinal::ranef(model), error = function(e) NULL)
     if (!is.null(re_list) && "stratum" %in% names(re_list) &&
@@ -390,7 +398,7 @@ plot_prediction_deviation_panels <- function(model, data = NULL,
       ggplot2::geom_vline(ggplot2::aes(xintercept = .data$mean_fitted[1]), linetype = "dashed", color = "black") +
       ggplot2::geom_rug(data = label_df, color = "red", linewidth = 1) +
       ggplot2::labs(title = value_dist_title, x = NULL, y = "Density") +
-      ggplot2::theme_minimal()
+      theme_maihda()
 
     p2 <- ggplot2::ggplot(df, ggplot2::aes(x = .data$rank, y = .data$fitted)) +
       ggplot2::geom_segment(ggplot2::aes(xend = .data$rank, yend = .data$mean_fitted), color = "gray60") +
@@ -400,18 +408,9 @@ plot_prediction_deviation_panels <- function(model, data = NULL,
       ggrepel::geom_label_repel(data = label_df, ggplot2::aes(label = .data$id), size = 3, min.segment.length = 0) +
       ggplot2::scale_color_manual(values = c("Above Mean" = "#0072B2", "Below Mean" = "#D55E00")) +
       ggplot2::labs(
-        x = x_label, y = value_axis_label, color = "Direction", size = "Deviation\nMagnitude",
-        # Only describe the stratum interval when one is actually drawn: for lme4
-        # predict.merMod returns no se.fit, so the per-row SEs (and the bars) are
-        # NA -- in that case omit the caption rather than promising an interval.
-        caption = if (identical(x_label, "Stratum Rank") && any(is.finite(df$se))) {
-          paste("Stratum intervals are approximate: the mean of the individual",
-                "prediction SEs, not the SE of the stratum-mean prediction.")
-        } else {
-          NULL
-        }
+        x = x_label, y = value_axis_label, color = "Direction", size = "Deviation\nMagnitude"
       ) +
-      ggplot2::theme_minimal()
+      theme_maihda()
 
     return(patchwork::wrap_plots(p1, p2, ncol = 1, heights = c(1, 2)))
 
@@ -502,7 +501,7 @@ is_aggregated <- "stratum" %in% names(df)
       ggplot2::geom_vline(ggplot2::aes(xintercept = .data$mean_fitted[1]), linetype = "dashed", color = "black") +
       ggplot2::geom_rug(data = label_df, color = "red", linewidth = 1) +
       ggplot2::labs(title = "Distribution of Predicted Probabilities", x = NULL, y = "Density") +
-      ggplot2::theme_minimal()
+      theme_maihda()
 
     p2 <- ggplot2::ggplot(df, ggplot2::aes(x = .data$rank, y = .data$fitted)) +
       ggplot2::geom_segment(ggplot2::aes(xend = .data$rank, yend = .data$mean_fitted), color = "gray60", alpha = 0.5) +
@@ -512,15 +511,7 @@ is_aggregated <- "stratum" %in% names(df)
       p2 <- p2 +
         ggplot2::geom_point(ggplot2::aes(color = .data$direction, size = .data$abs_res_dev), alpha = 0.8) +
         ggplot2::labs(
-          x = x_label, y = "Predicted Probability", color = "Direction", size = "|Deviance\nResidual|",
-          # Omit the interval caption when no finite SE is available (e.g. lme4,
-          # whose predict() has no se.fit), so the bars and the note stay in sync.
-          caption = if (any(is.finite(df$se))) {
-            paste("Stratum intervals are approximate: the mean of the individual",
-                  "prediction SEs, not the SE of the stratum-mean prediction.")
-          } else {
-            NULL
-          }
+          x = x_label, y = "Predicted Probability", color = "Direction", size = "|Deviance\nResidual|"
         )
     } else {
       p2 <- p2 +
@@ -536,7 +527,7 @@ is_aggregated <- "stratum" %in% names(df)
       ggplot2::geom_hline(ggplot2::aes(yintercept = .data$mean_fitted[1]), linetype = "dashed") +
         ggrepel::geom_label_repel(data = label_df, ggplot2::aes(label = .data$id), size = 3, min.segment.length = 0) +
       ggplot2::scale_color_manual(values = c("Above Mean" = "#0072B2", "Below Mean" = "#D55E00")) +
-      ggplot2::theme_minimal()
+      theme_maihda()
 
     return(patchwork::wrap_plots(p1, p2, ncol = 1, heights = c(1, 2)))
 
@@ -618,7 +609,7 @@ is_aggregated <- "stratum" %in% names(df)
         ggplot2::geom_area(alpha = 0.8) +
         ggplot2::scale_fill_viridis_d(option = "magma") +
         ggplot2::labs(title = "Predicted Category Probability Structure", x = NULL, y = "Probability") +
-        ggplot2::theme_minimal() +
+        theme_maihda() +
         ggplot2::theme(axis.text.x = ggplot2::element_blank())
 
       p2 <- ggplot2::ggplot(df, ggplot2::aes(x = .data$rank, y = .data$surprise)) +
@@ -627,7 +618,7 @@ is_aggregated <- "stratum" %in% names(df)
         ggplot2::scale_color_viridis_c(option = "inferno") +
         ggrepel::geom_label_repel(data = label_df, ggplot2::aes(label = .data$id), size = 3) +
         ggplot2::labs(x = x_label, y = "Surprise\n(-log(P(Observed)))", color = "Surprise", size = "Surprise") +
-        ggplot2::theme_minimal()
+        theme_maihda()
 
       return(patchwork::wrap_plots(p1, p2, ncol = 1, heights = c(1, 2)))
 
@@ -676,7 +667,7 @@ is_aggregated <- "stratum" %in% names(df)
         ggplot2::geom_vline(ggplot2::aes(xintercept = .data$mean_fitted[1]), linetype = "dashed", color = "black") +
         ggplot2::geom_rug(data = label_df, color = "red", linewidth = 1) +
         ggplot2::labs(title = "Distribution of Expected Category Scores", x = NULL, y = "Density") +
-        ggplot2::theme_minimal()
+        theme_maihda()
 
       p2 <- ggplot2::ggplot(df, ggplot2::aes(x = .data$rank, y = .data$fitted)) +
         ggplot2::geom_segment(ggplot2::aes(xend = .data$rank, yend = .data$mean_fitted), color = "gray60") +
@@ -685,7 +676,7 @@ is_aggregated <- "stratum" %in% names(df)
         ggrepel::geom_label_repel(data = label_df, ggplot2::aes(label = .data$id), size = 3, min.segment.length = 0) +
         ggplot2::scale_color_manual(values = c("Above Mean" = "#0072B2", "Below Mean" = "#D55E00")) +
         ggplot2::labs(x = x_label, y = "Expected Score", color = "Direction", size = "Deviation\nMagnitude") +
-        ggplot2::theme_minimal()
+        theme_maihda()
 
       return(patchwork::wrap_plots(p1, p2, ncol = 1, heights = c(1, 2)))
     }

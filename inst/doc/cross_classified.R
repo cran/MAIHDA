@@ -34,9 +34,6 @@ summary(cc$model)
 plot(cc, type = "vpc")            # per-dimension additive + interaction + residual
 plot(cc, type = "effect_decomp")  # additive vs. interaction, per stratum
 
-## ----plots-ternary, eval = requireNamespace("ggtern", quietly = TRUE), warning = FALSE, message = FALSE----
-plot(cc, type = "ternary")        # additive / interaction / uncertainty per stratum
-
 ## ----groups, eval = FALSE-----------------------------------------------------
 # data("maihda_country_data")
 # cc_grp <- maihda(

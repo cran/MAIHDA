@@ -4,12 +4,24 @@
 \alias{plot_obs_vs_shrunken}
 \title{Observed vs. Shrunken Estimates Plot}
 \usage{
-plot_obs_vs_shrunken(object, summary_obj, highlight = NULL)
+plot_obs_vs_shrunken(
+  object,
+  summary_obj,
+  highlight = NULL,
+  only_flagged = FALSE
+)
 }
 \arguments{
 \item{object}{A maihda_model object}
 
 \item{summary_obj}{A maihda_summary object}
+
+\item{highlight}{Optional character vector of highlighted stratum ids (flagged,
+or ROPE-relevant under \code{highlight_by = "rope"}), with the
+interaction-screen parameters attached as attributes.}
+
+\item{only_flagged}{When TRUE, show only the highlighted strata; a captioned
+empty panel is returned if none are.}
 }
 \value{
 A ggplot2 object
@@ -24,6 +36,6 @@ The x-axis is each stratum's raw observed mean; the y-axis is the
   pure shrinkage toward the grand mean. For a covariate-adjusted model the model
   estimate also moves with the stratum's covariate profile, so distance from the
   diagonal reflects \emph{both} shrinkage and covariate adjustment and should
-  not be read as shrinkage alone. The caption notes which case applies.
+  not be read as shrinkage alone.
 }
 \keyword{internal}

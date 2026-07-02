@@ -4,20 +4,31 @@
 \alias{plot.maihda_analysis}
 \title{Plot a MAIHDA Analysis}
 \usage{
-\method{plot}{maihda_analysis}(x, type = "all", highlight_interactions = FALSE, ...)
+\method{plot}{maihda_analysis}(
+  x,
+  type = "all",
+  highlight_interactions = FALSE,
+  only_flagged = FALSE,
+  highlight_by = c("flag", "rope"),
+  rope = NULL,
+  select = c("order", "deviation"),
+  ...
+)
 }
 \arguments{
 \item{x}{A \code{maihda_analysis} object from \code{\link{maihda}}.}
 
 \item{type}{One of the model types ("all", "vpc", "obs_vs_shrunken", "predicted",
-"risk_vs_effect", "effect_decomp", "ternary", "prediction_deviation"), the
+"upset" (the UpSet-style alternative to "predicted"; forwards \code{quantity}
+via \code{...}), "effect_decomp",
+"prediction_deviation"), the
 contextual type ("context_vpc", a stratum-vs-context variance bar; requires
 \code{maihda(context = )}), a longitudinal type ("vpc_trajectory",
 "trajectories", "pcv_trajectory"; requires \code{decomposition =
 "longitudinal"}), or a group type ("group_vpc", "group_components",
-"group_between_variance", "group_pcv"). Default "all". For a longitudinal
-analysis "all" shows the VPC-over-time, the stratum trajectories, and the
-time-specific PCV.}
+"group_between_variance", "group_pcv", "group_additive_share"). Default "all".
+For a longitudinal analysis "all" shows the VPC-over-time, the stratum
+trajectories, and the time-specific PCV.}
 
 \item{highlight_interactions}{Highlight strata with a credibly non-zero
 intersectional interaction on the BLUP-based views (see
@@ -27,6 +38,35 @@ crossed-dimensions model), a multiple-testing method such as \code{"BH"}, or
 a \code{maihda_interactions} object. The flags are computed once from the
 correct (adjusted) model and reused across views.}
 
+\item{only_flagged}{Show only the highlighted strata on the \code{"predicted"}
+and \code{"obs_vs_shrunken"} views instead of dimming the rest (see
+\code{\link[=plot.maihda_model]{plot}}). \code{FALSE} (default) keeps every
+stratum; \code{TRUE} restricts those views to the highlighted strata (those
+carrying a credibly non-zero interaction, or -- under
+\code{highlight_by = "rope"} -- those classified ROPE-\code{"relevant"}) and,
+when \code{highlight_interactions} is left \code{FALSE}, turns the highlight on
+with this analysis's stored diagnostic. \code{"effect_decomp"} ignores it (it
+stays highlighted in context).}
+
+\item{highlight_by}{Which interaction-screen column defines the highlighted
+strata: \code{"flag"} (default, the zero-centred \code{flagged} column) or
+\code{"rope"} (the equivalence \code{decision} column, highlighting the
+strata classified \code{"relevant"}). See
+\code{\link[=plot.maihda_model]{plot}}. \code{"rope"} requires \code{rope}
+(or a \code{highlight_interactions} object built with one).}
+
+\item{rope}{Equivalence region forwarded to \code{\link{maihda_interactions}}
+when computing the screen, so \code{highlight_by = "rope"} has a
+\code{decision} column to read: a single positive \code{d} for the symmetric
+region \code{c(-d, d)} on the latent (link) scale, or \code{c(lower, upper)}.
+\code{NULL} (default) adds no equivalence classification.}
+
+\item{select}{When the \code{n_strata} cap drops strata on the
+\code{"predicted"} (or longitudinal \code{"trajectories"}) view, which to
+keep: \code{"order"} (default, first n_strata in stratum order) or
+\code{"deviation"} (the n_strata furthest from the reference, both tails). See
+\code{\link[=plot.maihda_model]{plot}}.}
+
 \item{...}{Additional arguments passed to the underlying plot method.}
 }
 \value{
@@ -35,12 +75,12 @@ A ggplot2 object, or (for \code{type = "all"}) an invisible list of them.
 \description{
 Dispatches each \code{type} to the model it is valid on. The VPC and shrinkage
 views (\code{"vpc"}, \code{"obs_vs_shrunken"}, \code{"predicted"}) use the
-\strong{null} model. The additive-vs-intersectional views (\code{"risk_vs_effect"},
-\code{"effect_decomp"}, \code{"ternary"}, \code{"prediction_deviation"}) use the
+\strong{null} model. The additive-vs-intersectional views (\code{"effect_decomp"},
+\code{"prediction_deviation"}) use the
 \strong{adjusted} model, whose fixed effects carry the dimensions' additive part so
 the stratum random effect is the pure interaction; with fewer than two dimensions
 (no adjusted model) they fall back to the null model. Group types
 (\code{"group_vpc"}, \code{"group_components"}, \code{"group_between_variance"},
-\code{"group_pcv"}) use the group comparison when \code{\link{maihda}} was called
-with a \code{group}.
+\code{"group_pcv"}, \code{"group_additive_share"}) use the group comparison when
+\code{\link{maihda}} was called with a \code{group}.
 }

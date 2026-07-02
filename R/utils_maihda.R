@@ -201,11 +201,13 @@ maihda_format_fit_diagnostics <- function(diagnostics) {
     )
   }
   if (isFALSE(diagnostics$converged) && length(diagnostics$messages) > 0) {
-    header <- if (identical(diagnostics$engine, "brms")) {
-      "MCMC convergence diagnostics (brms):"
-    } else {
-      "Convergence warnings reported by lme4:"
-    }
+    header <- switch(
+      as.character(diagnostics$engine),
+      brms = "MCMC convergence diagnostics (brms):",
+      ordinal = "Convergence warnings reported by ordinal::clmm:",
+      lme4 = "Convergence warnings reported by lme4:",
+      "Convergence warnings:"
+    )
     out <- c(out, header, paste0("  - ", diagnostics$messages))
   }
   out
@@ -217,8 +219,9 @@ maihda_print_fit_diagnostics <- function(diagnostics) {
   if (length(diag_lines) == 0) {
     return(invisible(NULL))
   }
-  cat("Fit diagnostics:\n")
-  cat(paste0("  ", diag_lines), sep = "\n")
+  pal <- maihda_palette()
+  cat(pal$warn("Fit diagnostics:"), "\n", sep = "")        # genuine caveat -> warn
+  cat(pal$warn(paste0("  ", diag_lines)), sep = "\n")
   cat("\n\n")
   invisible(NULL)
 }
@@ -293,6 +296,83 @@ maihda_quote_name <- function(name) {
   paste(deparse(as.name(name), backtick = TRUE), collapse = "")
 }
 
+# Detect fixed-effect interaction term(s) among the stratum dimensions in a formula's
+# fixed part -- the bug behind a corrupt MAIHDA decomposition. The shorthand
+# `var1 * var2` expands to `var1 + var2 + var1:var2`, so the dimensions' main-effect
+# detection (which only looks for the additive terms) classifies the formula as
+# fully-specified and strips ONLY the main effects, leaving the fixed `var1:var2`
+# interaction in both the derived null and adjusted formulas. That fixed cell-means
+# term duplicates the intersectional stratum random intercept (1 | var1:var2): it
+# absorbs the between-stratum variance into fixed effects, pinning the stratum RE at a
+# singular boundary and collapsing the PCV (and the pure-interaction BLUP diagnostic).
+#
+# Returns the offending fixed-effect term labels (character(0) when there are none).
+# Detection uses the terms() factors matrix (rows = variables, columns = terms) rather
+# than string-splitting the ":"-joined labels, so it is robust to non-syntactic names
+# (e.g. `gender var`) and to variable order within the interaction. A term is flagged
+# when its interaction order is >= 2 and EVERY variable it involves is a stratum
+# dimension; a dimension-by-covariate interaction (e.g. age:gender, a legitimate
+# covariate adjustment) is left alone. `strata_vars` are the raw dimension names and
+# `dim_terms` (optional) the adjusted-model main-effect terms -- the reconstructed
+# `.maihda_dim_*` factor for an auto-binned numeric dimension -- both matched in raw
+# and backtick-quoted form (terms() quotes non-syntactic variable labels).
+maihda_dimension_interaction_terms <- function(formula, strata_vars,
+                                               dim_terms = character(0)) {
+  if (is.null(strata_vars) || length(strata_vars) < 2) {
+    return(character(0))
+  }
+  tt <- tryCatch(stats::terms(reformulas::nobars(formula)),
+                 error = function(e) NULL)
+  if (is.null(tt)) return(character(0))
+  factors <- attr(tt, "factors")
+  if (is.null(factors) || length(factors) == 0) return(character(0))
+  ord <- attr(tt, "order")
+  term_labels <- colnames(factors)
+  var_labels <- rownames(factors)
+
+  dim_names <- unique(c(strata_vars, dim_terms))
+  dim_quoted <- vapply(dim_names, maihda_quote_name, character(1))
+  is_dim_var <- var_labels %in% dim_names | var_labels %in% dim_quoted
+
+  flagged <- character(0)
+  for (j in seq_along(term_labels)) {
+    if (ord[j] < 2L) next
+    involved <- factors[, j] != 0
+    if (any(involved) && all(is_dim_var[involved])) {
+      flagged <- c(flagged, term_labels[j])
+    }
+  }
+  flagged
+}
+
+# Stop with a single, actionable message when a formula carries a fixed interaction
+# among the stratum dimensions (see maihda_dimension_interaction_terms()). Called by
+# the workflow entry points (maihda(), compare_maihda_groups()) before they derive
+# the null/adjusted formulas, so the user is rejected up front rather than handed a
+# silently corrupt (NA/NULL) PCV. Rejection -- not silent stripping -- is the safe
+# choice: the MAIHDA adjusted model is defined to carry only the dimensions' ADDITIVE
+# main effects, with the intersection estimated by the stratum random effect.
+maihda_check_no_dimension_interaction <- function(formula, strata_vars,
+                                                  dim_terms = character(0),
+                                                  fn = "maihda") {
+  flagged <- maihda_dimension_interaction_terms(formula, strata_vars, dim_terms)
+  if (length(flagged) == 0) {
+    return(invisible(NULL))
+  }
+  stop(fn, "(): the formula's fixed part contains the interaction term(s) ",
+       paste(flagged, collapse = ", "), " between the stratum-defining dimensions (",
+       paste(strata_vars, collapse = ", "), "). A fixed interaction among the ",
+       "stratum dimensions duplicates the intersectional stratum random intercept ",
+       "(1 | ", paste(strata_vars, collapse = ":"), "): it absorbs the ",
+       "between-stratum variance into fixed cell means, which pins the stratum ",
+       "variance at a singular boundary and makes the PCV invalid. The MAIHDA ",
+       "adjusted model takes only the dimensions' ADDITIVE main effects -- write ",
+       "`", paste(strata_vars, collapse = " + "), "` (a `*` expands to the additive ",
+       "terms PLUS this interaction). The intersection itself is estimated by the ",
+       "stratum random effect; use decomposition = \"crossed-dimensions\" or ",
+       "maihda_interactions() to quantify it.", call. = FALSE)
+}
+
 maihda_formula_with_stratum <- function(outcome, vars = character()) {
   if (!is.character(vars)) {
     stop("'vars' must be a character vector.", call. = FALSE)
@@ -336,6 +416,54 @@ maihda_binary_to_01 <- function(x) {
   out <- match(as.character(x), key) - 1L
   out[is.na(x)] <- NA_integer_
   as.integer(out)
+}
+
+# All levels present in a stratum dimension, in display order (factor order,
+# FALSE/TRUE for logical, sorted unique for numeric). Generalises
+# maihda_binary_levels() to multi-level factors so the upset matrix can lay out
+# one row per level.
+maihda_dim_levels <- function(x) {
+  x <- x[!is.na(x)]
+  if (is.factor(x)) {
+    return(levels(droplevels(x)))
+  }
+  if (is.logical(x)) {
+    return(c(FALSE, TRUE))
+  }
+  if (is.numeric(x)) {
+    return(sort(unique(x)))
+  }
+  levels(factor(x))
+}
+
+# TRUE when a dimension is a clean present/absent indicator -- logical, or numeric
+# coded exactly {0, 1} -- so the upset matrix can collapse it to a single
+# present/absent row (the classic UpSet look). Factors (including two-level ones,
+# where neither level is an "absence") and other codings get one row per level.
+maihda_dim_is_indicator <- function(x) {
+  if (is.logical(x)) {
+    return(length(maihda_dim_levels(x)) == 2)
+  }
+  if (is.numeric(x)) {
+    lv <- maihda_dim_levels(x)
+    return(length(lv) == 2 && all(as.character(lv) %in% c("0", "1")))
+  }
+  FALSE
+}
+
+# Sampling/design weights are dropped by the weighted engines (WeMix, the brms
+# pseudo-likelihood) whenever they are non-finite or non-positive -- the
+# is.finite(w) & w > 0 rule in maihda_fit_wemix() / maihda_prepare_brms_sampling_weights().
+# lme4 PRIOR weights, by contrast, only drop NA. The shared analytic-frame row mask
+# (maihda_row_mask) implements the NA-only rule, so to make binary/ordinal detection
+# and 0/1 recoding see exactly the rows a weighted engine fits, map the engine-excluded
+# weights (non-finite or <= 0) to NA here before handing the vector to the detection
+# chain. Without this a zero-weight row carrying an out-of-sample outcome value could
+# flip detection (e.g. fit gaussian instead of binomial) relative to the fitted rows.
+maihda_sampling_weight_mask <- function(w) {
+  w <- as.numeric(w)
+  w[!is.finite(w) | w <= 0] <- NA_real_
+  w
 }
 
 # Logical keep-mask over `n` rows reproducing the row selection lme4/brms apply
@@ -387,7 +515,17 @@ maihda_normalize_subset <- function(subset, n) {
   }
   if (is.numeric(subset)) {
     mask <- logical(n)
-    idx <- tryCatch(seq_len(n)[subset], error = function(e) integer(0))
+    # Let base R validate the numeric subscripts rather than swallowing its error.
+    # `seq_len(n)[subset]` only errors on a genuinely invalid subset -- mixing
+    # positive and negative indices (e.g. c(-1, 2)), or mixing NA with negative
+    # indices; out-of-range indices merely yield NA, which is filtered below. The old
+    # tryCatch(..., error = integer(0)) collapsed those invalid subsets to an empty
+    # mask, so compare_maihda_groups()/maihda() silently fit zero rows (every group
+    # reported as skipped, n = 0) instead of erroring like base R and a bare fit do.
+    idx <- tryCatch(
+      seq_len(n)[subset],
+      error = function(e) stop("invalid 'subset': ", conditionMessage(e),
+                               call. = FALSE))
     idx <- idx[!is.na(idx) & idx >= 1L & idx <= n]
     mask[idx] <- TRUE
     return(mask)
@@ -417,6 +555,43 @@ maihda_analytic_model_frame <- function(formula, data, subset = NULL,
     stats::model.frame(fr_form, data = data, na.action = stats::na.omit),
     error = function(e) NULL
   )
+}
+
+# Logical keep-mask (over the rows of `data`) selecting exactly the rows that survive
+# into the analytic model frame above: rows kept by the subset / prior-weight row mask
+# AND not dropped by na.omit once the formula's response and fixed-effect
+# transformations are applied. This is maihda_analytic_model_frame()'s row selection
+# exposed as a position-based mask (the na.action indices are mapped back to original
+# rows, so it does not rely on rownames being preserved), letting the wemix/ordinal
+# engines prefilter `data` to the rows their fit actually uses. A raw
+# complete.cases() over the formula's columns misses NAs that only appear after a
+# transformed term (e.g. log(x) of x <= 0), so the stored frame and the engine's
+# fitted rows could disagree. Returns NULL when the frame cannot be built (callers
+# fall back to a raw complete.cases()).
+maihda_analytic_keep_mask <- function(formula, data, subset = NULL, weights = NULL) {
+  premask <- maihda_row_mask(data, subset = subset, weights = weights)
+  fr_form <- tryCatch(reformulas::subbars(formula), error = function(e) NULL)
+  if (is.null(fr_form)) {
+    return(NULL)
+  }
+  environment(fr_form) <- environment(formula)
+  mf <- tryCatch(
+    stats::model.frame(fr_form, data = data[premask, , drop = FALSE],
+                       na.action = stats::na.omit),
+    error = function(e) NULL
+  )
+  if (is.null(mf)) {
+    return(NULL)
+  }
+  keep <- premask
+  omit <- attr(mf, "na.action")
+  if (!is.null(omit)) {
+    # `omit` indexes rows WITHIN data[premask, ]; map those positions back to the
+    # corresponding original rows before clearing them.
+    kept_idx <- which(premask)
+    keep[kept_idx[as.integer(omit)]] <- FALSE
+  }
+  keep
 }
 
 # The model response over the analytic sample (post-transformation, post-NA,
@@ -1027,6 +1202,12 @@ maihda_cc_variance_split <- function(var_named, dim_groups, interaction_group) {
 maihda_cc_partition <- function(additive, interaction, within, other = 0) {
   between <- additive + interaction
   total <- between + within + other
+  # The additive / interaction shares split the between-strata variance, so they are
+  # undefined when there is no between-strata variance (between == 0): additive / 0
+  # and interaction / 0 are 0 / 0 = NaN, a degenerate fit (every stratum's additive
+  # and interaction variance estimated at exactly zero). Report NA rather than leaking
+  # NaN to the public summary. Likewise the VPC is undefined when total variance is 0.
+  safe_ratio <- function(num, den) ifelse(den > 0, num / den, NA_real_)
   list(
     additive = additive,
     interaction = interaction,
@@ -1034,9 +1215,9 @@ maihda_cc_partition <- function(additive, interaction, within, other = 0) {
     within = within,
     other = other,
     total = total,
-    vpc = between / total,
-    additive_share = additive / between,
-    interaction_share = interaction / between
+    vpc = safe_ratio(between, total),
+    additive_share = safe_ratio(additive, between),
+    interaction_share = safe_ratio(interaction, between)
   )
 }
 
@@ -1288,6 +1469,59 @@ maihda_gaussian_residual_variance_lme4 <- function(model, vc = lme4::VarCorr(mod
   sigma2 * mean(1 / w)
 }
 
+# Prior (precision/frequency) weights of a RAW fitted model object (glmerMod /
+# brmsfit) as a plain numeric vector, or NULL when the fit is unweighted or the
+# weights are unavailable. lme4 exposes them through stats::weights(type = "prior")
+# (all 1 for an unweighted fit, so the count-VPC average reduces exactly to the
+# unweighted mean); anything else falls through the tryCatch to NULL. Distinct from
+# maihda_prior_weights(), which takes the maihda_model WRAPPER and aligns row weights
+# (sampling/aggregated-binomial aware) for the plot/summary aggregations.
+#
+# brms exposes NO weights.brmsfit accessor, so stats::weights() would return NULL and
+# a sampling-weighted brms fit would be read as unweighted -- biasing the population
+# count-family (Poisson/NB) VPC, whose level-1 variance averages a per-row term that
+# MUST be weighted (see maihda_residual_variance_draws_brms()). A sampling-weighted
+# MAIHDA brms fit instead carries the (mean-1 normalized) likelihood weights in the
+# reserved `.maihda_sw` data column, aligned to the same rows stats::fitted() returns,
+# so read them straight off brmsfit$data; an unweighted brms fit has no such column
+# and correctly degrades to NULL (the unweighted mean).
+maihda_fit_prior_weights <- function(model) {
+  if (inherits(model, "brmsfit")) {
+    d <- tryCatch(model$data, error = function(e) NULL)
+    if (is.data.frame(d) && ".maihda_sw" %in% names(d)) {
+      w <- suppressWarnings(as.numeric(d[[".maihda_sw"]]))
+      if (length(w) > 0) {
+        return(w)
+      }
+    }
+    return(NULL)
+  }
+  w <- tryCatch(stats::weights(model, type = "prior"), error = function(e) NULL)
+  if (is.null(w) || length(w) == 0) {
+    return(NULL)
+  }
+  as.numeric(w)
+}
+
+# Mean of a per-observation latent-scale quantity, weighted by prior weights when
+# present. The count-family (Poisson/negative-binomial) level-1 VPC averages a
+# per-row latent variance log1p(1/mu + ...); with frequency weights w_i that average
+# must be sum(w_i v_i) / sum(w_i) so a weighted fit reproduces the plain mean over the
+# equivalent duplicated-row data. Reduces to mean(v, na.rm = TRUE) when weights are
+# absent, length-mismatched, or all 1.
+maihda_weighted_obs_mean <- function(v, w = NULL) {
+  v <- as.numeric(v)
+  if (is.null(w) || length(w) != length(v)) {
+    return(mean(v, na.rm = TRUE))
+  }
+  w <- as.numeric(w)
+  ok <- is.finite(v) & is.finite(w) & w > 0
+  if (!any(ok) || isTRUE(all(abs(w[ok] - 1) < sqrt(.Machine$double.eps)))) {
+    return(mean(v, na.rm = TRUE))
+  }
+  sum(w[ok] * v[ok]) / sum(w[ok])
+}
+
 # Theta (the negative-binomial size/dispersion parameter) of an lme4 NB fit.
 # glmer.nb() stores its ML estimate retrievably via getME(); a fixed-theta
 # glmer(family = MASS::negative.binomial(theta)) fit has no such slot, so fall
@@ -1337,21 +1571,23 @@ maihda_residual_variance_lme4 <- function(model, vc = lme4::VarCorr(model)) {
     # Stryhn et al. (2006) latent-scale level-1 variance approximation: log(1 + 1/mu).
     # The simpler 1/mu form is the first-order Taylor expansion and matches log1p(1/mu)
     # only when 1/mu is small (i.e. mu large); for low-count Poisson outcomes (mu < ~2)
-    # it overestimates residual variance and biases VPC downward.
+    # it overestimates residual variance and biases VPC downward. With prior weights the
+    # per-row variances are averaged by those weights (see maihda_weighted_obs_mean()).
     mu <- stats::fitted(model)
     mu <- pmax(as.numeric(mu), .Machine$double.eps)
-    return(mean(log1p(1 / mu), na.rm = TRUE))
+    return(maihda_weighted_obs_mean(log1p(1 / mu), maihda_fit_prior_weights(model)))
   }
   if (fam$family == "negbinomial" && fam$link == "log") {
     # Negative-binomial analogue of the Poisson approximation above: the
     # lognormal latent-scale level-1 variance ln(1 + 1/mu + 1/theta) of
     # Nakagawa, Johnson & Schielzeth (2017, J R Soc Interface 14:20170213).
     # The extra 1/theta term carries the overdispersion, so it reduces to the
-    # Stryhn Poisson form as theta -> Inf.
+    # Stryhn Poisson form as theta -> Inf. Prior weights average the per-row terms.
     mu <- stats::fitted(model)
     mu <- pmax(as.numeric(mu), .Machine$double.eps)
     theta <- maihda_negbin_theta_lme4(model)
-    return(mean(log1p(1 / mu + 1 / theta), na.rm = TRUE))
+    return(maihda_weighted_obs_mean(log1p(1 / mu + 1 / theta),
+                                    maihda_fit_prior_weights(model)))
   }
 
   stop("VPC residual variance is not implemented for family '", fam$family,
@@ -1402,9 +1638,10 @@ maihda_residual_variance_brms <- function(model) {
   if (fam$family == "poisson" && fam$link == "log") {
     # Stryhn et al. (2006) latent-scale level-1 variance approximation: log(1 + 1/mu).
     # See the lme4 sibling for the rationale; 1/mu alone biases VPC downward at low mu.
+    # Likelihood weights average the per-row terms (see maihda_weighted_obs_mean()).
     mu <- stats::fitted(model, summary = TRUE)[, "Estimate"]
     mu <- pmax(as.numeric(mu), .Machine$double.eps)
-    return(mean(log1p(1 / mu), na.rm = TRUE))
+    return(maihda_weighted_obs_mean(log1p(1 / mu), maihda_fit_prior_weights(model)))
   }
   if (fam$family == "negbinomial" && fam$link == "log") {
     # Nakagawa, Johnson & Schielzeth (2017) lognormal latent-scale level-1
@@ -1419,7 +1656,8 @@ maihda_residual_variance_brms <- function(model) {
            "the brms posterior.")
     }
     shape <- mean(as.numeric(draws[["shape"]]), na.rm = TRUE)
-    return(mean(log1p(1 / mu + 1 / shape), na.rm = TRUE))
+    return(maihda_weighted_obs_mean(log1p(1 / mu + 1 / shape),
+                                    maihda_fit_prior_weights(model)))
   }
 
   stop("VPC residual variance is not implemented for brms family '", fam$family,
@@ -1539,21 +1777,23 @@ maihda_residual_variance_draws_brms <- function(model, draws) {
   if (fam$family == "poisson" && fam$link == "log") {
     mu <- stats::fitted(model, summary = TRUE)[, "Estimate"]
     mu <- pmax(as.numeric(mu), .Machine$double.eps)
-    return(rep(mean(log1p(1 / mu), na.rm = TRUE), n))
+    w <- maihda_fit_prior_weights(model)
+    return(rep(maihda_weighted_obs_mean(log1p(1 / mu), w), n))
   }
   if (fam$family == "negbinomial" && fam$link == "log") {
     # Nakagawa et al. (2017) ln(1 + 1/mu + 1/theta), theta = brms 'shape'.
     # The shape draws are propagated; mu is held at the posterior-mean fitted
-    # means (see the header comment).
+    # means (see the header comment). Likelihood weights average the per-row terms.
     mu <- stats::fitted(model, summary = TRUE)[, "Estimate"]
     mu <- pmax(as.numeric(mu), .Machine$double.eps)
     if (!"shape" %in% names(draws)) {
       stop("Could not extract the negative-binomial 'shape' (theta) draws from ",
            "the brms posterior.")
     }
+    w <- maihda_fit_prior_weights(model)
     shape_d <- as.numeric(draws[["shape"]])
     return(vapply(shape_d,
-                  function(s) mean(log1p(1 / mu + 1 / s), na.rm = TRUE),
+                  function(s) maihda_weighted_obs_mean(log1p(1 / mu + 1 / s), w),
                   numeric(1)))
   }
 
@@ -1684,10 +1924,17 @@ maihda_prior_weights <- function(object) {
       }
     }
   }
-  # Aggregated binomial responses (cbind(success, failure) / `y | trials(n)`)
-  # report the binomial TRIALS through weights(type = "prior"); those are already
-  # encoded in the response denominator, so multiplying by them would double-count.
-  # Treat such models as unweighted for stratum-level aggregation.
+  # Aggregated binomial responses (an lme4 cbind(success, failure) matrix, or a
+  # brms `y | trials(n)`) carry the binomial TRIALS per row. For an OBSERVED
+  # stratum summary that aggregation is numerator/denominator based (sum of
+  # successes / sum of trials), so the trials are already in the denominator and
+  # multiplying the rows by them would double-count -- such models are unit-weighted
+  # HERE. (An lme4 cbind() fit's two-column matrix response is recognised below; a
+  # brms trials() fit has a single-column response and no weights.brmsfit, so it
+  # falls through to unit weights too -- the same correct answer for this path.)
+  # Averaging fitted probabilities / linear predictors is different: a row with more
+  # trials carries more information and must be trial-weighted, so the prediction
+  # path uses maihda_prediction_weights() (below) instead of this.
   resp <- tryCatch(stats::model.response(object$data), error = function(e) NULL)
   if (!is.null(resp) && !is.null(dim(resp))) {
     return(rep(1, n))
@@ -1699,6 +1946,123 @@ maihda_prior_weights <- function(object) {
   w <- as.numeric(w)
   w[!is.finite(w)] <- NA_real_
   w
+}
+
+# The argument expression of the first `trials(...)` call inside a brms response
+# addition term (the RHS of `y | ...`), or NULL when there is none. Recurses so a
+# combined term such as `trials(n) + weights(w)` is handled regardless of order.
+maihda_find_trials_expr <- function(expr) {
+  if (!is.call(expr)) {
+    return(NULL)
+  }
+  if (identical(expr[[1]], as.name("trials")) && length(expr) >= 2L) {
+    return(expr[[2]])
+  }
+  for (i in seq_along(expr)[-1]) {
+    found <- maihda_find_trials_expr(expr[[i]])
+    if (!is.null(found)) {
+      return(found)
+    }
+  }
+  NULL
+}
+
+# Binomial TRIAL counts of a brms `y | trials(n)` fit, or NULL when the fit is not
+# a brms aggregated-binomial model. By default the counts are aligned to
+# object$data; pass `data` (e.g. a prediction newdata) to evaluate the trials()
+# term on a different frame instead, so a response-scale prediction can be
+# normalised by the trial counts of the rows it was made on. brms exposes
+# model.frame.brmsfit but NO weights.brmsfit, so -- unlike an lme4 cbind() fit,
+# whose trials come through stats::weights(type = "prior") -- the counts are not
+# recoverable that way and a brms trials() fit would silently fall back to unit
+# row weights. Parse the trials() addition term off the stored formula instead and
+# evaluate it on the supplied frame, so brms trials() fits are trial-weighted like
+# their lme4 cbind() counterparts.
+maihda_brms_trial_counts <- function(object, data = object$data) {
+  if (!inherits(object$model, "brmsfit")) {
+    return(NULL)
+  }
+  f <- object$formula
+  if (inherits(f, "brmsformula") && inherits(f$formula, "formula")) {
+    f <- f$formula
+  }
+  if (!inherits(f, "formula") || length(f) < 3L) {
+    return(NULL)
+  }
+  lhs <- f[[2]]
+  if (!is.call(lhs) || !identical(lhs[[1]], as.name("|"))) {
+    return(NULL)
+  }
+  trials_expr <- maihda_find_trials_expr(lhs[[3]])
+  if (is.null(trials_expr)) {
+    return(NULL)
+  }
+  vals <- tryCatch(eval(trials_expr, envir = data, enclos = baseenv()),
+                   error = function(e) NULL)
+  if (is.null(vals)) {
+    return(NULL)
+  }
+  as.numeric(vals)
+}
+
+# Convert a brms response-scale prediction to the probability scale for an
+# aggregated-binomial `y | trials(n)` fit. brms's fitted()/posterior_epred()
+# return the expected COUNT of successes (trials * p) for such a fit, whereas
+# lme4's type = "response" for a cbind(success, failure) fit returns the per-trial
+# probability; divide by the per-row trial counts (evaluated on the prediction
+# `newdata`) so both engines return a probability on the response scale. A
+# Bernoulli / non-binomial fit has no trials() term, so the counts are NULL and the
+# estimate is returned unchanged. The counts must be finite and positive to divide;
+# otherwise the estimate is left as-is rather than producing Inf/NaN.
+maihda_brms_response_to_prob <- function(object, est, newdata) {
+  trials <- maihda_brms_trial_counts(object, newdata)
+  if (is.null(trials) || length(trials) != length(est) ||
+      !all(is.finite(trials)) || any(trials <= 0)) {
+    return(est)
+  }
+  est / trials
+}
+
+# Weights for averaging PREDICTIONS (fitted probabilities / linear predictors) over
+# the rows of a stratum, as distinct from the observed numerator/denominator
+# summaries that maihda_prior_weights() serves. Identical to maihda_prior_weights()
+# EXCEPT for aggregated-binomial responses (cbind(success, failure) / `y |
+# trials(n)`), where each row aggregates a different number of Bernoulli trials: the
+# row's fitted probability/linear predictor must be weighted by the binomial TRIAL
+# counts, not by unit weights, or a 2-trial row and a 200-trial row would count
+# equally in the stratum mean. The counts come from stats::weights(type = "prior")
+# for an lme4 cbind() fit; for a brms `y | trials(n)` fit (no weights.brmsfit) they
+# are parsed from the formula's trials() term by maihda_brms_trial_counts(). For
+# non-binomial fits the two functions coincide, so unweighted and prior/sampling-
+# weighted models are unaffected. Trial counts are folded on top of any sampling
+# weights (a sampling-weighted aggregated-binomial row represents sw population
+# units, each contributing `trials` draws). These remain prior/precision (and,
+# where present, sampling) weights -- NOT a complex survey design; no design-based
+# variance is computed.
+maihda_prediction_weights <- function(object) {
+  w <- maihda_prior_weights(object)
+  n <- length(w)
+
+  # brms `y | trials(n)`: the response is a single column (not a cbind() matrix)
+  # and there is no weights.brmsfit, so the lme4 trials path below misses it. Read
+  # the trial counts off the formula and fold them onto any sampling weights,
+  # exactly as the lme4 cbind() branch folds prior-weight trials below.
+  brms_trials <- maihda_brms_trial_counts(object)
+  if (!is.null(brms_trials) && length(brms_trials) == n &&
+      all(is.finite(brms_trials))) {
+    return(w * brms_trials)
+  }
+
+  resp <- tryCatch(stats::model.response(object$data), error = function(e) NULL)
+  if (is.null(resp) || is.null(dim(resp))) {
+    return(w)
+  }
+  trials <- tryCatch(stats::weights(object$model, type = "prior"),
+                     error = function(e) NULL)
+  if (is.null(trials) || length(trials) != n || any(!is.finite(trials))) {
+    return(w)
+  }
+  w * as.numeric(trials)
 }
 
 # Per-stratum prior-weight-weighted means of the named columns of `pred_df` (which
@@ -1740,7 +2104,7 @@ maihda_stratum_predictions_lme4 <- function(object, summary_obj, scale = c("resp
   model <- object$model
   fam <- maihda_family(model)
   linkinv <- maihda_linkinv(fam)
-  prior_w <- maihda_prior_weights(object)
+  prior_w <- maihda_prediction_weights(object)
 
   eta_fixed <- stats::predict(model, newdata = data, re.form = NA, type = "link")
   stratum_est <- summary_obj$stratum_estimates
@@ -1779,10 +2143,12 @@ maihda_stratum_predictions_lme4 <- function(object, summary_obj, scale = c("resp
     stringsAsFactors = FALSE
   )
 
-  # Prior-weight-weighted per-stratum means, so a weighted fit's stratum
-  # predictions reflect the prior/precision weights (consistent with the weighted
-  # VPC); identical to the previous unweighted means for an unweighted model. These
-  # are lme4 prior weights, not a complex survey design (not survey-representative).
+  # Prediction-weighted per-stratum means: a weighted fit's stratum predictions
+  # reflect the prior/precision (or sampling) weights, and an aggregated-binomial
+  # fit weights each row by its binomial TRIAL count so rows with more trials count
+  # proportionally more (consistent with the weighted VPC). Identical to the plain
+  # unweighted means for an ordinary unweighted model. These are prior/precision (and
+  # trial) weights, not a complex survey design (not survey-representative).
   maihda_weighted_stratum_aggregate(
     pred_df, c("predicted_row", "lower_row", "upper_row", "fixed_row")
   )
@@ -1802,6 +2168,34 @@ maihda_apply_autobin_info <- function(strata_data, autobin_info) {
   }
 
   strata_data
+}
+
+# Recreate the .maihda_dim_<var> tertile factors that maihda_adjusted_terms() adds
+# when a numeric stratum dimension was auto-binned. The adjusted / cross-classified
+# model formulae reference these columns as fixed effects, so prediction newdata must
+# carry them too; rebuild each from the stored breaks/labels (leaving the original
+# numeric column intact, exactly as maihda_adjusted_terms() does). Out-of-range
+# numeric values cut() to NA -- maihda_autobin_out_of_range() reports them separately.
+maihda_add_binned_dim_columns <- function(data, autobin_info) {
+  if (is.null(autobin_info) || length(autobin_info) == 0) {
+    return(data)
+  }
+
+  for (v in intersect(names(autobin_info), names(data))) {
+    info <- autobin_info[[v]]
+    if (!is.null(info$breaks) && !is.null(info$labels)) {
+      # Overwriting any '.maihda_dim_<v>' already in newdata is intentional: it is
+      # the model's internal term, reserved at fit time (make_strata() rejects a
+      # user column of this name), so predicting on the fitted data -- which already
+      # carries the package's own copy -- rebuilds the identical factor.
+      data[[maihda_dim_col(v)]] <- cut(
+        data[[v]], breaks = info$breaks,
+        include.lowest = TRUE, labels = info$labels
+      )
+    }
+  }
+
+  data
 }
 
 maihda_autobin_out_of_range <- function(data, autobin_info) {
@@ -1872,11 +2266,70 @@ maihda_stratum_lookup <- function(data, strata_info, vars, sep = " \u00d7 ",
   out
 }
 
-maihda_prepare_prediction_data <- function(object, newdata) {
+# Strata the fitted model actually saw: the unique, non-missing stratum values in
+# the analytic data (the levels for which a random effect was estimated). A
+# stratum outside this set is "new" and has no estimated effect. Returns NULL when
+# the analytic data carries no stratum column, in which case callers skip the
+# unseen-stratum check (rather than reject everything).
+maihda_known_strata <- function(object) {
+  if (is.null(object$data) || !"stratum" %in% names(object$data)) {
+    return(NULL)
+  }
+  s <- unique(as.character(object$data$stratum))
+  s[!is.na(s)]
+}
+
+# Error if `stratum` names any level the model never saw. `type` only tailors the
+# hint: an individual-level prediction can fall back to the population average via
+# allow_new_levels = TRUE, but a stratum-level prediction has no random effect to
+# report for an unseen stratum, so no such fallback is offered there.
+maihda_check_known_strata <- function(stratum, known, type = "individual") {
+  if (is.null(known)) {
+    return(invisible(NULL))
+  }
+  wanted <- unique(as.character(stratum))
+  wanted <- wanted[!is.na(wanted)]
+  unknown <- setdiff(wanted, known)
+  if (length(unknown) == 0) {
+    return(invisible(NULL))
+  }
+  hint <- if (identical(type, "individual")) {
+    " Pass allow_new_levels = TRUE for a population-average (fixed-effects-only) prediction."
+  } else {
+    ""
+  }
+  stop("newdata contains strata not present in the fitted model: ",
+       paste(utils::head(unknown, 5), collapse = ", "),
+       if (length(unknown) > 5) ", ..." else "", ".", hint,
+       call. = FALSE)
+}
+
+maihda_prepare_prediction_data <- function(object, newdata, type = "individual",
+                                           allow_new_levels = FALSE) {
   if (!is.data.frame(newdata)) {
     stop("'newdata' must be a data frame", call. = FALSE)
   }
+  # The adjusted / cross-classified model formula references reconstructed
+  # .maihda_dim_<var> tertile factors for any auto-binned numeric dimension; recreate
+  # them from the stored breaks/labels so newdata carries the same fixed-effect columns
+  # as the fitting data. Done before the early return so it applies even when the
+  # caller already supplies a 'stratum' column (as long as the numeric source columns
+  # are present).
+  newdata <- maihda_add_binned_dim_columns(newdata, object$strata_autobin_info)
+
+  # allow_new_levels only relaxes individual-level predictions (which fall back to
+  # the population average); stratum-level predictions always require known strata.
+  permit_new <- isTRUE(allow_new_levels) && identical(type, "individual")
+
   if ("stratum" %in% names(newdata)) {
+    # A caller-supplied 'stratum' column previously skipped validation entirely,
+    # so a misspelled or genuinely new stratum silently flowed through to a
+    # fixed-only prediction (the WeMix/ordinal helpers map an unseen stratum's
+    # random effect to 0). Validate it here unless the caller opted into
+    # population-average predictions.
+    if (!permit_new) {
+      maihda_check_known_strata(newdata$stratum, maihda_known_strata(object), type)
+    }
     return(newdata)
   }
 
@@ -1924,11 +2377,23 @@ maihda_prepare_prediction_data <- function(object, newdata) {
 
   unknown <- !is.na(labels) & is.na(newdata$stratum)
   if (any(unknown)) {
-    unknown_labels <- unique(labels[unknown])
-    stop("newdata contains strata combinations that were not present when the model was fit: ",
-         paste(utils::head(unknown_labels, 5), collapse = ", "),
-         if (length(unknown_labels) > 5) ", ..." else "",
-         call. = FALSE)
+    if (permit_new) {
+      # Keep each new combination as its own stratum label so the engine maps it
+      # to a zero random effect (a population-average prediction) rather than
+      # erroring; mirrors the supplied-'stratum' branch above.
+      newdata$stratum[unknown] <- labels[unknown]
+    } else {
+      unknown_labels <- unique(labels[unknown])
+      hint <- if (identical(type, "individual")) {
+        " Pass allow_new_levels = TRUE for a population-average (fixed-effects-only) prediction."
+      } else {
+        ""
+      }
+      stop("newdata contains strata combinations that were not present when the model was fit: ",
+           paste(utils::head(unknown_labels, 5), collapse = ", "),
+           if (length(unknown_labels) > 5) ", ..." else "", ".", hint,
+           call. = FALSE)
+    }
   }
 
   newdata
@@ -1953,8 +2418,24 @@ maihda_stratum_predictions_brms <- function(object, summary_obj, scale = c("resp
   model <- object$model
   fam <- maihda_family(model)
   linkinv <- maihda_linkinv(fam)
-  prior_w <- maihda_prior_weights(object)
+  prior_w <- maihda_prediction_weights(object)
   eta_fixed <- brms::posterior_linpred(model, newdata = data, re_formula = NA, summary = TRUE)[, "Estimate"]
+
+  # A cumulative (ordinal) brms fit's response scale is the EXPECTED CATEGORY
+  # SCORE sum_k k * P(Y = k) in [1, K], NOT the scalar inverse link (which would
+  # return a single cumulative probability in [0, 1]). Mirror the clmm path and
+  # the individual brms path in predict_maihda(): map the latent location to the
+  # score with the shared cumulative helpers. posterior_linpred() returns the
+  # location mu (thresholds excluded), so P(Y <= k) = g^-1(alpha_k - eta) holds
+  # with the posterior-mean thresholds. As on the clmm path this plugs point
+  # estimates into the nonlinear score (the stratum prediction is built from the
+  # stratum effect's point summaries anyway), rather than averaging the score
+  # over the posterior the way the per-individual fitted() array does.
+  is_ordinal <- maihda_family_is_ordinal(fam)
+  if (is_ordinal) {
+    ord_thresholds <- maihda_brms_ordinal_thresholds(model)
+    ord_link <- fam$link
+  }
 
   stratum_est <- summary_obj$stratum_estimates
   if (is.null(stratum_est) || nrow(stratum_est) == 0) {
@@ -1966,7 +2447,14 @@ maihda_stratum_predictions_brms <- function(object, summary_obj, scale = c("resp
   idx <- match(key, re_key)
 
   transform_eta <- function(eta) {
-    if (scale == "response") linkinv(eta) else eta
+    if (scale != "response") {
+      return(eta)
+    }
+    if (is_ordinal) {
+      maihda_ordinal_eta_to_score(eta, ord_thresholds, ord_link)
+    } else {
+      linkinv(eta)
+    }
   }
 
   # See the lme4 sibling: in a cross-classified model the stratum prediction must
@@ -1991,10 +2479,12 @@ maihda_stratum_predictions_brms <- function(object, summary_obj, scale = c("resp
     stringsAsFactors = FALSE
   )
 
-  # Prior-weight-weighted per-stratum means, so a weighted fit's stratum
-  # predictions reflect the prior/precision weights (consistent with the weighted
-  # VPC); identical to the previous unweighted means for an unweighted model. These
-  # are lme4 prior weights, not a complex survey design (not survey-representative).
+  # Prediction-weighted per-stratum means: a weighted fit's stratum predictions
+  # reflect the prior/precision (or sampling) weights, and an aggregated-binomial
+  # fit weights each row by its binomial TRIAL count so rows with more trials count
+  # proportionally more (consistent with the weighted VPC). Identical to the plain
+  # unweighted means for an ordinary unweighted model. These are prior/precision (and
+  # trial) weights, not a complex survey design (not survey-representative).
   maihda_weighted_stratum_aggregate(
     pred_df, c("predicted_row", "lower_row", "upper_row", "fixed_row")
   )

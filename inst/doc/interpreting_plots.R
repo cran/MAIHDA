@@ -27,7 +27,7 @@ model <- maihda(
 ## ----vpc----------------------------------------------------------------------
 plot(model, type = "vpc")
 
-## ----predicted----------------------------------------------------------------
+## ----predicted, fig.height = 10-----------------------------------------------
 plot(model, type = "predicted")
 
 ## ----obs-shrunken-------------------------------------------------------------
@@ -35,9 +35,6 @@ plot(model, type = "obs_vs_shrunken")
 
 ## ----effect-decomp------------------------------------------------------------
 plot(model, type = "effect_decomp")
-
-## ----ternary, eval = requireNamespace("ggtern", quietly = TRUE), warning = FALSE, message = FALSE----
-plot(model, type = "ternary")
 
 ## ----prediction-deviation-----------------------------------------------------
 plot(model, type = "prediction_deviation")

@@ -114,9 +114,15 @@ maihda_validate_longitudinal <- function(id, time, time_degree, data,
 # first random/fixed term is the linear time; higher degrees use I(time^k) so the
 # design vector at time t is a(t) = (1, t, t^2, ..., t^degree).
 maihda_time_terms <- function(time, time_degree) {
-  terms <- maihda_quote_name(time)
+  qtime <- maihda_quote_name(time)
+  terms <- qtime
   if (time_degree >= 2) {
-    terms <- c(terms, sprintf("I(%s^%d)", time, 2:time_degree))
+    # Use the already-quoted name inside I() too, so a non-syntactic time column
+    # (e.g. "time point") yields valid formula text I(`time point`^2) rather than
+    # the unparseable I(time point^2). For a syntactic name maihda_quote_name() is
+    # a no-op, so this also matches the (Intercept), time, I(time^2), ... names
+    # lme4 records in VarCorr (see maihda_re_block_lme4()).
+    terms <- c(terms, sprintf("I(%s^%d)", qtime, 2:time_degree))
   }
   terms
 }
@@ -618,8 +624,9 @@ maihda_longitudinal_strata_predictions <- function(object) {
 #' @return The object, invisibly.
 #' @export
 print.maihda_long_pcv <- function(x, ...) {
-  fmt <- function(v) if (isTRUE(is.finite(v))) sprintf("%.1f%%", 100 * v) else "NA"
-  cat("Longitudinal PCV (additive vs. multiplicative intersectionality)\n")
+  pal <- maihda_palette()
+  fmt <- function(v) if (isTRUE(is.finite(v))) pal$accent(sprintf("%.1f%%", 100 * v)) else "NA"
+  cat(pal$bold("Longitudinal PCV (additive vs. multiplicative intersectionality)"), "\n", sep = "")
   cat("================================================================\n\n")
   # Baseline = the between-stratum variance at the observed baseline time
   # (ref_time), not the raw time-0 intercept variance Sigma[1, 1] (see
@@ -635,8 +642,9 @@ print.maihda_long_pcv <- function(x, ...) {
                 fmt(x$pcv_slope)))
     cat("                 (the remainder is the multiplicative/interaction part).\n")
   }
-  cat("\nThe PCV is the share of the null model's between-stratum (trajectory) variance\n")
-  cat("explained by the dimensions' additive main effects and their time interactions;\n")
-  cat("a high PCV_slope means trajectory inequalities are 'mostly additive'.\n")
+  cat(pal$muted(paste0(
+      "\nThe PCV is the share of the null model's between-stratum (trajectory) variance\n",
+      "explained by the dimensions' additive main effects and their time interactions;\n",
+      "a high PCV_slope means trajectory inequalities are 'mostly additive'.\n")))
   invisible(x)
 }

@@ -28,8 +28,7 @@ maihda_app_empty_state <- function(title, message,
 }
 
 # --- Visualizations tab ------------------------------------------------------
-# Static plot-type picker + download button + a wrapper that swaps a static
-# ggplot output for an interactive plotly one (the ternary view). Depends only on
+# Static plot-type picker + download button + the plot output. Depends only on
 # the fitted model.
 
 #' @noRd
@@ -43,9 +42,7 @@ mod_visualizations_ui <- function(id) {
         shiny::selectInput(ns("plot_type"), "Select Plot Type:",
           choices = c(
             "Prediction Deviation Panels" = "pred_dev",
-            "Mean Prediction vs. Stratum Effect (Quadrant)" = "risk_vs_effect",
             "Effect Decomposition" = "effect_decomp",
-            "Effect Decomposition (Ternary)" = "ternary",
             "VPC" = "vpc", "Observed VS Shrunken" = "obs_vs_shrunken",
             "Predicted Values" = "predicted"),
           width = "100%")
@@ -73,9 +70,6 @@ mod_visualizations_server <- function(id, model_results) {
         plot_prediction_deviation_panels(model_results(), data = NULL, type = "auto")
       } else if (input$plot_type %in% c("predicted")) {
         plot(model_results(), type = input$plot_type, n_strata = 20)
-      } else if (input$plot_type == "ternary") {
-        out <- maihda_ternary_plot(model_results())
-        out$plot
       } else {
         plot(model_results(), type = input$plot_type)
       }
@@ -88,11 +82,7 @@ mod_visualizations_server <- function(id, model_results) {
           "Fit a MAIHDA model from the sidebar, then pick a plot type above to
            visualise the strata effects."))
       }
-      if (input$plot_type == "ternary") {
-        shinycssloaders::withSpinner(plotly::plotlyOutput(ns("maihda_plotly"), height = "500px"))
-      } else {
-        shinycssloaders::withSpinner(shiny::plotOutput(ns("maihda_plot"), height = "500px"))
-      }
+      shinycssloaders::withSpinner(shiny::plotOutput(ns("maihda_plot"), height = "500px"))
     })
 
     output$maihda_plot <- shiny::renderPlot(
@@ -102,14 +92,6 @@ mod_visualizations_server <- function(id, model_results) {
                " plot for the fitted model; see the accompanying tables for exact values.")
       }
     )
-
-    output$maihda_plotly <- plotly::renderPlotly({
-      shiny::req(model_results())
-      shiny::req(input$plot_type == "ternary")
-
-      out <- maihda_ternary_plot(model_results())
-      maihda_app_ternary_plotly(out$data)
-    })
 
     output$download_plot <- shiny::downloadHandler(
       filename = function() {
@@ -375,7 +357,7 @@ mod_explorer_server <- function(id, model_results, null_summary_results,
       }
 
       p <- p + ggplot2::geom_errorbar(ggplot2::aes(xmin = .data$lower_95, xmax = .data$upper_95), width = 0.2, orientation = "y") +
-        ggplot2::theme_minimal() +
+        theme_maihda() +
         ggplot2::labs(x = "Intersectional Intercept / Effect (Deviation)",
              y = "Stratum", color = tools::toTitleCase(color_var),
              shape = tools::toTitleCase(color_var), size = "Sample Size (N)") +

@@ -358,8 +358,11 @@ test_that("compare_maihda_groups bootstrap returns ordered per-group CIs", {
   )
   expect_true(all(c("ci_lower", "ci_upper") %in% names(cmp)))
   ok <- cmp$status == "ok"
-  expect_true(all(cmp$ci_lower[ok] <= cmp$vpc[ok] + 1e-8))
-  expect_true(all(cmp$ci_upper[ok] >= cmp$vpc[ok] - 1e-8))
+  # Percentile bootstrap intervals are well-ordered and finite, but need not contain
+  # the per-group point VPC (skewed/small-sample bootstrap distributions), so assert
+  # ordering and finiteness rather than containment.
+  expect_true(all(is.finite(cmp$ci_lower[ok])) && all(is.finite(cmp$ci_upper[ok])))
+  expect_true(all(cmp$ci_lower[ok] <= cmp$ci_upper[ok]))
 })
 
 test_that("compare_maihda_groups works with a precomputed stratum column", {
@@ -552,17 +555,76 @@ test_that("compare_maihda_groups reports a per-group PCV with >= 2 dimensions", 
   cmp <- suppressWarnings(
     compare_maihda_groups(y ~ age + (1 | gender:race), data = d, group = "country")
   )
-  expect_true(all(c("pcv", "var_between_adjusted") %in% names(cmp)))
+  expect_true(all(c("pcv", "var_between_adjusted", "var_between_adjusted_ml") %in%
+                    names(cmp)))
   ok <- cmp$status == "ok"
   expect_true(all(is.finite(cmp$pcv[ok])))
   expect_true(all(is.finite(cmp$var_between_adjusted[ok])))
+  expect_true(all(is.finite(cmp$var_between_adjusted_ml[ok])))
   # The per-group PCV equals the proportional change in between-stratum variance from
   # the null to the adjusted model (a negative PCV is possible -- suppression -- so
-  # we check the identity, not a sign/monotonicity).
+  # we check the identity, not a sign/monotonicity). var_between_adjusted is the
+  # derived coherence value, so this identity holds against it exactly.
   expect_equal(cmp$pcv[ok],
                (cmp$var_between[ok] - cmp$var_between_adjusted[ok]) / cmp$var_between[ok],
                tolerance = 1e-8)
+
+  # var_between_adjusted_ml is the adjusted fit's ACTUAL between-stratum variance, so
+  # it must reproduce the per-group adjusted model fitted on the same sample/strata
+  # (the ML-refit var_model2 from calculate_pvc()). It is nonzero here and -- because
+  # of the REML-vs-ML gap in the null variance -- not identical to the derived
+  # var_between_adjusted coherence value.
+  d_ok <- droplevels(d[d$country == "A", ])
+  null_a <- fit_maihda(y ~ age + (1 | gender:race), data = d_ok)
+  adj_a  <- fit_maihda(y ~ age + gender + race + (1 | gender:race), data = d_ok)
+  ml_a   <- calculate_pvc(null_a, adj_a)$var_model2
+  expect_equal(cmp$var_between_adjusted_ml[cmp$group == "A"], ml_a, tolerance = 1e-6)
+  expect_false(isTRUE(all.equal(
+    cmp$var_between_adjusted[cmp$group == "A"],
+    cmp$var_between_adjusted_ml[cmp$group == "A"]
+  )))
+
   expect_s3_class(plot(cmp, type = "pcv"), "ggplot")
+})
+
+test_that("compare_maihda_groups strips supplied dimension main effects before the per-group PCV", {
+  # Regression: passing a fully-specified ADJUSTED formula (the dimensions' additive
+  # main effects written out) directly to compare_maihda_groups() must give the SAME
+  # per-group decomposition as the bare null shorthand. Previously the supplied
+  # formula was fitted as the per-group BASE model, then maihda_adjusted_formula()
+  # re-added the same main effects, so the "adjusted" model equalled the base: PCV
+  # collapsed to 0/NA and the stratum random effect went singular.
+  set.seed(3303)
+  n <- 600
+  d <- data.frame(
+    country = rep(c("A", "B", "C"), length.out = n),
+    gender = sample(c("F", "M"), n, replace = TRUE),
+    ses = sample(c("lo", "mid", "hi"), n, replace = TRUE),
+    age = rnorm(n)
+  )
+  sk <- interaction(d$gender, d$ses, drop = TRUE)
+  d$y <- 1 + 0.4 * d$age + rnorm(nlevels(sk), sd = 1.0)[sk] + rnorm(n, sd = 0.5)
+
+  # Bare shorthand: the supplied fit IS the null, the documented base form.
+  cmp_null <- suppressWarnings(
+    compare_maihda_groups(y ~ age + (1 | gender:ses), data = d, group = "country")
+  )
+  # Fully-specified adjusted formula: the dimensions' main effects are present and
+  # must be stripped so the per-group base stays the null.
+  cmp_adj <- suppressWarnings(
+    compare_maihda_groups(y ~ age + gender + ses + (1 | gender:ses), data = d,
+                          group = "country")
+  )
+
+  ok <- cmp_null$status == "ok" & cmp_adj$status == "ok"
+  expect_true(any(ok))
+  # Identical null base => identical VPC, between-stratum variance, and PCV.
+  expect_equal(cmp_adj$vpc[ok], cmp_null$vpc[ok], tolerance = 1e-6)
+  expect_equal(cmp_adj$var_between[ok], cmp_null$var_between[ok], tolerance = 1e-6)
+  expect_equal(cmp_adj$pcv[ok], cmp_null$pcv[ok], tolerance = 1e-6)
+  # Finite and not collapsed to ~0 (the symptom of the unstripped re-added terms).
+  expect_true(all(is.finite(cmp_adj$pcv[ok])))
+  expect_false(all(abs(cmp_adj$pcv[ok]) < 1e-6))
 })
 
 test_that("compare_maihda_groups omits the PCV columns with a single dimension", {
@@ -602,4 +664,80 @@ test_that("plot.maihda_analysis dispatches group_between_variance", {
   a_nogroup <- suppressWarnings(suppressMessages(maihda(math ~ 1 + (1 | gender:ses), data = d)))
   expect_error(plot(a_nogroup, type = "group_between_variance"),
                "No group comparison")
+})
+
+test_that("supplied dimension main effects strip even for backtick-containing names", {
+  # When the formula already lists the stratum dimensions as fixed effects, the
+  # two-model decomposition strips them before deriving the null/adjusted models.
+  # Detection used maihda_quote_name() (proper backtick escaping) but removal used a
+  # bare sprintf("`%s`", .), which mis-parses a dimension name that itself contains a
+  # backtick -- so as.formula() would error on the update. Both paths must quote the
+  # same way. A backtick in a column name is rare but legal (check.names = FALSE).
+  set.seed(3101)
+  n <- 600
+  d <- data.frame(
+    grp  = sample(c("P", "Q"), n, replace = TRUE),
+    dimA = sample(c("F", "M"), n, replace = TRUE),
+    weird = sample(c("lo", "hi"), n, replace = TRUE),
+    stringsAsFactors = FALSE
+  )
+  names(d)[names(d) == "weird"] <- "a`b"        # backtick-containing legal name
+  key <- interaction(d$dimA, d[["a`b"]], drop = TRUE)
+  d$y <- 1 + 0.3 * (d$dimA == "M") + rnorm(nlevels(key), sd = 0.6)[key] + rnorm(n, sd = 0.5)
+
+  q <- maihda_quote_name("a`b")
+  f <- stats::as.formula(paste("y ~ dimA +", q, "+ (1 | dimA:", q, ")"))
+
+  # Pre-fix this errored in the term-stripping update(); now it completes.
+  cmp <- suppressWarnings(suppressMessages(
+    compare_maihda_groups(f, data = d, group = "grp", engine = "lme4")))
+  expect_s3_class(cmp, "maihda_group_comparison")
+  expect_setequal(cmp$group, c("P", "Q"))
+})
+
+test_that("compare_maihda_groups rejects a mixed-sign numeric subset like base R", {
+  set.seed(9091)
+  d <- data.frame(
+    grp = rep(c("A", "B"), each = 20),
+    gender = rep(c("F", "M"), 20),
+    ses = rep(c("lo", "hi"), each = 2, length.out = 40),
+    y = rnorm(40)
+  )
+  # c(-1, 2) mixes positive and negative subscripts: base R and a bare fit error on
+  # it, so the comparison must too -- not silently normalise it to an empty (n = 0)
+  # mask that reports every group as skipped.
+  expect_error(
+    compare_maihda_groups(y ~ 1 + (1 | gender:ses), data = d, group = "grp",
+                          subset = c(-1, 2)),
+    "subset")
+})
+
+test_that("subsetting a maihda_group_comparison keeps its print metadata", {
+  set.seed(7711)
+  n <- 300
+  d <- data.frame(
+    grp = rep(c("A", "B"), each = n / 2),
+    gender = sample(c("F", "M"), n, replace = TRUE),
+    ses = sample(c("lo", "hi"), n, replace = TRUE)
+  )
+  key <- interaction(d$gender, d$ses, drop = TRUE)
+  d$y <- rnorm(nlevels(key), sd = 0.7)[key] + rnorm(n, sd = 0.4)
+
+  cmp <- suppressWarnings(suppressMessages(
+    compare_maihda_groups(y ~ 1 + (1 | gender:ses), data = d, group = "grp")))
+
+  sub <- cmp[, c("group", "n", "status")]
+  expect_s3_class(sub, "maihda_group_comparison")
+  # Metadata attributes survive the column subset (regression: `[.data.frame` kept
+  # the class but dropped them, blanking the printed header).
+  expect_identical(attr(sub, "group_var"), attr(cmp, "group_var"))
+  expect_identical(attr(sub, "engine"), attr(cmp, "engine"))
+  expect_identical(attr(sub, "family"), attr(cmp, "family"))
+
+  # Printing the column subset still shows the populated header line.
+  out <- paste(utils::capture.output(print(sub)), collapse = "\n")
+  expect_match(out, "Group variable: grp")
+
+  # A single-column drop returns a bare vector, not a classed object.
+  expect_false(is.data.frame(cmp[, "group"]))
 })

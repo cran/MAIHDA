@@ -45,7 +45,10 @@ test_that("maihda_ordinal_category_probs matches hand-computed plogis difference
   expect_equal(rowSums(probs_p), rep(1, 3))
 
   expect_error(maihda_ordinal_category_probs(eta, c(1, 0), "logit"),
-               "non-decreasing")
+               "strictly increasing")
+  # Equal adjacent thresholds (a zero-probability category) are rejected too.
+  expect_error(maihda_ordinal_category_probs(eta, c(0.4, 0.4), "logit"),
+               "strictly increasing")
   expect_error(maihda_ordinal_category_probs(eta, alpha, "cloglog"),
                "Unsupported cumulative link")
 })
@@ -192,6 +195,29 @@ test_that("fit_maihda fits a cumulative model via clmm with auto-switch and cont
   )
 })
 
+test_that("clmm prefilters on the evaluated frame, not raw complete.cases", {
+  skip_on_cran()
+  skip_if_not_installed("ordinal")
+
+  d <- make_ord_data(n = 400)
+  d$pos <- stats::runif(nrow(d), 1, 5)
+  # Two rows whose transformed predictor log(pos) is NaN. pos itself is non-missing, so
+  # a raw complete.cases() on the formula columns keeps them -- the stored wrapper data
+  # would then hold more rows than clmm actually fits, breaking downstream row alignment
+  # (predictions / plots keyed off m$data). The evaluated analytic frame drops them.
+  d$pos[c(4, 8)] <- -1
+
+  expect_warning(
+    m <- suppressMessages(fit_maihda(y ~ log(pos) + (1 | gender:race:edu),
+                                     data = d, family = "ordinal")),
+    "dropped 2 row"
+  )
+  expect_equal(nrow(m$data), nrow(d) - 2)
+  # Stored analytic frame matches the rows clmm actually fit.
+  expect_equal(nrow(m$data), as.integer(stats::nobs(m$model)))
+  expect_true(all(is.finite(log(m$data$pos))))
+})
+
 test_that("summary of a clmm MAIHDA reports the latent-scale VPC and thresholds", {
   skip_on_cran()
   skip_if_not_installed("ordinal")
@@ -266,6 +292,69 @@ test_that("clmm predictions work on both scales and respect newdata strata", {
     predict_maihda(m, newdata = data.frame(stratum = "no-such"), type = "strata"),
     "not present in the fitted model"
   )
+
+  # Public individual predictions reject an unseen stratum by default rather than
+  # silently returning a fixed-only (0-random-effect) prediction.
+  nd_unseen <- m$data[1, , drop = FALSE]
+  nd_unseen$stratum <- "999"
+  expect_error(
+    predict_maihda(m, newdata = nd_unseen, type = "individual", scale = "link"),
+    "not present in the fitted model"
+  )
+
+  # allow_new_levels = TRUE opts into the population average: the latent location
+  # equals the fixed part with the stratum random effect dropped (mapped to 0).
+  pa_link <- predict_maihda(m, newdata = nd_unseen, type = "individual",
+                            scale = "link", allow_new_levels = TRUE)
+  fixed_only <- maihda_clmm_linpred(m, newdata = nd_unseen, include_re = FALSE)
+  expect_true(is.finite(pa_link))
+  expect_equal(unname(pa_link), unname(fixed_only))
+})
+
+test_that("clmm predictions add the formula offset (incl. an offset-only model)", {
+  skip_on_cran()
+  skip_if_not_installed("ordinal")
+
+  d <- make_ord_data()
+  d$expo <- runif(nrow(d), 0.5, 4)
+
+  m <- fit_ord(d, formula = y ~ x + offset(log(expo)) + (1 | gender:race:edu))
+
+  # The latent-location prediction must include the offset: rebuild it
+  # independently as X %*% beta + offset + u and compare.
+  off <- log(m$data$expo)
+  beta <- m$model$beta
+  tt <- stats::delete.response(stats::terms(reformulas::nobars(m$formula)))
+  mf <- stats::model.frame(tt, m$data, na.action = stats::na.pass)
+  X <- stats::model.matrix(tt, mf)
+  ret <- maihda_clmm_stratum_ranef(m)
+  re <- stats::setNames(ret$random_effect, ret$stratum)
+  u <- re[as.character(m$data$stratum)]; u[is.na(u)] <- 0
+  ref <- drop(X[, names(beta), drop = FALSE] %*% beta) + off + unname(u)
+
+  eta <- predict_maihda(m, type = "individual", scale = "link")
+  expect_equal(unname(eta), unname(ref), tolerance = 1e-8)
+  # The offset is non-trivial, so a fit that dropped it would differ by max|offset|.
+  expect_gt(max(abs(off)), 0.5)
+
+  # An offset-only NULL model (no location coefficients) must still predict its
+  # offset: the latent location is offset + u, not 0 + u.
+  m0 <- fit_ord(d, formula = y ~ offset(log(expo)) + (1 | gender:race:edu))
+  expect_length(m0$model$beta, 0L)
+  ret0 <- maihda_clmm_stratum_ranef(m0)
+  re0 <- stats::setNames(ret0$random_effect, ret0$stratum)
+  u0 <- re0[as.character(m0$data$stratum)]; u0[is.na(u0)] <- 0
+  eta0 <- predict_maihda(m0, type = "individual", scale = "link")
+  expect_equal(unname(eta0), unname(log(m0$data$expo) + unname(u0)), tolerance = 1e-8)
+  expect_gt(max(abs(eta0 - unname(u0))), 0.5)
+
+  # The prediction-deviation panel rebuilds the clmm probabilities independently;
+  # it must include the offset too.
+  panel <- maihda_prediction_panel_ordinal_probs(m$model, m$data)
+  exp_probs <- maihda_ordinal_category_probs(ref, m$model$alpha, m$model$link)
+  panel_m <- as.matrix(panel); dimnames(panel_m) <- NULL
+  exp_m <- exp_probs; dimnames(exp_m) <- NULL
+  expect_equal(panel_m, exp_m, tolerance = 1e-8)
 })
 
 test_that("maihda_mor returns the median cumulative odds ratio for a logit fit", {
@@ -358,7 +447,7 @@ test_that("compare_maihda_groups and stepwise_pcv support the ordinal engine", {
 
 # ---- plots ---------------------------------------------------------------------
 
-test_that("the plot layer renders a clmm MAIHDA (and the ternary errors cleanly)", {
+test_that("the plot layer renders a clmm MAIHDA", {
   skip_on_cran()
   skip_if_not_installed("ordinal")
 
@@ -374,13 +463,10 @@ test_that("the plot layer renders a clmm MAIHDA (and the ternary errors cleanly)
   expect_s3_class(plot(m, type = "predicted", summary_obj = s), "ggplot")
   expect_s3_class(plot(m, type = "predicted", summary_obj = s, scale = "link"), "ggplot")
   expect_s3_class(plot(m, type = "obs_vs_shrunken", summary_obj = s), "ggplot")
-  expect_s3_class(plot(m, type = "risk_vs_effect", summary_obj = s), "ggplot")
   expect_s3_class(plot(m, type = "effect_decomp", summary_obj = s), "ggplot")
   expect_no_error(suppressWarnings(plot_prediction_deviation_panels(m)))
   expect_no_error(suppressWarnings(
     plot_prediction_deviation_panels(m, ordinal_mode = "expected_score")))
-
-  expect_error(compute_maihda_ternary_data(m), "not yet supported for the ordinal")
 })
 
 # ---- fake-fixture accessor branches --------------------------------------------
@@ -425,6 +511,85 @@ test_that("fit_maihda routes the ordinal family to brms::cumulative()", {
                    family = maihda_cumulative("probit"), engine = "brms")
   expect_identical(captured$family$link, "probit")
   expect_identical(maihda_normalize_family_name(m2$family$family), "cumulative")
+})
+
+test_that("brms cumulative stratum predictions are expected category scores (Stan-free)", {
+  skip_if_not_installed("brms")
+
+  # Regression for the audit finding: the brms stratum-prediction helper applied
+  # the SCALAR inverse link on the response scale, so for a cumulative (ordinal)
+  # fit it returned a single cumulative probability in [0, 1] instead of the
+  # EXPECTED CATEGORY SCORE sum_k k * P(Y = k) in [1, K] that maihda_table() and
+  # the stratum plots document (and that the individual predict_maihda() path
+  # already returns). It now maps the latent location to the score via the shared
+  # cumulative helpers and posterior-mean thresholds.
+  eta_fixed  <- c(0.10, 0.30, -0.20, 0.50)   # location mu (thresholds excluded)
+  thresholds <- c(-0.5, 0.8)                  # K = 3 categories -> scores in [1, 3]
+  strata     <- c("s1", "s1", "s2", "s2")
+
+  # posterior_linpred(re_formula = NA) returns the location mu; fixef() carries
+  # the thresholds as Intercept[1], Intercept[2] PLUS a location predictor row
+  # 'x' that the threshold extractor must ignore.
+  local_mocked_bindings(
+    posterior_linpred = function(object, ...) {
+      matrix(eta_fixed, ncol = 1, dimnames = list(NULL, "Estimate"))
+    },
+    fixef = function(object, ...) {
+      matrix(c(thresholds, 0.4), ncol = 1,
+             dimnames = list(c("Intercept[1]", "Intercept[2]", "x"), "Estimate"))
+    },
+    .package = "brms"
+  )
+
+  m <- structure(
+    list(
+      model = structure(list(family = list(family = "cumulative", link = "logit")),
+                         class = "brmsfit"),
+      engine = "brms",
+      formula = y ~ x + (1 | stratum),
+      data = data.frame(stratum = strata, stringsAsFactors = FALSE),
+      family = list(family = "cumulative", link = "logit"),
+      sampling_weights = NULL
+    ),
+    class = "maihda_model"
+  )
+  summ <- list(stratum_estimates = data.frame(
+    stratum       = c("s1", "s2"),
+    random_effect = c(0.2, -0.3),
+    lower_95      = c(-0.1, -0.7),
+    upper_95      = c(0.5,  0.1),
+    stringsAsFactors = FALSE
+  ))
+
+  resp <- MAIHDA:::maihda_stratum_predictions_brms(m, summ, scale = "response")
+
+  # Every reported value is an expected category score in [1, K = 3], NOT a
+  # cumulative probability in [0, 1] (the bug). With these locations the scores
+  # all exceed 1, which directly rules out the old plogis() output (always < 1).
+  for (col in c("predicted_row", "lower_row", "upper_row", "fixed_row")) {
+    expect_true(all(resp[[col]] >= 1 & resp[[col]] <= 3))
+  }
+  expect_true(all(resp$predicted_row > 1))
+
+  # ...and they equal the per-stratum mean of the shared eta->score helper applied
+  # row-wise (unit weights here) -- the same quantity the clmm path returns.
+  idx <- match(strata, summ$stratum_estimates$stratum)
+  u   <- summ$stratum_estimates$random_effect[idx]
+  want_score <- tapply(
+    MAIHDA:::maihda_ordinal_eta_to_score(eta_fixed + u, thresholds, "logit"),
+    strata, mean
+  )
+  got_score <- stats::setNames(resp$predicted_row, as.character(resp$stratum))
+  expect_equal(as.numeric(got_score[names(want_score)]),
+               as.numeric(want_score), tolerance = 1e-10)
+
+  # The link scale is untouched: the latent location mu + stratum effect, NOT a
+  # score -- so the fix is scoped to scale = "response".
+  lnk <- MAIHDA:::maihda_stratum_predictions_brms(m, summ, scale = "link")
+  want_link <- tapply(eta_fixed + u, strata, mean)
+  got_link  <- stats::setNames(lnk$predicted_row, as.character(lnk$stratum))
+  expect_equal(as.numeric(got_link[names(want_link)]),
+               as.numeric(want_link), tolerance = 1e-10)
 })
 
 test_that("brms cumulative summary returns a draws-based latent VPC", {

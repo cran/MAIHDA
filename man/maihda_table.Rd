@@ -18,8 +18,9 @@ maihda_table(
 single \code{maihda_model} from \code{\link{fit_maihda}}.}
 
 \item{n_strata}{Number of strata to show at each end (top and bottom) in the
-printed ranked-strata table. The returned \code{$strata} always holds all strata.
-Default 10.}
+printed ranked-strata table. The returned \code{$strata} holds all strata
+(\code{NULL} for a longitudinal fit, whose strata are trajectories rather than
+single ranked values -- see \code{$strata} in Value). Default 10.}
 
 \item{scale}{Scale for the predicted stratum values: \code{"response"} (default)
 or \code{"link"}. For a cumulative (ordinal) model the response scale is the
@@ -42,8 +43,19 @@ An object of class \code{maihda_table}: a list with
     columns)}
   \item{strata}{a data frame of all strata ranked by predicted outcome, with
     \code{rank}, \code{stratum}, \code{label}, \code{n}, the predicted value and
-    its conditional interval, and the stratum random effect and its interval;
-    \code{NULL} if the stratum predictions could not be computed}
+    its conditional interval, and the stratum random effect and its interval.
+    \code{NULL} when a single ranked value per stratum is not defined -- in
+    particular for a longitudinal (growth-curve) fit, whose strata are
+    trajectories (see \code{strata_note}) -- or if the stratum predictions could
+    not otherwise be computed}
+  \item{strata_note}{a character note explaining why \code{strata} is \code{NULL}
+    (e.g. a longitudinal fit), or \code{NULL} when a ranked-strata table was
+    produced}
+  \item{models_note}{a character note (or \code{NULL}) flagging that the PCV was
+    computed from maximum-likelihood-refitted between-stratum variances while the
+    variance/VPC rows are each model's own (REML) estimate, so the PCV need not
+    equal the reduction implied by the displayed variance rows; see
+    \code{\link{calculate_pvc}}}
   \item{model_keys, model_labels}{the estimate-column keys and their display labels}
   \item{family, engine, mode, scale, ranked_by, n_obs, n_strata_total, context_vars}{
     metadata used by \code{print()}}
@@ -54,9 +66,12 @@ in one call: (a) a \strong{model-results table} contrasting the null and adjuste
 models (intercept, between-stratum variance and SD, VPC/ICC, the PCV, and -- for a
 binary outcome -- the AUC and Median Odds Ratio), and (b) a \strong{ranked-strata
 table} ordering the intersectional strata by their predicted outcome, so the
-best- and worst-off strata can be read directly. It computes nothing new: every
-quantity is read from the summaries already attached to the analysis, so the table
-agrees exactly with \code{summary()} and \code{plot()}.
+best- and worst-off strata can be read directly. It introduces no new estimator:
+the model-results table reuses the quantities from \code{summary()} (calling
+\code{summary()} itself for a bare \code{\link{fit_maihda}} model), and the
+ranked-strata table reuses the same stratum predictions as
+\code{plot(type = "predicted")}, so the table agrees exactly with \code{summary()}
+and \code{plot()}.
 }
 \details{
 The model-results table is mostly numeric and export-ready (e.g.

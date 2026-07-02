@@ -126,11 +126,18 @@ Two engines support them:
     estimates (no bootstrap -- see \code{\link{summary.maihda_model}}).
   \item \code{engine = "brms"}: the weights enter the model as likelihood
     weights (\code{y | weights(w)}), normalized to mean 1, giving a
-    \emph{pseudo-posterior}: point estimates are design-consistent but
-    credible intervals are not design-based -- interpret them cautiously.
+    \emph{pseudo-posterior}: point estimates target the population-weighted
+    estimand but credible intervals are not design-based -- interpret them
+    cautiously. Full design-based (replicate-weight / linearised) variances
+    for the variance components are not computed.
 }
 Rows with a missing or non-positive sampling weight are dropped with a
-warning. Default \code{NULL} (unweighted).}
+warning. The column names \code{.maihda_sw} (brms likelihood weight) and
+\code{.maihda_l2wt} (WeMix level-2 weight) are \strong{reserved} for the
+design-weighted engines: they are written into the analytic data internally,
+so a model that supplies \code{sampling_weights} may not also reference a
+variable of either name in its formula (fitting would error). Default
+\code{NULL} (unweighted).}
 
 \item{id}{Optional single character string naming a person/unit identifier
 column for a \strong{longitudinal (growth-curve) MAIHDA} on long-format data
@@ -158,9 +165,10 @@ degree 1 only.}
 \item{interactions}{Opt-in per-stratum interaction diagnostic
 (\code{\link{maihda_interactions}}), attached as the \code{interactions} slot
 and shown by \code{print()}. \code{FALSE} (default) skips it; \code{TRUE}
-computes it with \code{adjust = "none"}; or pass a \code{\link[stats]{p.adjust}}
-method name (e.g. \code{"BH"}). It is meaningful only on an \emph{adjusted}
-model (the dimensions' main effects in the fixed part); on a null model
+computes it with the diagnostic's default correction (\code{adjust = "BH"}); or
+pass a \code{\link[stats]{p.adjust}} method name, including \code{"none"} for the
+uncorrected view. It is meaningful only on an \emph{adjusted} model (the
+dimensions' main effects in the fixed part); on a null model
 \code{maihda_interactions} warns. This is the single-fit parallel to the
 default-on \code{interactions} of \code{\link{maihda}}.}
 
@@ -171,8 +179,8 @@ arguments are not supported by the wemix engine.}
 }
 \value{
 A maihda_model object containing:
-  \item{model}{The fitted model object (lme4, brms, or WeMix)}
-  \item{engine}{The engine used ("lme4", "brms", or "wemix")}
+  \item{model}{The fitted model object (lme4, brms, WeMix, or ordinal::clmm)}
+  \item{engine}{The engine used ("lme4", "brms", "wemix", or "ordinal")}
   \item{sampling_weights}{The sampling-weight column name when supplied,
     NULL otherwise}
   \item{formula}{The model formula}
@@ -191,8 +199,9 @@ A maihda_model object containing:
 }
 \description{
 Fits a multilevel model for MAIHDA (Multilevel Analysis of Individual
-Heterogeneity and Discriminatory Accuracy) using lme4, brms, or -- for
-design-weighted (survey) data -- WeMix.
+Heterogeneity and Discriminatory Accuracy) using lme4, brms, WeMix (for
+design-weighted (survey) data), or -- for an ordered-factor outcome -- a
+cumulative link mixed model via \code{ordinal::clmm()}.
 }
 \examples{
 \donttest{

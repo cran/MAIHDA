@@ -30,6 +30,14 @@
 #' them: when the formula already lists them it is taken as the adjusted model and the
 #' null is derived by dropping them; when they are missing \code{maihda()} adds them to
 #' the adjusted model and emits a \code{message()} so the decomposition stays explicit.
+#' Only the \emph{additive} main effects belong here: a fixed interaction among the
+#' stratum dimensions -- \code{var1 * var2}, which R expands to
+#' \code{var1 + var2 + var1:var2} -- duplicates the intersectional stratum random
+#' intercept (it absorbs the between-stratum variance into fixed cell means, which
+#' makes the PCV invalid), so it is \strong{rejected with an error}. Write
+#' \code{var1 + var2}; the intersection is estimated by the stratum random effect (and
+#' quantified by \code{decomposition = "crossed-dimensions"} or
+#' \code{\link{maihda_interactions}}).
 #' The dimensions themselves are read from the random term: the shorthand
 #' \code{(1 | var1:var2)} and \code{\link{make_strata}} both record them, and a numeric
 #' dimension that \code{make_strata()} auto-binned enters the adjusted model as its
@@ -65,10 +73,12 @@
 #'   context partialled out (the context random intercept is carried by both the
 #'   null and the adjusted model). Cannot be combined with \code{group}; a context
 #'   with few levels weakly identifies its variance (consider \code{engine = "brms"}).
-#' @param engine Modeling engine, "lme4" (default), "brms", or "wemix" (the
+#' @param engine Modeling engine, "lme4" (default), "brms", "wemix" (the
 #'   design-weighted pseudo-maximum-likelihood fit; requires
 #'   \code{sampling_weights} and is selected automatically when they are supplied
-#'   with the default engine).
+#'   with the default engine), or "ordinal" (cumulative link mixed model via
+#'   \code{ordinal::clmm()}; selected automatically for an ordinal family or an
+#'   ordered-factor outcome).
 #' @param family Model family. Default "gaussian". As in \code{\link{fit_maihda}},
 #'   a binary outcome is auto-detected when \code{family} is left at the default,
 #'   and the same resolved family is then used for the group comparison so all
@@ -136,12 +146,13 @@
 #' @param interactions Whether to compute the per-stratum interaction diagnostic
 #'   (\code{\link{maihda_interactions}}) on the adjusted / crossed-dimensions model
 #'   and attach it as the \code{interactions} slot, surfaced in \code{print()}.
-#'   \code{TRUE} (default) uses \code{adjust = "none"} (the diagnostic's own
-#'   default); \code{FALSE} skips it; or pass a \code{\link[stats]{p.adjust}} method
-#'   name (e.g. \code{"BH"}) to flag with that multiplicity correction. Uses
-#'   \code{conf_level}. Not computed for a longitudinal decomposition. The
-#'   computation is cheap (it reads the stratum estimates the summary already holds;
-#'   no refit).
+#'   \code{TRUE} (default) uses the diagnostic's own default correction
+#'   (\code{adjust = "BH"}, FDR -- since scanning all strata is a screening
+#'   question); \code{FALSE} skips it; or pass a \code{\link[stats]{p.adjust}} method
+#'   name -- including \code{"none"} for the uncorrected, per-stratum
+#'   individual-testing view. Uses \code{conf_level}. Not computed for a longitudinal
+#'   decomposition. The computation is cheap (it reads the stratum estimates the
+#'   summary already holds; no refit).
 #' @param ... Additional arguments passed to \code{\link{fit_maihda}} (and on to
 #'   \code{lmer}/\code{glmer}).
 #'
@@ -154,10 +165,12 @@
 #'     crossed-dimensions mode, and the stratum-vs-context \code{context} partition
 #'     when \code{context} is supplied)}
 #'   \item{model_adjusted}{the fitted \strong{adjusted} \code{maihda_model}
-#'     (\code{"two-model"} mode only; \code{NULL} otherwise)}
+#'     (\code{"two-model"} and \code{"longitudinal"} modes; \code{NULL} otherwise)}
 #'   \item{summary_adjusted}{the adjusted model's \code{maihda_summary}, or \code{NULL}}
-#'   \item{pcv}{the \code{pvc_result} from \code{\link{calculate_pvc}}
-#'     (\code{"two-model"} mode only; \code{NULL} otherwise)}
+#'   \item{pcv}{the proportional change in variance: the \code{pvc_result} from
+#'     \code{\link{calculate_pvc}} in \code{"two-model"} mode, or a
+#'     \code{maihda_long_pcv} (the intercept/slope and time-specific PCV) in
+#'     \code{"longitudinal"} mode; \code{NULL} otherwise}
 #'   \item{decomposition}{the additive/interaction partition (additive and interaction
 #'     variances and shares, per-dimension variances; \code{"crossed-dimensions"} mode
 #'     only, \code{NULL} otherwise)}
@@ -166,7 +179,7 @@
 #'   \item{interactions}{the \code{maihda_interactions} diagnostic (per-stratum
 #'     interaction BLUPs and flags) when \code{interactions} is not \code{FALSE},
 #'     otherwise \code{NULL}}
-#'   \item{mode}{\code{"two-model"} or \code{"crossed-dimensions"}}
+#'   \item{mode}{\code{"two-model"}, \code{"crossed-dimensions"}, or \code{"longitudinal"}}
 #'   \item{context_vars}{the context variable name(s) when \code{context} was
 #'     supplied, otherwise \code{NULL}}
 #'   \item{formula, adjusted_formula, group_var, call}{bookkeeping for printing}
@@ -305,18 +318,46 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
     }
   }
 
+  # Resolve the forwarded engine arguments (subset/weights/offset/control/...) once,
+  # against the user data, and forward the VALUES -- not the expressions -- to every
+  # fit_maihda() call below (via fit_maihda_fwd). A data-masked subset/weights that
+  # references the response (e.g. subset = y %in% c("a", "b")) would otherwise be
+  # re-evaluated by each derived null/adjusted fit against that fit's data -- whose
+  # response has already been recoded to 0/1 in $original_data -- selecting zero rows
+  # and failing. Pre-evaluating makes the subset immune to the recoding, exactly as
+  # fit_maihda() does internally for a single fit and compare_maihda_groups() does for
+  # its per-group fits. The subset is normalized to a full-length logical so it stays
+  # row-aligned with each derived fit's data (which has the same rows as `data`).
+  dots_eval <- lapply(rlang::enquos(...), function(q) rlang::eval_tidy(q, data = data))
+  if (!is.null(dots_eval[["subset"]])) {
+    dots_eval[["subset"]] <- maihda_normalize_subset(dots_eval[["subset"]], nrow(data))
+  }
+  fit_maihda_fwd <- function(...) do.call(fit_maihda, c(list(...), dots_eval))
+
   # Ordinal (cumulative) family <-> engine handshake, mirroring fit_maihda():
   # the wrappers pass 'engine' explicitly to every fit, so fit_maihda()'s own
   # missing(engine) auto-switch could never fire through them. An ordered-factor
   # outcome under all-default family/engine likewise selects the ordinal engine
   # here (fit_maihda() then auto-detects the family on the analytic sample).
-  if (missing(family) && missing(engine) && is.null(sampling_weights) &&
-      isTRUE(tryCatch(maihda_response_is_ordinal(formula, data),
-                      error = function(e) FALSE))) {
-    engine <- "ordinal"
-    message("maihda(): the outcome is an ordered factor; using the cumulative ",
-            "(ordinal) model with engine = \"ordinal\" (ordinal::clmm). Specify ",
-            "'family'/'engine' explicitly to override.")
+  #
+  # Detect on the SAME analytic sample fit_maihda() fits -- after any forwarded
+  # subset / precision weights -- not the raw outcome column. Pinning the engine
+  # from the raw column could select engine = "ordinal" while fit_maihda()'s
+  # analytic-sample detection resolves a binomial family (e.g. an ordered factor
+  # subset to two observed levels), a contradiction that then errors inside
+  # fit_maihda().
+  if (missing(family) && missing(engine) && is.null(sampling_weights)) {
+    is_ord_outcome <- isTRUE(tryCatch(
+      maihda_response_is_ordinal(formula, data,
+                                 subset = dots_eval[["subset"]],
+                                 weights = dots_eval[["weights"]]),
+      error = function(e) FALSE))
+    if (is_ord_outcome) {
+      engine <- "ordinal"
+      message("maihda(): the outcome is an ordered factor; using the cumulative ",
+              "(ordinal) model with engine = \"ordinal\" (ordinal::clmm). Specify ",
+              "'family'/'engine' explicitly to override.")
+    }
   }
   is_ordinal <- maihda_family_is_ordinal(
     if (is.function(family)) tryCatch(family(), error = function(e) NULL) else family
@@ -355,14 +396,14 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
   # can auto-detect a binary outcome, then reuse the resolved family for every model so
   # they agree.
   if (missing(family)) {
-    model <- fit_maihda(formula, data, engine = engine, autobin = autobin,
-                        context = context, sampling_weights = sampling_weights,
-                        id = id, time = time, time_degree = time_degree, ...)
+    model <- fit_maihda_fwd(formula, data, engine = engine, autobin = autobin,
+                            context = context, sampling_weights = sampling_weights,
+                            id = id, time = time, time_degree = time_degree)
   } else {
-    model <- fit_maihda(formula, data, engine = engine, family = family,
-                        autobin = autobin, context = context,
-                        sampling_weights = sampling_weights,
-                        id = id, time = time, time_degree = time_degree, ...)
+    model <- fit_maihda_fwd(formula, data, engine = engine, family = family,
+                            autobin = autobin, context = context,
+                            sampling_weights = sampling_weights,
+                            id = id, time = time, time_degree = time_degree)
   }
   family_used <- model$family
 
@@ -397,13 +438,32 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
   # (.maihda_dim_*), matching the strata, not the raw column.
   dim_terms <- maihda_adjusted_terms(strata_vars, model$strata_autobin_info,
                                      model$original_data)$terms
+  # Reject a fixed interaction among the stratum dimensions (e.g. `Gender * Race`,
+  # which R expands to Gender + Race + Gender:Race). The main-effect stripping below
+  # would remove only Gender and Race, leaving the fixed Gender:Race in BOTH the
+  # derived null and adjusted formulas -- duplicating the intersectional stratum
+  # random intercept and corrupting the PCV. Guard every decomposition mode here,
+  # before the two-model / crossed-dimensions / longitudinal branches split.
+  maihda_check_no_dimension_interaction(model$formula, strata_vars, dim_terms,
+                                        fn = "maihda")
   supplied_fixed <- attr(stats::terms(reformulas::nobars(model$formula)), "term.labels")
-  present_terms <- intersect(dim_terms, supplied_fixed)
-  missing_vars <- strata_vars[!(dim_terms %in% supplied_fixed)]
+  # terms() backtick-quotes non-syntactic term labels (e.g. `gender var`), so the
+  # dimension main effects must be compared in their quoted form -- a raw-name
+  # intersect would miss them and misclassify a fully-specified adjusted formula as
+  # the null (producing identical null/adjusted formulas and a corrupt PCV).
+  # present_terms keeps the RAW names (remove_terms re-quotes them) and missing_vars
+  # stays parallel to strata_vars.
+  dim_terms_quoted <- vapply(dim_terms, maihda_quote_name, character(1))
+  dim_present <- dim_terms_quoted %in% supplied_fixed
+  present_terms <- dim_terms[dim_present]
+  missing_vars <- strata_vars[!dim_present]
 
   remove_terms <- function(f, terms) {
+    # maihda_quote_name() safely backtick-quotes each term, including the rare
+    # legal name containing a backtick that a manual sprintf("`%s`") would break.
+    quoted <- vapply(terms, maihda_quote_name, character(1))
     stats::update(f, stats::as.formula(
-      paste(". ~ . -", paste(sprintf("`%s`", terms), collapse = " - "))))
+      paste(". ~ . -", paste(quoted, collapse = " - "))))
   }
 
   # --- Crossed-dimensions decomposition -----------------------------------------
@@ -424,9 +484,9 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
     # The formula builder strips ALL random effects before adding the dimension +
     # intersection intercepts; passing `context` again re-appends (and re-tags) any
     # contextual random intercept, so the two structures compose in one fit.
-    cc_model <- fit_maihda(cc$formula, cc$data, engine = engine,
-                           family = family_used, context = context,
-                           sampling_weights = sampling_weights, ...)
+    cc_model <- fit_maihda_fwd(cc$formula, cc$data, engine = engine,
+                               family = family_used, context = context,
+                               sampling_weights = sampling_weights)
     # Tag the fit so summary()/plot() read the additive-vs-interaction partition.
     cc_model$cc_info <- list(dim_groups = cc$dim_groups,
                              interaction_group = cc$interaction_group,
@@ -483,18 +543,18 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
   # 2024). The VPC itself is time-varying (see summary()).
   if (decomposition == "longitudinal") {
     null_model <- if (length(present_terms) > 0) {
-      fit_maihda(remove_terms(model$formula, present_terms), model$original_data,
-                 engine = engine, family = family_used,
-                 id = id, time = time, time_degree = time_degree, ...)
+      fit_maihda_fwd(remove_terms(model$formula, present_terms), model$original_data,
+                     engine = engine, family = family_used,
+                     id = id, time = time, time_degree = time_degree)
     } else {
       model
     }
     laf <- maihda_longitudinal_adjusted_formula(
       null_model$formula, strata_vars, null_model$strata_autobin_info,
       null_model$original_data, time = time, time_degree = time_degree)
-    adjusted_model <- fit_maihda(laf$formula, laf$data, engine = engine,
-                                 family = family_used, id = id, time = time,
-                                 time_degree = time_degree, ...)
+    adjusted_model <- fit_maihda_fwd(laf$formula, laf$data, engine = engine,
+                                     family = family_used, id = id, time = time,
+                                     time_degree = time_degree)
 
     summary_obj <- summary(null_model, bootstrap = bootstrap, n_boot = n_boot,
                            conf_level = conf_level)
@@ -543,32 +603,32 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
     af <- maihda_adjusted_formula(null_model$formula, strata_vars,
                                   null_model$strata_autobin_info,
                                   null_model$original_data)
-    adjusted_model <- fit_maihda(af$formula, af$data, engine = engine,
-                                 family = family_used, context = context,
-                                 sampling_weights = sampling_weights, ...)
+    adjusted_model <- fit_maihda_fwd(af$formula, af$data, engine = engine,
+                                     family = family_used, context = context,
+                                     sampling_weights = sampling_weights)
     adjusted_formula <- af$formula
   } else if (length(missing_vars) == 0) {
     # Every dimension main effect is already present (the fully-specified adjusted
     # model): the supplied fit IS the adjusted; derive the null by removing them.
     adjusted_model <- model
     adjusted_formula <- model$formula
-    null_model <- fit_maihda(remove_terms(model$formula, present_terms),
-                             model$original_data, engine = engine,
-                             family = family_used, context = context,
-                             sampling_weights = sampling_weights, ...)
+    null_model <- fit_maihda_fwd(remove_terms(model$formula, present_terms),
+                                 model$original_data, engine = engine,
+                                 family = family_used, context = context,
+                                 sampling_weights = sampling_weights)
   } else {
     # Some dimension main effects present, some missing: fit a clean null (covariates
     # only) and a clean adjusted (all dimension main effects).
-    null_model <- fit_maihda(remove_terms(model$formula, present_terms),
-                             model$original_data, engine = engine,
-                             family = family_used, context = context,
-                             sampling_weights = sampling_weights, ...)
+    null_model <- fit_maihda_fwd(remove_terms(model$formula, present_terms),
+                                 model$original_data, engine = engine,
+                                 family = family_used, context = context,
+                                 sampling_weights = sampling_weights)
     af <- maihda_adjusted_formula(null_model$formula, strata_vars,
                                   null_model$strata_autobin_info,
                                   null_model$original_data)
-    adjusted_model <- fit_maihda(af$formula, af$data, engine = engine,
-                                 family = family_used, context = context,
-                                 sampling_weights = sampling_weights, ...)
+    adjusted_model <- fit_maihda_fwd(af$formula, af$data, engine = engine,
+                                     family = family_used, context = context,
+                                     sampling_weights = sampling_weights)
     adjusted_formula <- af$formula
   }
 
@@ -648,16 +708,17 @@ maihda_print_analysis_da <- function(summary_obj, summary_adjusted = NULL) {
   fmt <- function(v, d = 3) {
     if (isTRUE(is.finite(v))) formatC(v, format = "f", digits = d) else "NA"
   }
-  cat("\nDiscriminatory accuracy (null model):\n")
+  pal <- maihda_palette()
+  cat("\n", pal$bold("Discriminatory accuracy (null model):"), "\n", sep = "")
   cat(sprintf("  AUC: %s | MOR: %s | cases/controls: %d/%d\n",
-              fmt(da$auc), fmt(da$mor), da$n_case, da$n_control))
+              pal$accent(fmt(da$auc)), pal$accent(fmt(da$mor)), da$n_case, da$n_control))
   da_adj <- if (!is.null(summary_adjusted)) summary_adjusted$discriminatory_accuracy else NULL
   if (!is.null(da_adj) && isTRUE(is.finite(da_adj$auc))) {
-    cat(sprintf("  Adjusted-model AUC: %s\n", fmt(da_adj$auc)))
+    cat(sprintf("  Adjusted-model AUC: %s\n", pal$accent(fmt(da_adj$auc))))
   }
   vr <- summary_obj$vpc_response
   if (!is.null(vr) && isTRUE(is.finite(vr$estimate))) {
-    cat(sprintf("  Response-scale VPC (null): %s\n", fmt(vr$estimate, 4)))
+    cat(sprintf("  Response-scale VPC (null): %s\n", pal$accent(fmt(vr$estimate, 4))))
   }
   invisible(NULL)
 }
@@ -669,7 +730,8 @@ maihda_print_analysis_da <- function(summary_obj, summary_adjusted = NULL) {
 #' @return No return value, called for side effects.
 #' @export
 print.maihda_analysis <- function(x, ...) {
-  cat("MAIHDA Analysis\n")
+  pal <- maihda_palette()
+  cat(pal$bold("MAIHDA Analysis"), "\n", sep = "")
   cat("===============\n\n")
 
   # Crossed-dimensions mode: one model, additive (dimension REs) vs interaction
@@ -686,9 +748,10 @@ print.maihda_analysis <- function(x, ...) {
 
     vpc <- x$summary$vpc
     if (maihda_vpc_has_interval(vpc)) {
-      cat(sprintf("VPC/ICC: %.4f [%.4f, %.4f]\n", vpc$estimate, vpc$ci_lower, vpc$ci_upper))
+      cat(sprintf("VPC/ICC: %s [%.4f, %.4f]\n",
+                  pal$accent(sprintf("%.4f", vpc$estimate)), vpc$ci_lower, vpc$ci_upper))
     } else {
-      cat(sprintf("VPC/ICC: %.4f\n", vpc$estimate))
+      cat(sprintf("VPC/ICC: %s\n", pal$accent(sprintf("%.4f", vpc$estimate))))
     }
     if (!is.null(x$decomposition)) {
       cat("\n")
@@ -706,7 +769,7 @@ print.maihda_analysis <- function(x, ...) {
       cat(sprintf("\nGroup comparison by '%s':\n", x$group_var))
       print(x$groups)
     }
-    cat("\nUse summary() for variance components and plot(type = ...) for figures.\n")
+    cat(pal$muted("\nUse summary() for variance components and plot(type = ...) for figures.\n"))
     return(invisible(x))
   }
 
@@ -724,11 +787,12 @@ print.maihda_analysis <- function(x, ...) {
 
     vpc <- x$summary$vpc
     if (maihda_vpc_has_interval(vpc)) {
-      cat(sprintf("VPC/ICC at baseline (%s = %g): %.4f [%.4f, %.4f]\n",
-                  lng$time, lng$ref_time, vpc$estimate, vpc$ci_lower, vpc$ci_upper))
+      cat(sprintf("VPC/ICC at baseline (%s = %g): %s [%.4f, %.4f]\n",
+                  lng$time, lng$ref_time, pal$accent(sprintf("%.4f", vpc$estimate)),
+                  vpc$ci_lower, vpc$ci_upper))
     } else {
-      cat(sprintf("VPC/ICC at baseline (%s = %g): %.4f\n",
-                  lng$time, lng$ref_time, vpc$estimate))
+      cat(sprintf("VPC/ICC at baseline (%s = %g): %s\n",
+                  lng$time, lng$ref_time, pal$accent(sprintf("%.4f", vpc$estimate))))
     }
     if (!is.null(lng)) {
       vt <- lng$vpc_t
@@ -742,8 +806,8 @@ print.maihda_analysis <- function(x, ...) {
     if (!is.null(x$summary$stratum_estimates)) {
       cat("\nStrata: ", nrow(x$summary$stratum_estimates), "\n", sep = "")
     }
-    cat("\nUse summary() for variance components and ",
-        "plot(type = \"vpc_trajectory\" / \"trajectories\") for figures.\n", sep = "")
+    cat(pal$muted(paste0("\nUse summary() for variance components and ",
+        "plot(type = \"vpc_trajectory\" / \"trajectories\") for figures.\n")))
     return(invisible(x))
   }
 
@@ -760,9 +824,10 @@ print.maihda_analysis <- function(x, ...) {
 
   vpc <- x$summary$vpc
   if (maihda_vpc_has_interval(vpc)) {
-    cat(sprintf("VPC/ICC (null): %.4f [%.4f, %.4f]\n", vpc$estimate, vpc$ci_lower, vpc$ci_upper))
+    cat(sprintf("VPC/ICC (null): %s [%.4f, %.4f]\n",
+                pal$accent(sprintf("%.4f", vpc$estimate)), vpc$ci_lower, vpc$ci_upper))
   } else {
-    cat(sprintf("VPC/ICC (null): %.4f\n", vpc$estimate))
+    cat(sprintf("VPC/ICC (null): %s\n", pal$accent(sprintf("%.4f", vpc$estimate))))
   }
   if (!is.null(x$summary$context)) {
     ctx <- x$summary$context
@@ -773,10 +838,10 @@ print.maihda_analysis <- function(x, ...) {
   if (!is.null(x$pcv)) {
     pcv <- x$pcv
     if (isTRUE(pcv$bootstrap) && !is.null(pcv$ci_lower)) {
-      cat(sprintf("PCV (null -> adjusted): %.4f [%.4f, %.4f]\n",
-                  pcv$pvc, pcv$ci_lower, pcv$ci_upper))
+      cat(sprintf("PCV (null -> adjusted): %s [%.4f, %.4f]\n",
+                  pal$accent(sprintf("%.4f", pcv$pvc)), pcv$ci_lower, pcv$ci_upper))
     } else {
-      cat(sprintf("PCV (null -> adjusted): %.4f\n", pcv$pvc))
+      cat(sprintf("PCV (null -> adjusted): %s\n", pal$accent(sprintf("%.4f", pcv$pvc))))
     }
     cat(sprintf("Between-stratum variance: %.4f (null) -> %.4f (adjusted)\n",
                 pcv$var_model1, pcv$var_model2))
@@ -805,7 +870,7 @@ print.maihda_analysis <- function(x, ...) {
     print(x$groups)
   }
 
-  cat("\nUse summary() for variance components and plot(type = ...) for figures.\n")
+  cat(pal$muted("\nUse summary() for variance components and plot(type = ...) for figures.\n"))
   invisible(x)
 }
 
@@ -832,25 +897,27 @@ summary.maihda_analysis <- function(object, ...) {
 #'
 #' Dispatches each \code{type} to the model it is valid on. The VPC and shrinkage
 #' views (\code{"vpc"}, \code{"obs_vs_shrunken"}, \code{"predicted"}) use the
-#' \strong{null} model. The additive-vs-intersectional views (\code{"risk_vs_effect"},
-#' \code{"effect_decomp"}, \code{"ternary"}, \code{"prediction_deviation"}) use the
+#' \strong{null} model. The additive-vs-intersectional views (\code{"effect_decomp"},
+#' \code{"prediction_deviation"}) use the
 #' \strong{adjusted} model, whose fixed effects carry the dimensions' additive part so
 #' the stratum random effect is the pure interaction; with fewer than two dimensions
 #' (no adjusted model) they fall back to the null model. Group types
 #' (\code{"group_vpc"}, \code{"group_components"}, \code{"group_between_variance"},
-#' \code{"group_pcv"}) use the group comparison when \code{\link{maihda}} was called
-#' with a \code{group}.
+#' \code{"group_pcv"}, \code{"group_additive_share"}) use the group comparison when
+#' \code{\link{maihda}} was called with a \code{group}.
 #'
 #' @param x A \code{maihda_analysis} object from \code{\link{maihda}}.
 #' @param type One of the model types ("all", "vpc", "obs_vs_shrunken", "predicted",
-#'   "risk_vs_effect", "effect_decomp", "ternary", "prediction_deviation"), the
+#'   "upset" (the UpSet-style alternative to "predicted"; forwards \code{quantity}
+#'   via \code{...}), "effect_decomp",
+#'   "prediction_deviation"), the
 #'   contextual type ("context_vpc", a stratum-vs-context variance bar; requires
 #'   \code{maihda(context = )}), a longitudinal type ("vpc_trajectory",
 #'   "trajectories", "pcv_trajectory"; requires \code{decomposition =
 #'   "longitudinal"}), or a group type ("group_vpc", "group_components",
-#'   "group_between_variance", "group_pcv"). Default "all". For a longitudinal
-#'   analysis "all" shows the VPC-over-time, the stratum trajectories, and the
-#'   time-specific PCV.
+#'   "group_between_variance", "group_pcv", "group_additive_share"). Default "all".
+#'   For a longitudinal analysis "all" shows the VPC-over-time, the stratum
+#'   trajectories, and the time-specific PCV.
 #' @param highlight_interactions Highlight strata with a credibly non-zero
 #'   intersectional interaction on the BLUP-based views (see
 #'   \code{\link{maihda_interactions}} and \code{\link[=plot.maihda_model]{plot}}).
@@ -858,17 +925,57 @@ summary.maihda_analysis <- function(object, ...) {
 #'   crossed-dimensions model), a multiple-testing method such as \code{"BH"}, or
 #'   a \code{maihda_interactions} object. The flags are computed once from the
 #'   correct (adjusted) model and reused across views.
+#' @param only_flagged Show only the highlighted strata on the \code{"predicted"}
+#'   and \code{"obs_vs_shrunken"} views instead of dimming the rest (see
+#'   \code{\link[=plot.maihda_model]{plot}}). \code{FALSE} (default) keeps every
+#'   stratum; \code{TRUE} restricts those views to the highlighted strata (those
+#'   carrying a credibly non-zero interaction, or -- under
+#'   \code{highlight_by = "rope"} -- those classified ROPE-\code{"relevant"}) and,
+#'   when \code{highlight_interactions} is left \code{FALSE}, turns the highlight on
+#'   with this analysis's stored diagnostic. \code{"effect_decomp"} ignores it (it
+#'   stays highlighted in context).
+#' @param highlight_by Which interaction-screen column defines the highlighted
+#'   strata: \code{"flag"} (default, the zero-centred \code{flagged} column) or
+#'   \code{"rope"} (the equivalence \code{decision} column, highlighting the
+#'   strata classified \code{"relevant"}). See
+#'   \code{\link[=plot.maihda_model]{plot}}. \code{"rope"} requires \code{rope}
+#'   (or a \code{highlight_interactions} object built with one).
+#' @param rope Equivalence region forwarded to \code{\link{maihda_interactions}}
+#'   when computing the screen, so \code{highlight_by = "rope"} has a
+#'   \code{decision} column to read: a single positive \code{d} for the symmetric
+#'   region \code{c(-d, d)} on the latent (link) scale, or \code{c(lower, upper)}.
+#'   \code{NULL} (default) adds no equivalence classification.
+#' @param select When the \code{n_strata} cap drops strata on the
+#'   \code{"predicted"} (or longitudinal \code{"trajectories"}) view, which to
+#'   keep: \code{"order"} (default, first n_strata in stratum order) or
+#'   \code{"deviation"} (the n_strata furthest from the reference, both tails). See
+#'   \code{\link[=plot.maihda_model]{plot}}.
 #' @param ... Additional arguments passed to the underlying plot method.
 #' @return A ggplot2 object, or (for \code{type = "all"}) an invisible list of them.
 #' @export
-plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE, ...) {
+plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE,
+                                 only_flagged = FALSE, highlight_by = c("flag", "rope"),
+                                 rope = NULL, select = c("order", "deviation"), ...) {
   type <- match.arg(type, c(
-    "all", "vpc", "obs_vs_shrunken", "predicted", "risk_vs_effect",
-    "effect_decomp", "ternary", "prediction_deviation", "context_vpc",
+    "all", "vpc", "obs_vs_shrunken", "predicted", "upset",
+    "effect_decomp", "prediction_deviation", "context_vpc",
     "vpc_trajectory", "trajectories", "pcv_trajectory",
     "group_vpc", "group_components", "group_between_variance", "group_pcv",
     "group_additive_share"
   ))
+
+  # only_flagged needs flags to restrict by. Imply the highlight HERE, at the
+  # analysis level, so it resolves from the stored (adjusted-model) diagnostic --
+  # deferring to the model method would recompute on the null model that the
+  # predicted/obs views use and trip its "looks like a null model" warning.
+  only_flagged <- maihda_validate_only_flagged(only_flagged)
+  if (only_flagged && isFALSE(highlight_interactions)) {
+    highlight_interactions <- TRUE
+  }
+  # Which column of the interaction screen defines the highlighted set.
+  highlight_by <- match.arg(highlight_by)
+  # Which strata survive the n_strata cap on the predicted / trajectory views.
+  select <- match.arg(select)
 
   # Longitudinal analysis: the trajectory views replace the cross-sectional ones.
   # "all" shows the VPC-over-time and the stratum mean trajectories; "pcv_trajectory"
@@ -885,7 +992,7 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
         vpc_trajectory = plot(x$model, type = "vpc_trajectory",
                               summary_obj = x$summary, ...),
         trajectories = tryCatch(plot(x$model, type = "trajectories",
-                                     summary_obj = x$summary, ...),
+                                     summary_obj = x$summary, select = select, ...),
                                 error = function(e) NULL),
         pcv_trajectory = tryCatch(plot_pcv_trajectory(x$pcv),
                                   error = function(e) NULL)
@@ -895,7 +1002,7 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
     }
     if (type %in% c("vpc_trajectory", "trajectories", "vpc")) {
       t <- if (type == "vpc") "vpc_trajectory" else type
-      return(plot(x$model, type = t, summary_obj = x$summary, ...))
+      return(plot(x$model, type = t, summary_obj = x$summary, select = select, ...))
     }
     # Other cross-sectional types fall through to the adjusted growth model below.
   }
@@ -923,7 +1030,7 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
   # the null / crossed-dimensions model. In crossed-dimensions mode there is no
   # separate adjusted model, so all views use x$model (which already carries the
   # additive structure).
-  adjusted_types <- c("risk_vs_effect", "effect_decomp", "ternary", "prediction_deviation")
+  adjusted_types <- c("effect_decomp", "prediction_deviation")
   adj_model <- if (!is.null(x$model_adjusted)) x$model_adjusted else x$model
   adj_summary <- if (!is.null(x$model_adjusted)) x$summary_adjusted else x$summary
 
@@ -932,17 +1039,19 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
   # then forward the resolved maihda_interactions object to every model view -- the
   # null-model shrinkage views included -- so the same flagged strata are marked
   # everywhere without recomputation.
-  hl <- maihda_resolve_analysis_highlight(x, highlight_interactions)
+  hl <- maihda_resolve_analysis_highlight(x, highlight_interactions, rope = rope)
 
   if (type == "all") {
     null_plots <- list(vpc = plot(x$model, type = "vpc", summary_obj = x$summary, ...))
     null_plots$obs_vs_shrunken <- tryCatch(
       plot(x$model, type = "obs_vs_shrunken", summary_obj = x$summary,
-           highlight_interactions = hl, ...),
+           highlight_interactions = hl, only_flagged = only_flagged,
+           highlight_by = highlight_by, rope = rope, ...),
       error = function(e) NULL)
     null_plots$predicted <- tryCatch(
       plot(x$model, type = "predicted", summary_obj = x$summary,
-           highlight_interactions = hl, ...),
+           highlight_interactions = hl, only_flagged = only_flagged,
+           highlight_by = highlight_by, rope = rope, select = select, ...),
       error = function(e) NULL)
     if (!is.null(x$context_vars)) {
       null_plots$context_vpc <- tryCatch(
@@ -954,7 +1063,7 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
     for (t in adjusted_types) {
       adj_plots[[t]] <- tryCatch(
         plot(adj_model, type = t, summary_obj = adj_summary,
-             highlight_interactions = hl, ...),
+             highlight_interactions = hl, highlight_by = highlight_by, rope = rope, ...),
         error = function(e) NULL)
     }
 
@@ -975,12 +1084,14 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
 
   if (type %in% adjusted_types) {
     return(plot(adj_model, type = type, summary_obj = adj_summary,
-                highlight_interactions = hl, ...))
+                highlight_interactions = hl, only_flagged = only_flagged,
+                highlight_by = highlight_by, rope = rope, ...))
   }
 
   # vpc, obs_vs_shrunken, predicted -> null model
   plot(x$model, type = type, summary_obj = x$summary,
-       highlight_interactions = hl, ...)
+       highlight_interactions = hl, only_flagged = only_flagged,
+       highlight_by = highlight_by, rope = rope, select = select, ...)
 }
 
 # Resolve the highlight argument for a maihda_analysis: FALSE/NULL stays FALSE;
@@ -990,7 +1101,13 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
 # interactions = FALSE. A p.adjust method name such as "BH" computes adjusted
 # flags from the analysis's adjusted/crossed-dimensions model. Either way the
 # downstream model plots receive a ready object and neither recompute nor warn.
-maihda_resolve_analysis_highlight <- function(x, highlight_interactions) {
+#
+# `rope` is forwarded when the screen is (re)computed here so a
+# highlight_by = "rope" caller gets a `decision` column to read. The stored
+# diagnostic (computed at maihda() time without a rope) is reused only when no rope
+# is requested or it already carries a decision column; otherwise the screen is
+# recomputed with the rope so the equivalence classification exists.
+maihda_resolve_analysis_highlight <- function(x, highlight_interactions, rope = NULL) {
   if (is.null(highlight_interactions) || isFALSE(highlight_interactions)) {
     return(FALSE)
   }
@@ -998,10 +1115,11 @@ maihda_resolve_analysis_highlight <- function(x, highlight_interactions) {
     return(highlight_interactions)
   }
   if (isTRUE(highlight_interactions)) {
-    if (inherits(x$interactions, "maihda_interactions")) {
+    if (inherits(x$interactions, "maihda_interactions") &&
+        (is.null(rope) || "decision" %in% names(x$interactions))) {
       return(x$interactions)
     }
-    return(maihda_interactions(x))
+    return(maihda_interactions(x, rope = rope))
   }
   if (is.character(highlight_interactions) && length(highlight_interactions) == 1L) {
     choices <- c("none", stats::p.adjust.methods)
@@ -1010,7 +1128,7 @@ maihda_resolve_analysis_highlight <- function(x, highlight_interactions) {
            "method name (e.g. \"BH\"), or a maihda_interactions object from ",
            "maihda_interactions().", call. = FALSE)
     }
-    return(maihda_interactions(x, adjust = highlight_interactions))
+    return(maihda_interactions(x, adjust = highlight_interactions, rope = rope))
   }
   stop("'highlight_interactions' must be FALSE, TRUE, a multiple-comparison ",
        "method name (e.g. \"BH\"), or a maihda_interactions object from ",

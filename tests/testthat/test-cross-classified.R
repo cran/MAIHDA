@@ -38,6 +38,30 @@ test_that("maihda_cc_variance_split and maihda_cc_partition compute the partitio
   expect_equal(part$interaction_share, 0.5)
 })
 
+test_that("maihda_cc_partition returns NA (not NaN) shares with zero between variance", {
+  # A degenerate fit with no between-strata variance: the additive / interaction
+  # shares split that (zero) variance, so they are undefined -- 0 / 0 = NaN. The
+  # partition must report NA, not leak NaN into the public summary.
+  part <- maihda_cc_partition(0, 0, 1)
+  expect_equal(part$between, 0)
+  expect_true(is.na(part$additive_share))
+  expect_true(is.na(part$interaction_share))
+  expect_false(is.nan(part$additive_share))    # NA, specifically not NaN
+  expect_false(is.nan(part$interaction_share))
+  expect_equal(part$vpc, 0)                     # between / total = 0 / 1 is well defined
+
+  # When the TOTAL variance is also zero the VPC is undefined too -> NA, not NaN.
+  part0 <- maihda_cc_partition(0, 0, 0)
+  expect_true(is.na(part0$vpc))
+  expect_false(is.nan(part0$vpc))
+
+  # A non-zero between variance is unchanged (regression guard for the ifelse).
+  part2 <- maihda_cc_partition(2, 1, 1)
+  expect_equal(part2$additive_share, 2 / 3)
+  expect_equal(part2$interaction_share, 1 / 3)
+  expect_equal(part2$vpc, 3 / 4)
+})
+
 test_that("maihda_cc_variance_split errors when a random effect is missing", {
   v <- c(a = 1, stratum = 3, Residual = 4)
   expect_error(maihda_cc_variance_split(v, c(A = "a", B = "b"), "stratum"),
@@ -150,8 +174,9 @@ test_that("crossed-dimensions bootstrap returns finite VPC and share intervals",
     maihda(y ~ x + (1 | a:b:cc), data = d, decomposition = "crossed-dimensions")))
   sb <- suppressWarnings(summary(cc$model, bootstrap = TRUE, n_boot = 25))
   expect_true(is.finite(sb$vpc$ci_lower) && is.finite(sb$vpc$ci_upper))
-  expect_true(sb$vpc$ci_lower <= sb$vpc$estimate &&
-                sb$vpc$estimate <= sb$vpc$ci_upper)
+  # A percentile bootstrap interval is well-ordered but need not contain the point
+  # estimate (the bootstrap VPC distribution can be skewed at small n_boot).
+  expect_true(sb$vpc$ci_lower <= sb$vpc$ci_upper)
   asci <- sb$decomposition$additive_share_ci
   expect_length(asci, 2)
   expect_true(all(is.finite(asci)))
@@ -179,7 +204,8 @@ test_that("compare_maihda_groups(decomposition = 'crossed-dimensions') reports s
   expect_s3_class(g, "maihda_group_comparison")
   expect_true(all(c("var_additive", "var_interaction", "additive_share",
                     "interaction_share") %in% names(g)))
-  expect_false(any(c("pcv", "var_between_adjusted") %in% names(g)))
+  expect_false(any(c("pcv", "var_between_adjusted", "var_between_adjusted_ml") %in%
+                     names(g)))
   ok <- g[g$status == "ok", ]
   expect_true(all(ok$additive_share >= -1e-8 & ok$additive_share <= 1 + 1e-8))
   expect_identical(attr(g, "decomposition"), "crossed-dimensions")

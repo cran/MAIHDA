@@ -147,6 +147,18 @@ test_that("maihda_table() errors on an unsupported input", {
   expect_error(maihda_table(list(a = 1)), "maihda_analysis|maihda_model")
 })
 
+test_that("maihda_table() rejects a non-finite, missing, or negative n_strata", {
+  d <- make_table_data(7010)
+  a <- suppressMessages(maihda(y ~ age + (1 | gender:race), data = d))
+
+  for (bad in list(NA, NA_integer_, NaN, Inf, -Inf, 0, -1, c(1, 2), "5")) {
+    expect_error(maihda_table(a, n_strata = bad),
+                 "'n_strata' must be a single positive number")
+  }
+  # A valid value still builds and prints.
+  expect_s3_class(maihda_table(a, n_strata = 2), "maihda_table")
+})
+
 test_that("maihda_table() reports the context share for a contextual fit", {
   d <- make_table_data(7009)
   a <- suppressWarnings(suppressMessages(
@@ -163,6 +175,37 @@ test_that("maihda_table() reports the context share for a contextual fit", {
 
   out <- capture.output(print(tab))
   expect_true(any(grepl("Context: country", out, fixed = TRUE)))
+})
+
+test_that("maihda_table() notes the REML-variance / ML-PCV basis mismatch", {
+  d <- make_table_data(7011)
+  a <- suppressMessages(maihda(y ~ age + gender + race + (1 | gender:race), data = d))
+
+  tab <- maihda_table(a)
+  # A Gaussian lme4 two-model fit reports REML variance rows but an ML-refitted PCV,
+  # so a clarifying note is attached...
+  expect_type(tab$models_note, "character")
+  expect_match(tab$models_note, "maximum-likelihood")
+
+  # ...and the note is warranted: the ML between-stratum variance the PCV is built
+  # from genuinely differs from the displayed REML variance row.
+  v_null_disp <- tab$models[tab$models$statistic == "Between-stratum variance", "null"]
+  expect_false(isTRUE(all.equal(a$pcv$var_model1, v_null_disp)))
+
+  # The note surfaces in print().
+  out <- capture.output(print(tab))
+  expect_true(any(grepl("Note:", out, fixed = TRUE)))
+})
+
+test_that("maihda_table() attaches no PCV note for single or crossed-dimensions fits", {
+  d <- make_table_data(7012)
+
+  m <- suppressMessages(fit_maihda(y ~ age + (1 | gender:race), data = d))
+  expect_null(maihda_table(m)$models_note)
+
+  a <- suppressWarnings(suppressMessages(
+    maihda(y ~ age + (1 | gender:race), data = d, decomposition = "crossed-dimensions")))
+  expect_null(maihda_table(a)$models_note)
 })
 
 test_that("maihda_extract_intercept handles every fixed-effects shape", {

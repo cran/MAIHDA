@@ -1,8 +1,9 @@
 #' Fit MAIHDA Model
 #'
 #' Fits a multilevel model for MAIHDA (Multilevel Analysis of Individual
-#' Heterogeneity and Discriminatory Accuracy) using lme4, brms, or -- for
-#' design-weighted (survey) data -- WeMix.
+#' Heterogeneity and Discriminatory Accuracy) using lme4, brms, WeMix (for
+#' design-weighted (survey) data), or -- for an ordered-factor outcome -- a
+#' cumulative link mixed model via \code{ordinal::clmm()}.
 #'
 #' @param formula A formula specifying the model. Can include a random effect
 #'   for stratum (e.g., \code{outcome ~ fixed_vars + (1 | stratum)}) or can
@@ -104,11 +105,18 @@
 #'       estimates (no bootstrap -- see \code{\link{summary.maihda_model}}).
 #'     \item \code{engine = "brms"}: the weights enter the model as likelihood
 #'       weights (\code{y | weights(w)}), normalized to mean 1, giving a
-#'       \emph{pseudo-posterior}: point estimates are design-consistent but
-#'       credible intervals are not design-based -- interpret them cautiously.
+#'       \emph{pseudo-posterior}: point estimates target the population-weighted
+#'       estimand but credible intervals are not design-based -- interpret them
+#'       cautiously. Full design-based (replicate-weight / linearised) variances
+#'       for the variance components are not computed.
 #'   }
 #'   Rows with a missing or non-positive sampling weight are dropped with a
-#'   warning. Default \code{NULL} (unweighted).
+#'   warning. The column names \code{.maihda_sw} (brms likelihood weight) and
+#'   \code{.maihda_l2wt} (WeMix level-2 weight) are \strong{reserved} for the
+#'   design-weighted engines: they are written into the analytic data internally,
+#'   so a model that supplies \code{sampling_weights} may not also reference a
+#'   variable of either name in its formula (fitting would error). Default
+#'   \code{NULL} (unweighted).
 #' @param id Optional single character string naming a person/unit identifier
 #'   column for a \strong{longitudinal (growth-curve) MAIHDA} on long-format data
 #'   (one row per measurement occasion). Supplied together with \code{time}, it
@@ -132,9 +140,10 @@
 #' @param interactions Opt-in per-stratum interaction diagnostic
 #'   (\code{\link{maihda_interactions}}), attached as the \code{interactions} slot
 #'   and shown by \code{print()}. \code{FALSE} (default) skips it; \code{TRUE}
-#'   computes it with \code{adjust = "none"}; or pass a \code{\link[stats]{p.adjust}}
-#'   method name (e.g. \code{"BH"}). It is meaningful only on an \emph{adjusted}
-#'   model (the dimensions' main effects in the fixed part); on a null model
+#'   computes it with the diagnostic's default correction (\code{adjust = "BH"}); or
+#'   pass a \code{\link[stats]{p.adjust}} method name, including \code{"none"} for the
+#'   uncorrected view. It is meaningful only on an \emph{adjusted} model (the
+#'   dimensions' main effects in the fixed part); on a null model
 #'   \code{maihda_interactions} warns. This is the single-fit parallel to the
 #'   default-on \code{interactions} of \code{\link{maihda}}.
 #' @param ... Additional arguments passed to \code{lmer}/\code{glmer} (lme4),
@@ -143,8 +152,8 @@
 #'   arguments are not supported by the wemix engine.
 #'
 #' @return A maihda_model object containing:
-#'   \item{model}{The fitted model object (lme4, brms, or WeMix)}
-#'   \item{engine}{The engine used ("lme4", "brms", or "wemix")}
+#'   \item{model}{The fitted model object (lme4, brms, WeMix, or ordinal::clmm)}
+#'   \item{engine}{The engine used ("lme4", "brms", "wemix", or "ordinal")}
 #'   \item{sampling_weights}{The sampling-weight column name when supplied,
 #'     NULL otherwise}
 #'   \item{formula}{The model formula}
@@ -268,11 +277,13 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
     }
   }
 
-  # Rows with a missing sampling weight are dropped by the weighted engines, so
-  # base the binary-outcome detection (and any 0/1 recoding) on the same rows by
-  # passing the sampling weights through the detector's missing-weight handling.
+  # The weighted engines drop rows whose sampling weight is non-finite or <= 0
+  # (not just NA), so base the binary/ordinal detection AND any 0/1 recoding on the
+  # same analytic sample: maihda_sampling_weight_mask() maps those engine-excluded
+  # weights to NA, which the shared row mask (maihda_row_mask) already drops.
+  # Precision (lme4 prior) weights keep their NA-only handling.
   detect_weights <- if (!is.null(sampling_weights)) {
-    data[[sampling_weights]]
+    maihda_sampling_weight_mask(data[[sampling_weights]])
   } else {
     weights_value
   }
@@ -448,6 +459,9 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
     }
     formula <- maihda_longitudinal_formula(formula, lng_spec$id, lng_spec$time,
                                            lng_spec$time_degree)
+    # time_range/ref_time here are provisional (pre-fit): they are recomputed
+    # from the fitted analytic frame after the engine drops rows (see below),
+    # so a baseline wave lost to missing outcomes does not anchor the VPC/PCV.
     tv <- data[[lng_spec$time]]
     longitudinal_info <- list(id = lng_spec$id, time = lng_spec$time,
                               time_degree = lng_spec$time_degree,
@@ -654,19 +668,27 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
     }
 
     # Sampling weights enter the brms model as likelihood weights, which gives a
-    # PSEUDO-posterior: point estimates are design-consistent, intervals are not
-    # design-based. The weights are normalized to mean 1 so expansion weights do
-    # not inflate the effective sample size, and rows with missing/non-positive
-    # weights are dropped here so the stored data matches the fitted rows.
+    # PSEUDO-posterior: point estimates target the population-weighted estimand,
+    # intervals are not design-based. The weights are normalized to mean 1 so
+    # expansion weights do not inflate the effective sample size, and rows with
+    # missing/non-positive weights are dropped here so the stored data matches the
+    # fitted rows.
     if (!is.null(sampling_weights)) {
+      n_pre_drop <- nrow(data)
       prep <- maihda_prepare_brms_sampling_weights(data, formula, sampling_weights)
       data <- prep$data
       formula <- prep$formula
       fit_env$data <- data
+      # The forwarded `...` were evaluated against the pre-drop data and bound into
+      # fit_env above; if rows were just dropped, re-slice any row-aligned argument
+      # (e.g. subset, offset) so it stays aligned with the `data` brms receives.
+      if (any(!prep$keep)) {
+        maihda_reslice_dot_args(dot_vals, prep$keep, n_pre_drop, fit_env)
+      }
       message("fit_maihda(): sampling weights enter the brms model as likelihood ",
               "weights (normalized to mean 1), giving a pseudo-posterior: point ",
-              "estimates are design-consistent, but credible intervals are not ",
-              "design-based -- interpret them cautiously.")
+              "estimates target the population-weighted estimand, but credible ",
+              "intervals are not design-based -- interpret them cautiously.")
     }
 
     # brms models a 0/1 response with bernoulli(); passing binomial() would
@@ -731,6 +753,20 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
   attr(model_data, "strata_sep") <- strata_sep
   attr(model_data, "strata_autobin_info") <- strata_autobin_info
 
+  # Recompute the longitudinal reference time and time range from the FITTED
+  # analytic frame, not the pre-fit data: lme4/brms drop rows with missing
+  # outcomes (or predictors), which can remove an entire baseline wave. The
+  # earlier capture (from `data`) recorded ref_time = min(time) over rows that
+  # may not all survive the fit; the VPC/PCV summaries then report a baseline at
+  # a time not represented in the fitted sample (an extrapolation). model_data
+  # holds the rows the engine actually used, so its min/range are the analytic
+  # baseline and span.
+  if (!is.null(longitudinal_info)) {
+    tv_fit <- model_data[[longitudinal_info$time]]
+    longitudinal_info$time_range <- range(tv_fit, na.rm = TRUE)
+    longitudinal_info$ref_time <- min(tv_fit, na.rm = TRUE)
+  }
+
   result <- structure(
     list(
       model = model,
@@ -763,6 +799,34 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
   return(result)
 }
 
+# Re-slice forwarded engine arguments after a pre-fit row drop. The `...` values
+# are evaluated once against the pre-drop `data` and bound into `fit_env` as
+# `.maihda_arg_*` names; when a downstream step drops rows (the brms
+# sampling-weight path removes rows with non-positive/missing weights), any
+# row-aligned argument (e.g. `subset`, `offset`) is left longer than the `data`
+# the engine receives -- brms then errors on the length mismatch, or could select
+# the wrong rows. Re-slice every value whose length (vector) or row count (matrix /
+# data frame) equals the pre-drop count `n_pre` to the surviving rows and rebind
+# it; scalars and non-row-aligned objects (chains=, control, priors) are left as
+# bound. `keep` is the logical mask over the pre-drop rows.
+maihda_reslice_dot_args <- function(dot_vals, keep, n_pre, fit_env) {
+  for (nm in names(dot_vals)) {
+    v <- dot_vals[[nm]]
+    d <- dim(v)
+    sliced <- if (!is.null(d) && length(d) == 2L) {
+      if (nrow(v) == n_pre) v[keep, , drop = FALSE] else NULL
+    } else if (is.null(d) && length(v) == n_pre) {
+      v[keep]
+    } else {
+      NULL
+    }
+    if (!is.null(sliced)) {
+      assign(paste0(".maihda_arg_", nm), sliced, envir = fit_env)
+    }
+  }
+  invisible(NULL)
+}
+
 #' Print method for maihda_model
 #'
 #' @param x A maihda_model object
@@ -770,7 +834,7 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
 #' @return No return value, called for side effects.
 #' @export
 print.maihda_model <- function(x, ...) {
-  cat("MAIHDA Model\n")
+  cat(maihda_palette()$bold("MAIHDA Model"), "\n", sep = "")
   cat("============\n\n")
   cat("Engine:", x$engine, "\n")
   cat("Family:", x$family$family, "\n")

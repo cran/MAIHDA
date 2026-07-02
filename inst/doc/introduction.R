@@ -42,25 +42,24 @@ analysis$pcv            # proportional change in between-stratum variance
 # Variance partition (VPC) -- null model
 plot(analysis, type = "vpc")
 
-## ----maihda-plot-predicted----------------------------------------------------
-# Predicted stratum values with 95% CIs -- null model
+## ----maihda-plot-predicted, fig.height = 10-----------------------------------
+# Predicted stratum values with 95% CIs -- null model.
+# 50 strata (Gender x Race x Education), so the figure is tall to keep the
+# rotated stratum labels readable.
 plot(analysis, type = "predicted")
+
+## ----maihda-plot-upset, fig.width = 9, fig.height = 7-------------------------
+# UpSet view of the same strata, highlighting ROPE-relevant interactions.
+plot(analysis, type = "upset", n_strata = 25, select = "deviation",
+     highlight_interactions = TRUE, highlight_by = "rope", rope = 0.25)
 
 ## ----maihda-plot-effect-decomp------------------------------------------------
 # Additive versus intersectional effect decomposition -- adjusted model
 plot(analysis, type = "effect_decomp")
 
-## ----maihda-plot-risk---------------------------------------------------------
-# Mean predicted outcome against the stratum random effect -- adjusted model
-plot(analysis, type = "risk_vs_effect")
-
 ## ----maihda-plot-deviation, warning = FALSE-----------------------------------
 # Individual prediction-deviance dashboard -- adjusted model
 plot(analysis, type = "prediction_deviation")
-
-## ----maihda-plot-ternary, eval = requireNamespace("ggtern", quietly = TRUE), warning = FALSE, message = FALSE----
-# Ternary diagnostic: additive vs intersection-specific signal vs uncertainty
-plot(analysis, type = "ternary")
 
 ## ----maihda-weighted, eval=FALSE----------------------------------------------
 # weighted <- maihda(outcome ~ age + (1 | gender:race:education),

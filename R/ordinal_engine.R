@@ -163,17 +163,26 @@ maihda_ordinal_prepare_response <- function(data, formula) {
 #'   analytic data frame actually fitted).
 #' @keywords internal
 maihda_fit_clmm <- function(formula, data, family, dot_vals) {
-  model_vars <- intersect(all.vars(formula), names(data))
-  complete <- stats::complete.cases(data[, model_vars, drop = FALSE])
-  if (!any(complete)) {
+  # Keep exactly the rows clmm will fit: the evaluated analytic frame (response and
+  # fixed-effect transformations applied, rows missing AFTER those transformations
+  # dropped). A raw complete.cases() over the formula's columns misses NAs introduced
+  # by a transformed term (e.g. log(x) of x <= 0), which left the stored wrapper data
+  # holding more rows than clmm actually fit and broke downstream row alignment. Fall
+  # back to the raw check only when the analytic frame cannot be built.
+  keep <- maihda_analytic_keep_mask(formula, data)
+  if (is.null(keep)) {
+    model_vars <- intersect(all.vars(formula), names(data))
+    keep <- stats::complete.cases(data[, model_vars, drop = FALSE])
+  }
+  if (!any(keep)) {
     stop("No usable rows remain for the ordinal fit after dropping rows with ",
          "missing model variables.", call. = FALSE)
   }
-  if (sum(!complete) > 0) {
+  if (sum(!keep) > 0) {
     warning(sprintf(paste0("fit_maihda(): dropped %d row(s) with missing model ",
-                           "variables before the ordinal fit."), sum(!complete)),
+                           "variables before the ordinal fit."), sum(!keep)),
             call. = FALSE)
-    data <- data[complete, , drop = FALSE]
+    data <- data[keep, , drop = FALSE]
   }
 
   args <- list(
@@ -299,10 +308,14 @@ maihda_clmm_stratum_ranef <- function(object) {
 #' constructed with the training data's factor levels and multiplied by the
 #' location coefficients \code{beta} (a clmm has \emph{no} intercept column --
 #' it is absorbed by the thresholds -- so \code{beta}'s names select the right
-#' columns), and \code{include_re} adds each row's stratum conditional mode
-#' (an unseen stratum contributes 0). Everything is on the latent (link) scale;
-#' map through \code{\link{maihda_ordinal_eta_to_score}} for the response-scale
-#' expected category score.
+#' columns), any formula offset term is evaluated on \code{newdata} and added
+#' (so an offset-only null model still predicts its offset), and
+#' \code{include_re} adds each row's stratum conditional mode (an
+#' unseen stratum contributes 0 -- the population-average fallback that
+#' \code{\link{predict_maihda}} only reaches when \code{allow_new_levels = TRUE},
+#' having otherwise rejected unseen strata upstream). Everything is on the latent
+#' (link) scale; map through \code{\link{maihda_ordinal_eta_to_score}} for the
+#' response-scale expected category score.
 #'
 #' @param object A \code{maihda_model} with engine \code{"ordinal"}.
 #' @param newdata Data to predict for; defaults to the analytic data.
@@ -315,13 +328,18 @@ maihda_clmm_linpred <- function(object, newdata = NULL, include_re = TRUE) {
   }
   beta <- object$model$beta
 
+  # Build the fixed-effect model frame once. It supplies both the design matrix
+  # (when there are location coefficients) and any formula offset term, so it is
+  # needed even for a null (thresholds-only) model that carries only an offset.
+  tt <- stats::delete.response(stats::terms(reformulas::nobars(object$formula)))
+  xlev <- stats::.getXlevels(tt, stats::model.frame(tt, object$data))
+  mf <- stats::model.frame(tt, newdata, xlev = xlev, na.action = stats::na.pass)
+
   if (is.null(beta) || length(beta) == 0) {
-    # Null (thresholds-only) model: the location fixed part is identically 0.
+    # Null (thresholds-only) model: the location fixed part is identically 0
+    # (the offset, if any, is added below).
     eta <- rep(0, nrow(newdata))
   } else {
-    tt <- stats::delete.response(stats::terms(reformulas::nobars(object$formula)))
-    xlev <- stats::.getXlevels(tt, stats::model.frame(tt, object$data))
-    mf <- stats::model.frame(tt, newdata, xlev = xlev, na.action = stats::na.pass)
     X <- stats::model.matrix(tt, mf)
     missing_cols <- setdiff(names(beta), colnames(X))
     if (length(missing_cols) > 0) {
@@ -329,6 +347,14 @@ maihda_clmm_linpred <- function(object, newdata = NULL, include_re = TRUE) {
            paste(missing_cols, collapse = ", "), call. = FALSE)
     }
     eta <- drop(X[, names(beta), drop = FALSE] %*% beta)
+  }
+
+  # A formula offset term (offset(.) in the model formula) is part of the latent
+  # location clmm fits but is NOT a column of X, so add it explicitly -- including
+  # for an offset-only null model, whose location is otherwise identically 0.
+  off <- stats::model.offset(mf)
+  if (!is.null(off)) {
+    eta <- eta + off
   }
 
   if (include_re) {
@@ -361,8 +387,11 @@ maihda_ordinal_category_probs <- function(eta, thresholds, link = "logit") {
   }
   linkinv <- if (identical(link, "probit")) stats::pnorm else stats::plogis
   thresholds <- as.numeric(thresholds)
-  if (is.unsorted(thresholds, strictly = FALSE)) {
-    stop("Cumulative thresholds must be non-decreasing.", call. = FALSE)
+  # Strictly increasing, as the @param doc states ("increasing thresholds"). Equal
+  # adjacent thresholds imply a zero-probability category (a degenerate cut point),
+  # so reject them rather than silently returning an empty category.
+  if (is.unsorted(thresholds, strictly = TRUE)) {
+    stop("Cumulative thresholds must be strictly increasing.", call. = FALSE)
   }
   cum <- vapply(thresholds, function(a) linkinv(a - eta),
                 numeric(length(eta)))
@@ -404,6 +433,39 @@ maihda_ordinal_eta_to_score <- function(eta, thresholds, link = "logit") {
   )
 }
 
+#' Posterior-mean cumulative thresholds of a brms cumulative fit
+#'
+#' The brms analogue of \code{clmm}'s \code{object$model$alpha}: the ordered cut
+#' points \eqn{\alpha_k} of a \code{brms::cumulative()} fit, read as posterior
+#' means from \code{brms::fixef()}, where they appear as \code{Intercept[1]},
+#' \code{Intercept[2]}, ... (any location predictors are separate rows and are
+#' dropped here). Returned in threshold order so they pair with the
+#' \code{brms::posterior_linpred(re_formula = NA)} location -- which excludes the
+#' thresholds, exactly the latent \eqn{\eta} that
+#' \code{\link{maihda_ordinal_category_probs}} expects (\eqn{P(Y \le k) =
+#' g^{-1}(\alpha_k - \eta)}).
+#'
+#' @param model A fitted \code{brmsfit} from \code{brms::cumulative()}.
+#' @return A numeric vector of thresholds (length \eqn{K-1} for \eqn{K} categories).
+#' @keywords internal
+maihda_brms_ordinal_thresholds <- function(model) {
+  fx <- tryCatch(brms::fixef(model), error = function(e) NULL)
+  if (is.null(fx) || is.null(dim(fx)) || is.null(rownames(fx)) ||
+      !"Estimate" %in% colnames(fx)) {
+    stop("Could not read the cumulative thresholds from the brms fit ",
+         "(brms::fixef() returned no usable population-level summary).",
+         call. = FALSE)
+  }
+  rn <- rownames(fx)
+  thr_rows <- grep("^Intercept\\[[0-9]+\\]$", rn)
+  if (length(thr_rows) == 0) {
+    stop("Could not find cumulative thresholds (Intercept[k]) in the brms fit; ",
+         "is this a brms::cumulative() model?", call. = FALSE)
+  }
+  ord <- order(as.integer(sub("^Intercept\\[([0-9]+)\\]$", "\\1", rn[thr_rows])))
+  as.numeric(fx[thr_rows[ord], "Estimate"])
+}
+
 #' Per-stratum predictions for a cumulative (clmm) fit
 #'
 #' Ordinal counterpart of \code{maihda_stratum_predictions_wemix()}: per-stratum
@@ -425,7 +487,7 @@ maihda_stratum_predictions_ordinal <- function(object, summary_obj,
 
   alpha <- object$model$alpha
   link <- object$family$link
-  prior_w <- maihda_prior_weights(object)
+  prior_w <- maihda_prediction_weights(object)
   eta_fixed <- maihda_clmm_linpred(object, include_re = FALSE)
 
   stratum_est <- summary_obj$stratum_estimates

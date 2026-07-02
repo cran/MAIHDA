@@ -58,10 +58,12 @@ context partialled out (the context random intercept is carried by both the
 null and the adjusted model). Cannot be combined with \code{group}; a context
 with few levels weakly identifies its variance (consider \code{engine = "brms"}).}
 
-\item{engine}{Modeling engine, "lme4" (default), "brms", or "wemix" (the
+\item{engine}{Modeling engine, "lme4" (default), "brms", "wemix" (the
 design-weighted pseudo-maximum-likelihood fit; requires
 \code{sampling_weights} and is selected automatically when they are supplied
-with the default engine).}
+with the default engine), or "ordinal" (cumulative link mixed model via
+\code{ordinal::clmm()}; selected automatically for an ordinal family or an
+ordered-factor outcome).}
 
 \item{family}{Model family. Default "gaussian". As in \code{\link{fit_maihda}},
 a binary outcome is auto-detected when \code{family} is left at the default,
@@ -142,12 +144,13 @@ not supported alongside them. Default \code{NULL} (cross-sectional).}
 \item{interactions}{Whether to compute the per-stratum interaction diagnostic
 (\code{\link{maihda_interactions}}) on the adjusted / crossed-dimensions model
 and attach it as the \code{interactions} slot, surfaced in \code{print()}.
-\code{TRUE} (default) uses \code{adjust = "none"} (the diagnostic's own
-default); \code{FALSE} skips it; or pass a \code{\link[stats]{p.adjust}} method
-name (e.g. \code{"BH"}) to flag with that multiplicity correction. Uses
-\code{conf_level}. Not computed for a longitudinal decomposition. The
-computation is cheap (it reads the stratum estimates the summary already holds;
-no refit).}
+\code{TRUE} (default) uses the diagnostic's own default correction
+(\code{adjust = "BH"}, FDR -- since scanning all strata is a screening
+question); \code{FALSE} skips it; or pass a \code{\link[stats]{p.adjust}} method
+name -- including \code{"none"} for the uncorrected, per-stratum
+individual-testing view. Uses \code{conf_level}. Not computed for a longitudinal
+decomposition. The computation is cheap (it reads the stratum estimates the
+summary already holds; no refit).}
 
 \item{...}{Additional arguments passed to \code{\link{fit_maihda}} (and on to
 \code{lmer}/\code{glmer}).}
@@ -162,10 +165,12 @@ An object of class \code{maihda_analysis}: a list with
     crossed-dimensions mode, and the stratum-vs-context \code{context} partition
     when \code{context} is supplied)}
   \item{model_adjusted}{the fitted \strong{adjusted} \code{maihda_model}
-    (\code{"two-model"} mode only; \code{NULL} otherwise)}
+    (\code{"two-model"} and \code{"longitudinal"} modes; \code{NULL} otherwise)}
   \item{summary_adjusted}{the adjusted model's \code{maihda_summary}, or \code{NULL}}
-  \item{pcv}{the \code{pvc_result} from \code{\link{calculate_pvc}}
-    (\code{"two-model"} mode only; \code{NULL} otherwise)}
+  \item{pcv}{the proportional change in variance: the \code{pvc_result} from
+    \code{\link{calculate_pvc}} in \code{"two-model"} mode, or a
+    \code{maihda_long_pcv} (the intercept/slope and time-specific PCV) in
+    \code{"longitudinal"} mode; \code{NULL} otherwise}
   \item{decomposition}{the additive/interaction partition (additive and interaction
     variances and shares, per-dimension variances; \code{"crossed-dimensions"} mode
     only, \code{NULL} otherwise)}
@@ -174,7 +179,7 @@ An object of class \code{maihda_analysis}: a list with
   \item{interactions}{the \code{maihda_interactions} diagnostic (per-stratum
     interaction BLUPs and flags) when \code{interactions} is not \code{FALSE},
     otherwise \code{NULL}}
-  \item{mode}{\code{"two-model"} or \code{"crossed-dimensions"}}
+  \item{mode}{\code{"two-model"}, \code{"crossed-dimensions"}, or \code{"longitudinal"}}
   \item{context_vars}{the context variable name(s) when \code{context} was
     supplied, otherwise \code{NULL}}
   \item{formula, adjusted_formula, group_var, call}{bookkeeping for printing}
@@ -211,6 +216,14 @@ the null \emph{excludes} the dimension main effects and the adjusted \emph{inclu
 them: when the formula already lists them it is taken as the adjusted model and the
 null is derived by dropping them; when they are missing \code{maihda()} adds them to
 the adjusted model and emits a \code{message()} so the decomposition stays explicit.
+Only the \emph{additive} main effects belong here: a fixed interaction among the
+stratum dimensions -- \code{var1 * var2}, which R expands to
+\code{var1 + var2 + var1:var2} -- duplicates the intersectional stratum random
+intercept (it absorbs the between-stratum variance into fixed cell means, which
+makes the PCV invalid), so it is \strong{rejected with an error}. Write
+\code{var1 + var2}; the intersection is estimated by the stratum random effect (and
+quantified by \code{decomposition = "crossed-dimensions"} or
+\code{\link{maihda_interactions}}).
 The dimensions themselves are read from the random term: the shorthand
 \code{(1 | var1:var2)} and \code{\link{make_strata}} both record them, and a numeric
 dimension that \code{make_strata()} auto-binned enters the adjusted model as its

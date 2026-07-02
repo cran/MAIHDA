@@ -16,9 +16,12 @@
 #' models (intercept, between-stratum variance and SD, VPC/ICC, the PCV, and -- for a
 #' binary outcome -- the AUC and Median Odds Ratio), and (b) a \strong{ranked-strata
 #' table} ordering the intersectional strata by their predicted outcome, so the
-#' best- and worst-off strata can be read directly. It computes nothing new: every
-#' quantity is read from the summaries already attached to the analysis, so the table
-#' agrees exactly with \code{summary()} and \code{plot()}.
+#' best- and worst-off strata can be read directly. It introduces no new estimator:
+#' the model-results table reuses the quantities from \code{summary()} (calling
+#' \code{summary()} itself for a bare \code{\link{fit_maihda}} model), and the
+#' ranked-strata table reuses the same stratum predictions as
+#' \code{plot(type = "predicted")}, so the table agrees exactly with \code{summary()}
+#' and \code{plot()}.
 #'
 #' @details
 #' The model-results table is mostly numeric and export-ready (e.g.
@@ -50,8 +53,9 @@
 #' @param x A \code{maihda_analysis} from \code{\link{maihda}} (the usual input), or a
 #'   single \code{maihda_model} from \code{\link{fit_maihda}}.
 #' @param n_strata Number of strata to show at each end (top and bottom) in the
-#'   printed ranked-strata table. The returned \code{$strata} always holds all strata.
-#'   Default 10.
+#'   printed ranked-strata table. The returned \code{$strata} holds all strata
+#'   (\code{NULL} for a longitudinal fit, whose strata are trajectories rather than
+#'   single ranked values -- see \code{$strata} in Value). Default 10.
 #' @param scale Scale for the predicted stratum values: \code{"response"} (default)
 #'   or \code{"link"}. For a cumulative (ordinal) model the response scale is the
 #'   expected category score.
@@ -69,8 +73,19 @@
 #'     columns)}
 #'   \item{strata}{a data frame of all strata ranked by predicted outcome, with
 #'     \code{rank}, \code{stratum}, \code{label}, \code{n}, the predicted value and
-#'     its conditional interval, and the stratum random effect and its interval;
-#'     \code{NULL} if the stratum predictions could not be computed}
+#'     its conditional interval, and the stratum random effect and its interval.
+#'     \code{NULL} when a single ranked value per stratum is not defined -- in
+#'     particular for a longitudinal (growth-curve) fit, whose strata are
+#'     trajectories (see \code{strata_note}) -- or if the stratum predictions could
+#'     not otherwise be computed}
+#'   \item{strata_note}{a character note explaining why \code{strata} is \code{NULL}
+#'     (e.g. a longitudinal fit), or \code{NULL} when a ranked-strata table was
+#'     produced}
+#'   \item{models_note}{a character note (or \code{NULL}) flagging that the PCV was
+#'     computed from maximum-likelihood-refitted between-stratum variances while the
+#'     variance/VPC rows are each model's own (REML) estimate, so the PCV need not
+#'     equal the reduction implied by the displayed variance rows; see
+#'     \code{\link{calculate_pvc}}}
 #'   \item{model_keys, model_labels}{the estimate-column keys and their display labels}
 #'   \item{family, engine, mode, scale, ranked_by, n_obs, n_strata_total, context_vars}{
 #'     metadata used by \code{print()}}
@@ -97,6 +112,13 @@ maihda_table <- function(x, n_strata = 10L, scale = c("response", "link"),
                          which = c("null", "adjusted"), digits = 3, ...) {
   scale <- match.arg(scale)
   which <- match.arg(which)
+  # n_strata caps how many strata print() shows at each end; validate before it
+  # is coerced (as.integer(NA) etc. would otherwise reach print() and error there
+  # on `if (nrow(st) > 2 * n)`).
+  if (!is.numeric(n_strata) || length(n_strata) != 1L ||
+      !is.finite(n_strata) || n_strata < 1) {
+    stop("'n_strata' must be a single positive number.", call. = FALSE)
+  }
 
   # Resolve the inputs to: the per-model summaries to tabulate, the PCV (if any),
   # the model/summary the strata are ranked from, and a little metadata. Two shapes
@@ -152,6 +174,10 @@ maihda_table <- function(x, n_strata = 10L, scale = c("response", "link"),
   }
 
   models_df <- maihda_build_results_table(model_stats, pcv)
+  # Flag the REML-variance-rows / ML-based-PCV basis mismatch (two-model lme4 fits)
+  # so a reader does not misread the PCV as inconsistent with the variance rows.
+  models_note <- maihda_table_pcv_note(model_stats, pcv, model_keys,
+                                       primary_model$engine)
 
   # Ranked-strata table -- a bonus deliverable; never let it break the results
   # table (e.g. a brms predict failure on an exotic family). A longitudinal fit
@@ -187,6 +213,7 @@ maihda_table <- function(x, n_strata = 10L, scale = c("response", "link"),
       mode = mode,
       scale = scale,
       ranked_by = ranked_by,
+      models_note = models_note,
       strata_note = strata_note,
       n_obs = n_obs,
       n_strata_total = n_strata_total,
@@ -366,6 +393,36 @@ maihda_build_results_table <- function(model_stats, pcv = NULL) {
   df
 }
 
+# Note flagging that a two-model PCV was computed on a different variance basis than
+# the displayed single-model variance rows. calculate_pvc() refits a Gaussian lme4
+# fit to ML before differencing the between-stratum variances (REML variances are not
+# comparable across models with different fixed effects; see ?calculate_pvc), whereas
+# the "Between-stratum variance"/SD and VPC/ICC rows are read from each model's own
+# (REML) fit -- the same quantities summary() reports. When the two bases differ, the
+# displayed PCV does not equal (var_null - var_adj)/var_null read off the table, which
+# reads as an inconsistency unless explained. Returns NULL (no note) when the bases
+# coincide: an already-ML engine (glmer/brms/wemix/ordinal), or a boundary null where
+# calculate_pvc() kept the REML fit -- detected directly by comparing the PCV's own
+# between-stratum variances to the displayed ones rather than proxying on isREML().
+maihda_table_pcv_note <- function(model_stats, pcv, model_keys, engine) {
+  if (is.null(pcv) || !identical(engine, "lme4") ||
+      !all(c("null", "adjusted") %in% model_keys)) {
+    return(NULL)
+  }
+  v1 <- suppressWarnings(as.numeric(pcv$var_model1)[1])
+  v2 <- suppressWarnings(as.numeric(pcv$var_model2)[1])
+  disp1 <- model_stats[["null"]][["Between-stratum variance"]][1]
+  disp2 <- model_stats[["adjusted"]][["Between-stratum variance"]][1]
+  if (any(is.na(c(v1, v2, disp1, disp2)))) return(NULL)
+  differs <- function(a, b) isTRUE(abs(a - b) > 1e-8 + 1e-6 * max(abs(a), abs(b)))
+  if (!differs(disp1, v1) && !differs(disp2, v2)) return(NULL)
+  paste0("The PCV is computed from maximum-likelihood-refitted between-stratum ",
+         "variances (required for a valid cross-model comparison; see ",
+         "?calculate_pvc), while the Between-stratum variance/SD and VPC/ICC rows are ",
+         "each model's own REML estimate. The PCV therefore need not equal the ",
+         "variance reduction implied by the displayed variance rows.")
+}
+
 # Rank every stratum by its model-predicted outcome, reusing the same per-stratum
 # predictions as plot(type = "predicted") so the table matches the figure. Returns
 # a data frame ordered from highest to lowest predicted value, with the predicted
@@ -428,7 +485,8 @@ maihda_table_fmt <- function(est, lo = NA_real_, hi = NA_real_, digits = 3) {
 #' @return Invisibly, \code{x}.
 #' @export
 print.maihda_table <- function(x, digits = x$digits, ...) {
-  cat("MAIHDA Results Table\n")
+  pal <- maihda_palette()
+  cat(pal$bold("MAIHDA Results Table"), "\n", sep = "")
   cat("====================\n\n")
 
   cat(sprintf("Engine: %s | Family: %s | Mode: %s\n",
@@ -450,15 +508,18 @@ print.maihda_table <- function(x, digits = x$digits, ...) {
     }, character(1))
     disp[[x$model_labels[[k]]]] <- vals
   }
-  cat("\nModel results:\n")
+  cat("\n", pal$bold("Model results:"), "\n", sep = "")
   print(disp, row.names = FALSE)
+  if (!is.null(x$models_note)) {
+    cat("\n", pal$muted(paste0("Note: ", x$models_note)), "\n", sep = "")
+  }
 
   # --- Ranked-strata table ---------------------------------------------------
   if (!is.null(x$strata) && nrow(x$strata) > 0) {
     st <- x$strata
     scale_lab <- if (identical(x$scale, "response")) "predicted value" else "predicted (link scale)"
     by_lab <- switch(x$ranked_by, null = "null model", adjusted = "adjusted model", "model")
-    cat(sprintf("\nStrata ranked by %s (%s):\n", scale_lab, by_lab))
+    cat("\n", pal$bold(sprintf("Strata ranked by %s (%s):", scale_lab, by_lab)), "\n", sep = "")
 
     fmt_row <- function(rows) {
       data.frame(

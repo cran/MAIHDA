@@ -60,7 +60,7 @@
 #' @seealso \code{\link{maihda_discriminatory_accuracy}}, \code{\link{summary.maihda_model}}
 #'
 #' @examples
-#' \dontrun{
+#' \donttest{
 #' strata <- make_strata(maihda_health_data, vars = c("Gender", "Race"))
 #' d <- maihda_health_data
 #' d$stratum <- strata$data$stratum
@@ -82,9 +82,13 @@ maihda_vpc_response <- function(model, n_sim = 10000, seed = NULL) {
     stop("The response-scale VPC is only defined for binomial MAIHDA models ",
          "(any binomial link); this model uses family = '", fam, "'.", call. = FALSE)
   }
-  if (!is.numeric(n_sim) || length(n_sim) != 1 || !is.finite(n_sim) || n_sim < 100) {
-    stop("'n_sim' must be a single number >= 100.", call. = FALSE)
+  if (!is.numeric(n_sim) || length(n_sim) != 1 || !is.finite(n_sim) ||
+      n_sim < 100 || n_sim != floor(n_sim)) {
+    stop("'n_sim' must be a single whole number >= 100.", call. = FALSE)
   }
+  # rnorm() silently truncates a fractional count (rnorm(100.5) draws 100) while the
+  # recorded n_sim would keep the fraction; cast so the draw count and the report agree.
+  n_sim <- as.integer(n_sim)
 
   var_between <- tryCatch(extract_between_variance(model), error = function(e) NA_real_)
   if (!is.numeric(var_between) || length(var_between) != 1 ||
@@ -140,10 +144,11 @@ maihda_vpc_response <- function(model, n_sim = 10000, seed = NULL) {
 
 #' @export
 print.maihda_vpc_response <- function(x, ...) {
-  cat("Response-scale VPC (simulation method)\n")
+  pal <- maihda_palette()
+  cat(pal$bold("Response-scale VPC (simulation method)"), "\n", sep = "")
   cat(sprintf("  VPC: %s\n",
-              if (is.finite(x$estimate)) sprintf("%.4f", x$estimate) else "NA"))
-  cat(sprintf("  %d simulated stratum effects; between-stratum variance %.4f (latent scale).\n",
-              x$n_sim, x$var_between))
+              if (is.finite(x$estimate)) pal$accent(sprintf("%.4f", x$estimate)) else "NA"))
+  cat(pal$muted(sprintf("  %d simulated stratum effects; between-stratum variance %.4f (latent scale).\n",
+              x$n_sim, x$var_between)))
   invisible(x)
 }

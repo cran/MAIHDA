@@ -84,7 +84,7 @@ calculate_pvc <- function(model1, model2, bootstrap = FALSE,
   }
 
   if (model1$engine != model2$engine) {
-    stop("Both models must use the same engine (lme4 or brms)")
+    stop("Both models must use the same engine.")
   }
 
   if (!is.logical(bootstrap) || length(bootstrap) != 1 || is.na(bootstrap)) {
@@ -161,17 +161,39 @@ maihda_pcv_refit_ml <- function(model) {
   }
   is_reml <- tryCatch(isTRUE(lme4::isREML(model$model)), error = function(e) FALSE)
   if (!is_reml) return(model)
-  # Skip a singular (boundary) fit: its between-stratum variance is ~0 under either
-  # criterion, and re-optimising a boundary fit only adds optimiser instability -- and
-  # would nudge an exact-zero variance off the boundary, masking the zero-variance
-  # guard in calculate_pvc(). The REML-vs-ML discrepancy this corrects only arises for
-  # non-singular fits.
-  singular <- tryCatch(lme4::isSingular(model$model),
-                       error = function(e) isTRUE(model$diagnostics$singular))
-  if (isTRUE(singular)) return(model)
+  # Skip the ML refit only when the STRATUM variance is itself on the boundary
+  # (effectively zero): there its between-stratum variance is ~0 under either
+  # criterion, re-optimising only adds optimiser instability, and the refit would
+  # nudge an exact-zero variance off the boundary, masking the zero-variance guard in
+  # calculate_pvc(). A fit can be globally singular because a NON-stratum random
+  # effect (e.g. an extra grouping factor like (1 | site)) sits on the boundary while
+  # the stratum variance is comfortably nonzero -- testing global isSingular() here
+  # wrongly skipped those, leaving the REML-vs-ML discrepancy this corrects in place.
+  # If refitML() itself fails, the tryCatch below keeps the original (REML) fit.
+  if (maihda_stratum_at_boundary_lme4(model$model)) return(model)
   refit <- tryCatch(lme4::refitML(model$model), error = function(e) NULL)
   if (!is.null(refit)) model$model <- refit
   model
+}
+
+# TRUE when the stratum random-intercept variance sits on the lower boundary
+# (effectively zero). Reproduces lme4::isSingular()'s relative tolerance for the
+# stratum component alone: its scaled SD parameter theta = sd_stratum / sigma_resid
+# is below `tol`, which is exactly how lme4 flags a single intercept term as singular.
+# Used by maihda_pcv_refit_ml() to decide whether an ML refit is worthwhile -- it is
+# not when the stratum is itself at zero, but it IS when only another grouping factor
+# is on the boundary. Returns TRUE (skip the refit) if the stratum variance cannot be
+# read at all; calculate_pvc()'s own zero-variance guard then surfaces the problem.
+maihda_stratum_at_boundary_lme4 <- function(model, tol = 1e-4) {
+  stratum_var <- tryCatch(maihda_stratum_variance_lme4(model),
+                          error = function(e) NA_real_)
+  if (is.na(stratum_var) || stratum_var <= 0) return(TRUE)
+  sigma_resid <- tryCatch(stats::sigma(model), error = function(e) NA_real_)
+  if (is.na(sigma_resid) || sigma_resid <= 0) {
+    # No usable residual scale: fall back to an absolute near-zero test.
+    return(stratum_var <= .Machine$double.eps)
+  }
+  sqrt(stratum_var) / sigma_resid < tol
 }
 
 #' Extract Between-Stratum Variance
@@ -227,7 +249,8 @@ extract_between_variance <- function(model) {
     return(maihda_stratum_variance_brms(fitted_model))
 
   } else {
-    stop("Unsupported engine: ", engine, ". Only 'lme4' and 'brms' are supported.")
+    stop("Unsupported engine: ", engine,
+         ". Supported engines are 'lme4', 'brms', 'wemix', and 'ordinal'.")
   }
 }
 
@@ -396,32 +419,32 @@ bootstrap_pvc <- function(model1, model2, n_boot, conf_level) {
 #' @return No return value, called for side effects.
 #' @export
 print.pvc_result <- function(x, ...) {
-  cat("Proportional Change in Variance (PCV)\n")
+  pal <- maihda_palette()
+  cat(pal$bold("Proportional Change in Variance (PCV)"), "\n", sep = "")
   cat("=====================================\n\n")
 
   if (x$bootstrap) {
     conf_pct <- if (!is.null(x$conf_level)) x$conf_level * 100 else 95
-    cat(sprintf("PCV: %.4f [%.4f, %.4f]\n",
-                x$pvc, x$ci_lower, x$ci_upper))
-    cat(sprintf("(Bootstrap %.0f%% CI)\n", conf_pct))
+    cat(sprintf("PCV: %s [%.4f, %.4f]\n",
+                pal$accent(sprintf("%.4f", x$pvc)), x$ci_lower, x$ci_upper))
+    cat(pal$muted(sprintf("(Bootstrap %.0f%% CI)\n", conf_pct)))
     if (!is.null(x$mc_se) && is.finite(x$mc_se)) {
-      cat(sprintf("(%d successful bootstrap draws; Monte Carlo SE %.4f)\n",
-                  as.integer(x$n_boot_ok), x$mc_se))
+      cat(pal$muted(sprintf("(%d successful bootstrap draws; Monte Carlo SE %.4f)\n",
+                  as.integer(x$n_boot_ok), x$mc_se)))
     }
     cat("\n")
   } else {
-    cat(sprintf("PCV: %.4f\n\n", x$pvc))
+    cat(sprintf("PCV: %s\n\n", pal$accent(sprintf("%.4f", x$pvc))))
   }
 
-  cat("Between-stratum variance:\n")
+  cat(pal$bold("Between-stratum variance:"), "\n", sep = "")
   cat(sprintf("  Model 1: %.6f\n", x$var_model1))
   cat(sprintf("  Model 2: %.6f\n", x$var_model2))
   cat(sprintf("  Change:  %.6f (%.2f%%)\n",
               x$var_model1 - x$var_model2,
               x$pvc * 100))
 
-  cat("\nInterpretation (PCV is the proportional change in between-stratum\n")
-  cat("variance between the models):\n")
+  cat(pal$muted("\nInterpretation (PCV is the proportional change in between-stratum\nvariance between the models):\n"))
   if (x$pvc > 0) {
     cat(sprintf("  Between-stratum variance is %.1f%% lower in Model 2 than in Model 1.\n",
                 x$pvc * 100))
@@ -450,8 +473,9 @@ print.pvc_result <- function(x, ...) {
 #' @param outcome Character string; the dependent variable.
 #' @param vars Character vector; predictors (strata groupings & covariates) to
 #'   add sequentially to the model.
-#' @param engine Modeling engine ("lme4", "brms", or "wemix"). Default is "lme4";
-#'   switches to "wemix" automatically when \code{sampling_weights} is supplied.
+#' @param engine Modeling engine ("lme4", "brms", "wemix", or "ordinal"). Default
+#'   is "lme4"; switches to "wemix" automatically when \code{sampling_weights} is
+#'   supplied, and to "ordinal" for an ordinal family or ordered-factor outcome.
 #' @param family Error distribution and link function. Default is "gaussian".
 #' @param sampling_weights Optional name of a sampling-weight column for
 #'   design-weighted stepwise fits; see \code{\link{fit_maihda}}. The weight
@@ -702,9 +726,10 @@ stepwise_pcv <- function(data, outcome, vars, engine = "lme4", family = "gaussia
 print.maihda_stepwise <- function(x, ...) {
   print(as.data.frame(x), row.names = FALSE, digits = 4)
   if (all(c("AUC", "Step_AUC", "Total_AUC") %in% names(x))) {
-    cat("\nStep_PCV / Total_PCV are proportional changes in between-stratum variance;\n",
+    cat(maihda_palette()$muted(paste0(
+        "\nStep_PCV / Total_PCV are proportional changes in between-stratum variance;\n",
         "Step_AUC / Total_AUC are absolute changes in AUC (delta-AUC). MOR is the\n",
-        "median odds ratio (logit link only).\n", sep = "")
+        "median odds ratio (logit link only).\n")))
   }
   invisible(x)
 }

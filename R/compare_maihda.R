@@ -33,7 +33,12 @@
 #' how the VPC attenuates. If the supplied models differ in any of these,
 #' \code{compare_maihda()} still returns the table but issues a single warning,
 #' because the VPCs are then not directly comparable. The same comparability caveat
-#' applies to the appended information criteria (see \code{\link{maihda_ic}}).
+#' applies to the appended information criteria (see \code{\link{maihda_ic}}). In
+#' addition, when the appended criteria mix scales -- likelihood \code{AIC}/\code{BIC}
+#' (lme4/ordinal) shown alongside Bayesian \code{WAIC}/\code{LOOIC} (brms), which can
+#' happen for a same-family lme4-vs-brms comparison that the family/link check does
+#' not flag -- \code{compare_maihda()} warns, because those criteria are on different
+#' scales and are not comparable to each other.
 #'
 #' @examples
 #' \donttest{
@@ -235,6 +240,21 @@ compare_maihda <- function(..., model_names = NULL, bootstrap = FALSE,
       ic_cols <- ic_cols[, vapply(ic_cols, function(col) !all(is.na(col)),
                                   logical(1)), drop = FALSE]
       if (ncol(ic_cols) > 0) {
+        # The likelihood engines (lme4/ordinal) report AIC/BIC and brms reports
+        # WAIC/LOOIC; when both kinds of column survive (a same-family lme4 vs
+        # brms comparison, which the family/link check above does NOT flag) the
+        # appended columns place criteria from different scales side by side.
+        # AIC/BIC are not comparable to WAIC/LOOIC (see maihda_ic Details), so
+        # warn -- the differences block does not catch this, since the models can
+        # agree on outcome, family, sample and strata.
+        if (maihda_ic_spans_scales(names(ic_cols))) {
+          warning("compare_maihda(): the appended information criteria mix scales ",
+                  "-- likelihood AIC/BIC (lme4/ordinal) and Bayesian WAIC/LOOIC ",
+                  "(brms) are on different scales and are not comparable to each ",
+                  "other. Compare a model to another on the same criterion (AIC with ",
+                  "AIC, WAIC/LOOIC within brms), not across the likelihood/Bayesian ",
+                  "divide.", call. = FALSE)
+        }
         comparison_df <- cbind(comparison_df, ic_cols, stringsAsFactors = FALSE)
       }
     }
@@ -286,7 +306,7 @@ plot.maihda_comparison <- function(x, ...) {
       x = "Model",
       y = "VPC (ICC)"
     ) +
-    theme_minimal() +
+    theme_maihda() +
     theme(
       plot.title = element_text(hjust = 0.5, face = "bold"),
       axis.text.x = element_text(angle = 45, hjust = 1)
@@ -362,9 +382,11 @@ plot_comparison <- function(comparison_df) {
 #' @param group Character string naming the grouping variable in \code{data}
 #'   (e.g. \code{"country"}). A separate model is fitted for each non-missing
 #'   level.
-#' @param engine Modeling engine, "lme4" (default), "brms", or "wemix" (the
+#' @param engine Modeling engine, "lme4" (default), "brms", "wemix" (the
 #'   design-weighted fit; requires \code{sampling_weights} and is selected
-#'   automatically when they are supplied with the default engine).
+#'   automatically when they are supplied with the default engine), or "ordinal"
+#'   (cumulative link mixed model via \code{ordinal::clmm()}; selected
+#'   automatically for an ordinal family or an ordered-factor outcome).
 #' @param family Model family. Default "gaussian". As in \code{\link{fit_maihda}},
 #'   a binary outcome is auto-detected once on the full data and switched to
 #'   "binomial" (with a warning) so every group uses the same family.
@@ -416,11 +438,17 @@ plot_comparison <- function(comparison_df) {
 #'   decomposition: \code{pcv} (proportional change in between-stratum variance when
 #'   the dimensions' additive main effects are added; computed on the
 #'   maximum-likelihood scale -- see \code{\link{calculate_pvc}} -- because REML
-#'   variances are not comparable across the null vs. adjusted fixed effects) and
-#'   \code{var_between_adjusted} (the adjusted model's between-stratum variance,
-#'   reported as \code{var_between * (1 - pcv)} so it shares the scale of the
-#'   REML \code{var_between}/\code{vpc} and the table stays internally coherent);
-#'   both are \code{NA} for a group whose adjusted fit failed, and the columns are
+#'   variances are not comparable across the null vs. adjusted fixed effects),
+#'   \code{var_between_adjusted} (a \emph{derived} coherence quantity, reported as
+#'   \code{var_between * (1 - pcv)} so it shares the scale of the REML
+#'   \code{var_between}/\code{vpc} and the table satisfies
+#'   \code{pcv = (var_between - var_between_adjusted) / var_between} exactly -- it is
+#'   \strong{not} the adjusted fit's own variance), and
+#'   \code{var_between_adjusted_ml} (the adjusted model's \emph{actual}
+#'   between-stratum variance, read straight off the adjusted fit on the same
+#'   maximum-likelihood scale as the PCV; it differs from \code{var_between_adjusted}
+#'   only by the small REML-vs-ML gap in the null variance). All three are
+#'   \code{NA} for a group whose adjusted fit failed, and the columns are
 #'   omitted entirely when the strata have a single dimension. \code{n} is the analytic sample size used by the
 #'   model (after dropping rows with a missing outcome/covariate) for both fitted
 #'   and skipped groups, falling back to the raw row count only when the model
@@ -518,13 +546,50 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     }
   }
 
+  # Evaluate the forwarded engine arguments (e.g. weights=/subset=) once, with the
+  # data mask, as fit_maihda() does. Capturing them as quosures keeps them working
+  # when compare_maihda_groups() is itself called through maihda(). The resulting
+  # full-length values are then SLICED per group before both the min_group_n guard
+  # and the per-group fit, so an external `weights = w` / `subset = keep` vector
+  # (one not stored as a data column) lines up with each group's rows instead of
+  # being passed at full length (which fails with a length mismatch or, for a
+  # subset, silently recycles onto the wrong rows). Resolved here, BEFORE the
+  # engine handshake, so the ordinal pre-check detects the cumulative outcome on
+  # the same analytic sample the per-group family resolution uses.
+  dot_vals <- lapply(rlang::enquos(...), function(q) rlang::eval_tidy(q, data = data))
+  n_full <- nrow(data)
+  # A numeric `subset` (e.g. subset = c(1:10, 31:40)) holds GLOBAL row indices into
+  # `data`, and a recycled logical mask is likewise positional over the full data.
+  # Expand both to a full-length logical mask BEFORE the per-group slicing below;
+  # otherwise the same vector is reinterpreted relative to each subgroup (numeric
+  # index k picks the k-th row of the group, not global row k), silently fitting
+  # the wrong rows. Store the normalized value back into dot_vals so the per-group
+  # fit (slice_dots_for_group) slices it too, not just the row-count guard.
+  subset_value <- maihda_normalize_subset(dot_vals[["subset"]], n_full)
+  dot_vals[["subset"]] <- subset_value
+  weights_value <- dot_vals[["weights"]]
+  # Family detection and the analytic row-count must see the same sample the engine
+  # fits. Sampling weights drop non-finite/<= 0 rows (mapped to NA here so the shared
+  # row mask drops them); precision weights only drop NA. Mirrors fit_maihda().
+  detect_weights <- if (!is.null(sampling_weights)) {
+    maihda_sampling_weight_mask(data[[sampling_weights]])
+  } else {
+    weights_value
+  }
+
   # Ordinal (cumulative) family <-> engine handshake, mirroring fit_maihda():
   # the per-group fits receive 'engine' explicitly, so fit_maihda()'s own
   # missing(engine) auto-switch could never fire through them. An ordered-factor
   # outcome under all-default family/engine likewise selects the ordinal engine
-  # here (the per-group family resolution below then picks up the family).
+  # here (the per-group family resolution below then picks up the family). Detect
+  # on the analytic sample (subset/weights applied), not the raw outcome column,
+  # so the engine choice cannot contradict the analytic family (e.g. an ordered
+  # factor subset to two observed levels resolves binomial, not ordinal, and
+  # would otherwise fail every group with an engine/family contradiction).
   if (missing(family) && missing(engine) && is.null(sampling_weights) &&
-      isTRUE(tryCatch(maihda_response_is_ordinal(formula, data),
+      isTRUE(tryCatch(maihda_response_is_ordinal(formula, data,
+                                                 subset = subset_value,
+                                                 weights = detect_weights),
                       error = function(e) FALSE))) {
     engine <- "ordinal"
     message("compare_maihda_groups(): the outcome is an ordered factor; using ",
@@ -590,26 +655,10 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     conf_level <- bootstrap_args$conf_level
   }
 
-  # Evaluate the forwarded engine arguments (e.g. weights=/subset=) once, with the
-  # data mask, as fit_maihda() does. Capturing them as quosures keeps them working
-  # when compare_maihda_groups() is itself called through maihda(). The resulting
-  # full-length values are then SLICED per group before both the min_group_n guard
-  # and the per-group fit, so an external `weights = w` / `subset = keep` vector
-  # (one not stored as a data column) lines up with each group's rows instead of
-  # being passed at full length (which fails with a length mismatch or, for a
-  # subset, silently recycles onto the wrong rows).
-  dot_vals <- lapply(rlang::enquos(...), function(q) rlang::eval_tidy(q, data = data))
-  n_full <- nrow(data)
-  # A numeric `subset` (e.g. subset = c(1:10, 31:40)) holds GLOBAL row indices into
-  # `data`, and a recycled logical mask is likewise positional over the full data.
-  # Expand both to a full-length logical mask BEFORE the per-group slicing below;
-  # otherwise the same vector is reinterpreted relative to each subgroup (numeric
-  # index k picks the k-th row of the group, not global row k), silently fitting
-  # the wrong rows. Store the normalized value back into dot_vals so the per-group
-  # fit (slice_dots_for_group) slices it too, not just the row-count guard.
-  subset_value <- maihda_normalize_subset(dot_vals[["subset"]], n_full)
-  dot_vals[["subset"]] <- subset_value
-  weights_value <- dot_vals[["weights"]]
+  # `dot_vals`, `n_full`, `subset_value`, `weights_value` and `detect_weights`
+  # were resolved above (before the engine handshake) so the ordinal pre-check and
+  # the family resolution below both see the same analytic sample. Define the
+  # per-group slicers that consume them.
   # Per-group slice of a single full-length value (used for the row-count guard).
   slice_full <- function(val, idx) {
     if (is.null(val) || length(val) != n_full) return(NULL)
@@ -630,7 +679,7 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
   if (missing(family)) {
     is_binary <- tryCatch(
       maihda_response_is_binary(formula, data, subset = subset_value,
-                                weights = weights_value),
+                                weights = detect_weights),
       error = function(e) FALSE)
     if (isTRUE(is_binary)) {
       warning("The outcome variable appears to be binary. Using family = 'binomial' ",
@@ -639,7 +688,7 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
       family <- "binomial"
     } else if (isTRUE(tryCatch(
       maihda_response_is_ordinal(formula, data, subset = subset_value,
-                                 weights = weights_value),
+                                 weights = detect_weights),
       error = function(e) FALSE))) {
       warning("The outcome variable is an ordered factor. Using the cumulative ",
               "(ordinal) model, family = 'ordinal', for every group. Specify a ",
@@ -682,6 +731,44 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     strata_attr_names
   )
 
+  # When a per-group decomposition will run, the BASE model fitted below must be the
+  # NULL (covariates only): the two-model PCV compares it against an adjusted model
+  # that ADDS the dimensions' additive main effects, and the crossed-dimensions form
+  # enters those dimensions as random effects. If the supplied formula already lists
+  # the dimension main effects (e.g. math ~ gender + ses + (1 | gender:ses)), strip
+  # them here -- exactly as maihda() does before it delegates -- so the adjusted model
+  # does not re-add the same terms (collapsing PCV to 0/NA and pinning the stratum
+  # variance to a singular boundary) and the crossed-dimensions model does not enter a
+  # dimension as both a fixed and a random effect. Idempotent when maihda() already
+  # stripped them, and a no-op for the bare shorthand (1 | a:b) that carries no main
+  # effects. An auto-binned numeric dimension is reconstructed as its tertile factor
+  # (.maihda_dim_*) for the comparison, which a user formula never names, so it is
+  # left in place -- matching maihda()'s quoted-term presence test.
+  if (do_decomp || do_cc) {
+    dim_terms <- maihda_adjusted_terms(decomp_vars,
+                                       carried_attrs[["strata_autobin_info"]],
+                                       data)$terms
+    # Reject a fixed interaction among the stratum dimensions (e.g. `gender * ses`).
+    # Stripping only the main effects below would leave the fixed gender:ses term in
+    # place, duplicating the (1 | stratum) random intercept and driving every group's
+    # PCV to NA. (maihda() catches this earlier; this guards a direct call.)
+    maihda_check_no_dimension_interaction(fit_formula, decomp_vars, dim_terms,
+                                          fn = "compare_maihda_groups")
+    supplied_fixed <- attr(stats::terms(reformulas::nobars(fit_formula)),
+                           "term.labels")
+    present_terms <- dim_terms[
+      vapply(dim_terms, maihda_quote_name, character(1)) %in% supplied_fixed]
+    if (length(present_terms) > 0) {
+      # Quote through maihda_quote_name() (the same path used to DETECT the terms
+      # against supplied_fixed) rather than a manual sprintf("`%s`", .): a bare
+      # backtick wrap mis-parses a name that itself contains a backtick, so the two
+      # paths would disagree for that rare-but-legal case.
+      quoted_terms <- vapply(present_terms, maihda_quote_name, character(1))
+      fit_formula <- stats::update(fit_formula, stats::as.formula(
+        paste(". ~ . -", paste(quoted_terms, collapse = " - "))))
+    }
+  }
+
   group_values <- as.character(data[[group]])
   group_levels <- sort(unique(group_values[!is.na(group_values)]))
   if (length(group_levels) == 0) {
@@ -716,11 +803,11 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     analytic_fr <- maihda_analytic_model_frame(
       fit_formula, sub,
       subset = slice_full(subset_value, idx),
-      # Rows with a missing sampling weight are dropped by the weighted engines,
-      # so count the analytic sample the same way (the weight column is part of
-      # `sub`, already sliced to this group's rows).
+      # Rows with a non-finite or <= 0 sampling weight are dropped by the weighted
+      # engines, so count the analytic sample the same way: mask those weights to NA
+      # (the weight column is part of `sub`, already sliced to this group's rows).
       weights = if (!is.null(sampling_weights)) {
-        sub[[sampling_weights]]
+        maihda_sampling_weight_mask(sub[[sampling_weights]])
       } else {
         slice_full(weights_value, idx)
       }
@@ -731,6 +818,7 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
       vpc = NA_real_, var_between = NA_real_, var_other = NA_real_,
       var_residual = NA_real_,
       pcv = NA_real_, var_between_adjusted = NA_real_,
+      var_between_adjusted_ml = NA_real_,
       var_additive = NA_real_, var_interaction = NA_real_,
       additive_share = NA_real_, interaction_share = NA_real_,
       ci_lower = NA_real_, ci_upper = NA_real_,
@@ -867,8 +955,15 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
             # var_between. The PCV itself is calculate_pvc()'s ML-refit value, since REML
             # variances are not comparable across the null vs. adjusted fixed effects;
             # the small REML-vs-ML gap in the null variance is absorbed here rather than
-            # left as an apparent inconsistency between the columns.
+            # left as an apparent inconsistency between the columns. NOTE: this is a
+            # derived bookkeeping value, NOT the adjusted fit's own variance.
             row$var_between_adjusted <- row$var_between * (1 - pcv_obj$pvc)
+            # The adjusted MODEL's actual between-stratum variance, on the ML scale the
+            # PCV is computed on (var_model2 from calculate_pvc()). Unlike
+            # var_between_adjusted above, this is read straight off the adjusted fit, so
+            # it is the literal "adjusted between-stratum variance" -- it differs from
+            # var_between_adjusted only by the REML-vs-ML gap in the null variance.
+            row$var_between_adjusted_ml <- pcv_obj$var_model2
           }
         }
       }
@@ -937,12 +1032,14 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     out$ci_upper <- NULL
   }
   # Keep only the decomposition columns for the mode that ran: the two-model PCV
-  # columns (pcv, var_between_adjusted) in "two-model" mode, the crossed-dimensions
-  # columns (var_additive, var_interaction, additive_share, interaction_share) in
-  # "crossed-dimensions" mode; drop both when no decomposition ran (single dimension).
+  # columns (pcv, var_between_adjusted, var_between_adjusted_ml) in "two-model" mode,
+  # the crossed-dimensions columns (var_additive, var_interaction, additive_share,
+  # interaction_share) in "crossed-dimensions" mode; drop both when no decomposition
+  # ran (single dimension).
   if (!do_decomp) {
     out$pcv <- NULL
     out$var_between_adjusted <- NULL
+    out$var_between_adjusted_ml <- NULL
   }
   if (!do_cc) {
     out$var_additive <- NULL
@@ -1050,15 +1147,49 @@ maihda_prepare_group_strata <- function(formula, data, shared_strata, autobin = 
 #' @return No return value, called for side effects.
 #' @export
 print.maihda_group_comparison <- function(x, ...) {
-  cat("MAIHDA Group Comparison\n")
+  cat(maihda_palette()$bold("MAIHDA Group Comparison"), "\n", sep = "")
   cat("=======================\n\n")
-  cat("Group variable:", attr(x, "group_var"), "\n")
-  cat("Engine:", attr(x, "engine"),
-      " | Family:", attr(x, "family"),
-      " | Strata:", if (isTRUE(attr(x, "shared_strata"))) "shared/global" else "per-group",
-      "\n\n")
+  # `[.maihda_group_comparison` re-attaches the metadata attributes after a row/column
+  # subset, but degrade gracefully if they are missing anyway (e.g. an object built by
+  # some other path): print the bare data frame rather than blank header fields.
+  group_var <- attr(x, "group_var")
+  if (!is.null(group_var)) {
+    cat("Group variable:", group_var, "\n")
+    cat("Engine:", attr(x, "engine"),
+        " | Family:", attr(x, "family"),
+        " | Strata:", if (isTRUE(attr(x, "shared_strata"))) "shared/global" else "per-group",
+        "\n\n")
+  }
   print(as.data.frame(x), row.names = FALSE, digits = 4)
   invisible(x)
+}
+
+#' Subset a MAIHDA group comparison
+#'
+#' Indexing method for \code{\link{compare_maihda_groups}} results that preserves the
+#' comparison's metadata attributes (group variable, engine, family, ...) so the
+#' \code{print()} header stays populated after a row/column subset. Plain
+#' \code{[.data.frame} keeps the S3 class but drops those attributes, which would
+#' otherwise blank the printed header.
+#'
+#' @param x A \code{maihda_group_comparison} object.
+#' @param ... Row/column indices forwarded to \code{[.data.frame}.
+#' @return A \code{maihda_group_comparison} with the metadata attributes carried over,
+#'   or a bare vector when the selection drops to a single column.
+#' @keywords internal
+#' @export
+`[.maihda_group_comparison` <- function(x, ...) {
+  out <- NextMethod()
+  # A single-column selection with drop = TRUE returns a bare vector; leave it
+  # unclassed. Otherwise restore the class and the metadata attributes the print
+  # method relies on.
+  if (is.data.frame(out)) {
+    for (a in c("group_var", "engine", "family", "shared_strata", "decomposition")) {
+      attr(out, a) <- attr(x, a)
+    }
+    class(out) <- class(x)
+  }
+  out
 }
 
 #' Join non-empty caption lines for a plot
@@ -1152,13 +1283,7 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
     has_ci <- all(c("ci_lower", "ci_upper") %in% names(df)) &&
       any(is.finite(df$ci_lower) & is.finite(df$ci_upper))
 
-    vpc_caption <- maihda_compose_caption(
-      paste("Descriptive comparison: each interval reflects one group's own",
-            "uncertainty; overlap is not a test of whether VPCs differ. The VPC is",
-            "the share of unexplained variance that lies between strata, not the",
-            "magnitude of inequality -- see type = \"between_variance\"."),
-      omit_note
-    )
+    vpc_caption <- maihda_compose_caption(omit_note)
 
     p <- ggplot(df, aes(x = .data$group, y = .data$vpc)) +
       geom_point(size = 4, color = "#0072B2") +
@@ -1168,7 +1293,7 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
         y = "VPC (ICC)",
         caption = vpc_caption
       ) +
-      theme_minimal() +
+      theme_maihda() +
       theme(
         plot.title = element_text(hjust = 0.5, face = "bold"),
         plot.caption = element_text(hjust = 0.5, face = "italic", size = 9),
@@ -1191,12 +1316,7 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
     df <- df[order(df$var_between), , drop = FALSE]
     df$group <- factor(df$group, levels = df$group)
 
-    bv_caption <- maihda_compose_caption(
-      paste("Absolute between-stratum (intersectional) variance -- the magnitude the",
-            "VPC share cannot convey. On the model (link) scale for non-Gaussian",
-            "families; unlike the VPC it is not normalised by the residual variance."),
-      omit_note
-    )
+    bv_caption <- maihda_compose_caption(omit_note)
 
     return(
       ggplot(df, aes(x = .data$group, y = .data$var_between)) +
@@ -1207,7 +1327,7 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
           y = "Between-stratum variance",
           caption = bv_caption
         ) +
-        theme_minimal() +
+        theme_maihda() +
         theme(
           plot.title = element_text(hjust = 0.5, face = "bold"),
           plot.caption = element_text(hjust = 0.5, face = "italic", size = 9),
@@ -1231,13 +1351,7 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
     df_pcv <- df_pcv[order(df_pcv$pcv), , drop = FALSE]
     df_pcv$group <- factor(df_pcv$group, levels = df_pcv$group)
 
-    pcv_caption <- maihda_compose_caption(
-      paste("PCV = proportional change in between-stratum variance from the null to the",
-            "adjusted (dimension main effects) model -- the additive share of the",
-            "intersectional inequality. A negative PCV means the additive main effects",
-            "do not reduce the between-stratum variance (suppression/rescaling)."),
-      omit_note
-    )
+    pcv_caption <- maihda_compose_caption(omit_note)
 
     return(
       ggplot(df_pcv, aes(x = .data$group, y = .data$pcv)) +
@@ -1249,7 +1363,7 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
           y = "PCV (null -> adjusted)",
           caption = pcv_caption
         ) +
-        theme_minimal() +
+        theme_maihda() +
         theme(
           plot.title = element_text(hjust = 0.5, face = "bold"),
           plot.caption = element_text(hjust = 0.5, face = "italic", size = 9),
@@ -1271,13 +1385,7 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
     df_as <- df_as[order(df_as$additive_share), , drop = FALSE]
     df_as$group <- factor(df_as$group, levels = df_as$group)
 
-    as_caption <- maihda_compose_caption(
-      paste("Additive share = additive (dimension main-effect) variance as a fraction of",
-            "the total between-strata variance, from the single crossed-dimensions model.",
-            "The complement is the intersectional interaction share. A partial-pooling",
-            "estimate -- dimensions with few levels are poorly identified."),
-      omit_note
-    )
+    as_caption <- maihda_compose_caption(omit_note)
 
     return(
       ggplot(df_as, aes(x = .data$group, y = .data$additive_share)) +
@@ -1288,7 +1396,7 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
           y = "Additive share of between-strata variance",
           caption = as_caption
         ) +
-        theme_minimal() +
+        theme_maihda() +
         theme(
           plot.title = element_text(hjust = 0.5, face = "bold"),
           plot.caption = element_text(hjust = 0.5, face = "italic", size = 9),
@@ -1339,7 +1447,7 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
           fill = "Component",
           caption = maihda_compose_caption(omit_note)
         ) +
-        theme_minimal() +
+        theme_maihda() +
         theme(
           plot.title = element_text(hjust = 0.5, face = "bold"),
           plot.caption = element_text(hjust = 0.5, face = "italic", size = 9),
@@ -1392,7 +1500,7 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
       fill = "Component",
       caption = maihda_compose_caption(omit_note)
     ) +
-    theme_minimal() +
+    theme_maihda() +
     theme(
       plot.title = element_text(hjust = 0.5, face = "bold"),
       plot.caption = element_text(hjust = 0.5, face = "italic", size = 9),
@@ -1406,7 +1514,8 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
 #' result instead, e.g. \code{plot(cmp, type = "vpc")}.
 #'
 #' @param x A \code{maihda_group_comparison} object.
-#' @param type One of "vpc" (default), "components", "between_variance", or "pcv".
+#' @param type One of "vpc" (default), "components", "between_variance", "pcv", or
+#'   "additive_share".
 #' @return A ggplot2 object.
 #' @keywords internal
 #' @export
