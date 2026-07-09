@@ -81,6 +81,39 @@ test_that("make_strata preserves original numeric grouping variables", {
   expect_true(any(grepl("age_", strata$strata_info$label)))
 })
 
+test_that("numeric coded stratum dimensions warn instead of silently entering linearly (#56)", {
+  set.seed(1004)
+  n <- 300
+  d <- data.frame(
+    gender = sample(c("F", "M"), n, replace = TRUE),
+    education = sample(1:3, n, replace = TRUE)   # numeric category code, few unique values
+  )
+  sk <- interaction(d$gender, d$education, drop = TRUE)
+  d$y <- 1 + rnorm(nlevels(sk), sd = 0.6)[sk] + rnorm(n, sd = 0.4)
+
+  # A numeric coded strata dimension warns rather than silently entering as a linear term.
+  w <- capture_warnings(
+    a <- suppressMessages(maihda(y ~ 1 + (1 | gender:education), data = d))
+  )
+  expect_match(w, "linear fixed effect", all = FALSE)
+
+  # Warn-only: the term is still the raw numeric column (behaviour, and therefore the
+  # PCV, unchanged from prior versions), NOT a reconstructed factor.
+  adj_terms <- attr(stats::terms(reformulas::nobars(a$adjusted_formula)), "term.labels")
+  expect_true("education" %in% adj_terms)
+  expect_false(".maihda_dim_education" %in% adj_terms)
+  expect_true(is.numeric(a$model_adjusted$original_data$education))
+
+  # Wrapping the code in factor() beforehand silences the warning and enters it as a
+  # categorical main effect.
+  d$education <- factor(d$education)
+  w2 <- capture_warnings(
+    a2 <- suppressMessages(maihda(y ~ 1 + (1 | gender:education), data = d))
+  )
+  expect_false(any(grepl("linear fixed effect", w2)))
+  expect_true(is.factor(a2$model_adjusted$original_data$education))
+})
+
 test_that("make_strata does not collapse values that contain the display separator", {
   d <- data.frame(
     a = rep(c("A \u00d7 B", "A"), each = 20),
@@ -116,7 +149,7 @@ test_that("maihda_match_strata_rows is collision-safe and keeps row-by-row seman
   )
 })
 
-test_that("calculate_pvc errors for different analytic samples", {
+test_that("calculate_pcv errors for different analytic samples", {
   set.seed(1004)
   d <- data.frame(
     stratum = factor(rep(seq_len(10), each = 10)),
@@ -129,10 +162,10 @@ test_that("calculate_pvc errors for different analytic samples", {
   model1 <- fit_maihda(y ~ x + (1 | stratum), data = d)
   model2 <- fit_maihda(y ~ x + z + (1 | stratum), data = d)
 
-  expect_error(calculate_pvc(model1, model2), "same analytic sample")
+  expect_error(calculate_pcv(model1, model2), "same analytic sample")
 })
 
-test_that("calculate_pvc rejects different outcomes and families", {
+test_that("calculate_pcv rejects different outcomes and families", {
   set.seed(1018)
   d <- data.frame(
     stratum = factor(rep(seq_len(8), each = 25)),
@@ -147,18 +180,18 @@ test_that("calculate_pvc rejects different outcomes and families", {
   count_gaussian_model <- fit_maihda(y_count ~ x + (1 | stratum), data = d)
 
   expect_error(
-    calculate_pvc(gaussian_model, poisson_model),
+    calculate_pcv(gaussian_model, poisson_model),
     "same outcome",
     fixed = TRUE
   )
   expect_error(
-    calculate_pvc(count_gaussian_model, poisson_model),
+    calculate_pcv(count_gaussian_model, poisson_model),
     "same model family and link",
     fixed = TRUE
   )
 })
 
-test_that("poisson summaries use fitted mean based residual variance", {
+test_that("poisson summaries evaluate the level-1 variance at the marginal mean", {
   set.seed(1005)
   d <- data.frame(
     stratum = factor(rep(seq_len(12), each = 25)),
@@ -173,9 +206,30 @@ test_that("poisson summaries use fitted mean based residual variance", {
   observed <- summ$variance_components$variance[
     summ$variance_components$component == "Within-stratum (residual)"
   ]
-  expected <- mean(log1p(1 / pmax(stats::fitted(model$model), .Machine$double.eps)))
+  # Stryhn/Nakagawa level-1 variance at the MARGINAL expected count
+  # lambda_i = exp(x_i'beta + v/2), with v the (constant, intercept-only)
+  # between-stratum variance -- the lognormal mean correction -- averaged over
+  # the sample. NOT the conditional fitted mean exp(x'beta + u_hat).
+  eta <- as.numeric(stats::predict(model$model, re.form = NA, type = "link"))
+  v <- as.numeric(lme4::VarCorr(model$model)$stratum[1, 1])
+  lambda <- pmax(exp(eta + v / 2), .Machine$double.eps)
+  expected <- mean(log1p(1 / lambda))
   expect_equal(observed, expected, tolerance = 1e-8)
   expect_false(isTRUE(all.equal(observed, 1)))
+
+  # ... and it genuinely differs from the conditional-fitted version it replaces.
+  cond <- mean(log1p(1 / pmax(stats::fitted(model$model), .Machine$double.eps)))
+  expect_false(isTRUE(all.equal(observed, cond, tolerance = 1e-6)))
+
+  # In the null model every row's lambda is exactly Nakagawa et al.'s single
+  # plug-in exp(beta0 + sigma^2/2) -- the marginal mean of the outcome.
+  m0 <- fit_maihda(y ~ (1 | stratum), data = d, family = "poisson")
+  b0 <- unname(lme4::fixef(m0$model)[1])
+  s2 <- as.numeric(lme4::VarCorr(m0$model)$stratum[1, 1])
+  expect_equal(MAIHDA:::maihda_residual_variance_lme4(m0$model),
+               log1p(1 / exp(b0 + s2 / 2)), tolerance = 1e-10)
+  expect_equal(unique(MAIHDA:::maihda_count_marginal_mu_lme4(m0$model)),
+               exp(b0 + s2 / 2), tolerance = 1e-10)
 })
 
 test_that("binomial predict_maihda defaults to response scale and supports link scale", {
@@ -273,7 +327,7 @@ test_that("stepwise_pcv uses one complete analytic sample across steps", {
   out <- stepwise_pcv(d, "y", c("x", "z"))
   complete_d <- d[stats::complete.cases(d[, c("y", "stratum", "x", "z")]), ]
   # stepwise_pcv refits REML lmer fits with ML before the cross-step variance
-  # comparison (see calculate_pvc()), so the reference models must be refit likewise.
+  # comparison (see calculate_pcv()), so the reference models must be refit likewise.
   ml <- function(m) MAIHDA:::extract_between_variance(MAIHDA:::maihda_pcv_refit_ml(m))
   null_model <- fit_maihda(y ~ 1 + (1 | stratum), complete_d)
   x_model <- fit_maihda(y ~ x + (1 | stratum), complete_d)
@@ -472,7 +526,7 @@ test_that("summary rejects random-slope models for VPC accounting", {
   )
 })
 
-test_that("calculate_pvc rejects random-slope models for PVC accounting", {
+test_that("calculate_pcv rejects random-slope models for PCV accounting", {
   set.seed(1017)
   d <- data.frame(
     stratum = factor(rep(seq_len(8), each = 25)),
@@ -488,13 +542,13 @@ test_that("calculate_pvc rejects random-slope models for PVC accounting", {
   model2 <- fit_maihda(y ~ age + poverty + (age | stratum), data = d)
 
   expect_error(
-    calculate_pvc(model1, model2),
+    calculate_pcv(model1, model2),
     "intercept-only random effects",
     fixed = TRUE
   )
 })
 
-test_that("calculate_pvc refits with ML when a non-stratum RE is on the boundary", {
+test_that("calculate_pcv refits with ML when a non-stratum RE is on the boundary", {
   # A fit can be globally singular because an EXTRA grouping factor ((1 | site))
   # sits on the boundary while the stratum variance is comfortably nonzero. The ML
   # refit must still run there -- testing global isSingular() wrongly skipped it and
@@ -528,7 +582,7 @@ test_that("calculate_pvc refits with ML when a non-stratum RE is on the boundary
   # The two genuinely differ here, so the comparison below is meaningful.
   expect_false(isTRUE(all.equal(reml_pcv, ml_pcv)))
 
-  pcv <- calculate_pvc(m1, m2)$pvc
+  pcv <- calculate_pcv(m1, m2)$pcv
   expect_equal(pcv, ml_pcv, tolerance = 1e-8)               # uses the ML refit
   expect_false(isTRUE(all.equal(pcv, reml_pcv)))            # not the REML estimate
 })
@@ -536,7 +590,7 @@ test_that("calculate_pvc refits with ML when a non-stratum RE is on the boundary
 test_that("maihda_pcv_refit_ml skips the refit when the stratum is at the boundary", {
   # When the STRATUM itself is on the boundary, the refit is skipped: its variance is
   # ~0 under either criterion, and re-optimising would nudge an exact zero off the
-  # boundary, masking the zero-variance guard in calculate_pvc().
+  # boundary, masking the zero-variance guard in calculate_pcv().
   set.seed(2)
   d <- data.frame(stratum = factor(rep(seq_len(12), each = 8)))
   d$x <- rnorm(nrow(d))
@@ -718,7 +772,7 @@ test_that("weighted Gaussian VPC uses the mean conditional residual variance", {
                                 var_between / (var_between + sigma2))))
 })
 
-test_that("PVC/comparison flag models that differ only in prior weights", {
+test_that("PCV/comparison flag models that differ only in prior weights", {
   set.seed(2401)
   d <- make_strata(maihda_sim_data, vars = c("gender", "race"))$data
   n <- nrow(d)
@@ -728,16 +782,16 @@ test_that("PVC/comparison flag models that differ only in prior weights", {
   m_w    <- fit_maihda(health_outcome ~ age + (1 | stratum), data = d, weights = w)
   m_unit <- fit_maihda(health_outcome ~ age + (1 | stratum), data = d, weights = rep(1, n))
 
-  # Different weights, same rows/outcome/strata: hard error in PVC, warning in compare.
-  expect_error(calculate_pvc(m_unw, m_w), "same prior weights", fixed = TRUE)
+  # Different weights, same rows/outcome/strata: hard error in PCV, warning in compare.
+  expect_error(calculate_pcv(m_unw, m_w), "same prior weights", fixed = TRUE)
   expect_true(any(grepl("prior weights",
                         testthat::capture_warnings(compare_maihda(m_unw, m_w)))))
 
   # Unweighted and explicit unit weights are equivalent (no weight complaint).
-  expect_s3_class(calculate_pvc(m_unw, m_unit), "pvc_result")
+  expect_s3_class(calculate_pcv(m_unw, m_unit), "pcv_result")
   expect_false(any(grepl("prior weights",
                          testthat::capture_warnings(compare_maihda(m_unw, m_unit)))))
-  expect_s3_class(calculate_pvc(m_unw, m_unw2), "pvc_result")
+  expect_s3_class(calculate_pcv(m_unw, m_unw2), "pcv_result")
 })
 
 test_that("binary recoding records and reports the level -> 0/1 mapping", {
@@ -1111,3 +1165,136 @@ test_that("bootstrap n_boot must clear the 10-refit minimum up front", {
   )
 })
 
+
+test_that("maihda_brms_linpred_mean collapses the posterior_linpred draws matrix (Stan-free)", {
+  # Regression for the audit finding: brms's posterior_linpred() returns the
+  # ndraws x nobs DRAWS matrix and silently IGNORES a summary = TRUE argument
+  # (it is swallowed by prepare_predictions(); summary = FALSE is hard-coded in
+  # the internal posterior_epred() call). Every
+  # posterior_linpred(..., summary = TRUE)[, "Estimate"] site therefore failed
+  # with "no 'dimnames' attribute" on real brms >= ~2.16: summary() of a brms
+  # Poisson/negbin fit, predict_maihda(scale = "link"), the stratum-prediction
+  # plots/tables, and (silently, via tryCatch) the brms effect-decomposition
+  # panel. All sites now collapse the draws through this shared helper.
+  skip_if_not_installed("brms")
+
+  eta <- c(-0.4, 0.2, 1.1)
+  captured <- NULL
+  local_mocked_bindings(
+    posterior_linpred = function(object, ...) {
+      captured <<- list(...)
+      # Real-brms shape: draws matrix, no dimnames. +/- 0.3 symmetric jitter
+      # keeps colMeans exactly eta while failing a first-row (non-averaging)
+      # or an [, "Estimate"]-style read.
+      rbind(
+        matrix(rep(eta + 0.3, each = 10), nrow = 10),
+        matrix(rep(eta - 0.3, each = 10), nrow = 10)
+      )
+    },
+    .package = "brms"
+  )
+
+  fit <- structure(list(), class = "brmsfit")
+  got <- MAIHDA:::maihda_brms_linpred_mean(fit, re_formula = NA)
+  expect_equal(got, eta, tolerance = 1e-12)
+  # Arguments are forwarded to posterior_linpred verbatim.
+  expect_true("re_formula" %in% names(captured))
+
+  # Forward/backward compatibility: a summary-shaped return (an "Estimate"
+  # column, the pre-draws brms contract the old idiom assumed) is still read
+  # correctly rather than column-averaged.
+  local_mocked_bindings(
+    posterior_linpred = function(object, ...) {
+      matrix(eta, ncol = 1, dimnames = list(NULL, "Estimate"))
+    },
+    .package = "brms"
+  )
+  expect_equal(MAIHDA:::maihda_brms_linpred_mean(fit), eta, tolerance = 1e-12)
+})
+
+test_that("maihda_brms_linpred_mean rejects a 3-D per-category draws array (Stan-free)", {
+  # Hardening: a categorical() likelihood (not a supported MAIHDA family, but
+  # fittable through fit_maihda(engine = "brms")) makes posterior_linpred()
+  # return a 3-D ndraws x nobs x ncat array -- one linear predictor per response
+  # category. colMeans() would silently flatten that to a wrong-length
+  # nobs * ncat vector; the pre-helper code errored loudly there, so the shared
+  # helper must reject it rather than return garbage.
+  skip_if_not_installed("brms")
+
+  local_mocked_bindings(
+    posterior_linpred = function(object, ...) {
+      array(seq_len(10 * 3 * 4) / 10, dim = c(10, 3, 4))
+    },
+    .package = "brms"
+  )
+
+  fit <- structure(list(), class = "brmsfit")
+  expect_error(
+    MAIHDA:::maihda_brms_linpred_mean(fit),
+    "one linear predictor per response category"
+  )
+})
+
+test_that("brms count marginal means survive the draws-only posterior_linpred (Stan-free)", {
+  # The count-family VPC reads its marginal expected counts through
+  # maihda_count_marginal_mu_brms(); with the old summary = TRUE idiom this was
+  # the line that made summary() ERROR on every real brms Poisson/negbin fit.
+  skip_if_not_installed("brms")
+
+  eta <- c(0.2, 0.2, 0.9, 0.9)
+  local_mocked_bindings(
+    posterior_linpred = function(object, ...) {
+      rbind(
+        matrix(rep(eta + 0.1, each = 8), nrow = 8),
+        matrix(rep(eta - 0.1, each = 8), nrow = 8)
+      )
+    },
+    .package = "brms"
+  )
+
+  d <- data.frame(y = c(1, 2, 3, 4),
+                  stratum = c("s1", "s1", "s2", "s2"),
+                  stringsAsFactors = FALSE)
+  fit <- structure(list(formula = y ~ (1 | stratum), data = d),
+                   class = "brmsfit")
+  # Hand-built posterior draws: intercept-only stratum RE with sd draws whose
+  # mean square is 0.25, so v_i = 0.25 for every row.
+  draws <- data.frame(sd_stratum__Intercept = c(0.3, 0.7))
+  v <- mean(c(0.3, 0.7)^2)
+
+  mu <- MAIHDA:::maihda_count_marginal_mu_brms(fit, draws)
+  expect_equal(mu, exp(eta + v / 2), tolerance = 1e-12)
+})
+
+test_that("brms fitted() category arrays collapse to scores for a single row (Stan-free)", {
+  # Regression for the audit finding: for a cumulative/categorical brms fit,
+  # fitted(summary = TRUE) returns an nobs x summary x category array, and the
+  # response-scale collapse did f[, "Estimate", ], which for ONE prediction row
+  # drops both unit margins to a bare category vector -- ncol() is then NULL and
+  # seq_len(NULL) errors. So predict_maihda(<brms cumulative>, newdata = <one
+  # row>, scale = "response") failed. The Estimate slice is now rebuilt as an
+  # explicit nobs x ncat matrix.
+  stat_names <- c("Estimate", "Est.Error", "Q2.5", "Q97.5")
+  probs <- rbind(c(0.2, 0.5, 0.3),
+                 c(0.6, 0.3, 0.1))
+  want <- drop(probs %*% 1:3)
+
+  make_f <- function(p) {
+    k <- ncol(p)
+    f <- array(NA_real_, dim = c(nrow(p), 4, k),
+               dimnames = list(NULL, stat_names, NULL))
+    f[, "Estimate", ] <- p
+    f[, "Est.Error", ] <- 0.01
+    f[, "Q2.5", ] <- p - 0.02
+    f[, "Q97.5", ] <- p + 0.02
+    f
+  }
+
+  # Multi-row arrays keep working...
+  expect_equal(MAIHDA:::maihda_brms_fitted_array_scores(make_f(probs)), want,
+               tolerance = 1e-12)
+  # ...and a single-row array no longer errors and gives that row's score.
+  f1 <- make_f(probs[1, , drop = FALSE])
+  expect_equal(MAIHDA:::maihda_brms_fitted_array_scores(f1), want[1],
+               tolerance = 1e-12)
+})

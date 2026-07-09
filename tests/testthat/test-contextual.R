@@ -261,6 +261,26 @@ test_that("maihda(context = ) carries the context through null and adjusted", {
   expect_output(print(a), "Context share \\(null\\)")
 })
 
+test_that("plot(type = 'vpc', model = ) works for a contextual analysis", {
+  d <- make_context_data()
+  a <- suppressMessages(maihda(y ~ x + (1 | g1:g2), data = d, context = "site"))
+
+  # model = "both" -> one change plot carrying BOTH models, the broken-out context
+  # slice, and the PCV in the subtitle.
+  p_both <- plot(a, type = "vpc", model = "both")
+  expect_s3_class(p_both, "ggplot")
+  expect_false(inherits(p_both, "patchwork"))
+  expect_true("Context: site" %in% as.character(p_both$data$component))
+  expect_setequal(as.character(unique(p_both$data$model)),
+                  c("Null model", "Adjusted model"))
+  expect_match(p_both$labels$subtitle, "PCV")
+
+  # The null and adjusted single views keep the contextual bar and their labels.
+  expect_identical(plot(a, type = "vpc")$labels$subtitle, "Null model")
+  expect_identical(plot(a, type = "vpc", model = "adjusted")$labels$subtitle,
+                   "Adjusted model")
+})
+
 test_that("the PCV is essentially unchanged by adding an orthogonal context", {
   # The context RE sits in both the null and adjusted models, and site membership
   # is independent of the strata by construction, so the PCV (a ratio of
@@ -268,14 +288,126 @@ test_that("the PCV is essentially unchanged by adding an orthogonal context", {
   d <- make_context_data()
   a0 <- suppressMessages(maihda(y ~ x + (1 | g1:g2), data = d))
   a1 <- suppressMessages(maihda(y ~ x + (1 | g1:g2), data = d, context = "site"))
-  expect_equal(a1$pcv$pvc, a0$pcv$pvc, tolerance = 0.05)
+  expect_equal(a1$pcv$pcv, a0$pcv$pcv, tolerance = 0.05)
 })
 
-test_that("maihda(group, context) errors: they are different designs", {
+# ---- group + context compose (stratified x contextual) -----------------------
+
+test_that("maihda(group, context) composes: per-group contextual fits", {
+  d <- make_context_data()
+  a <- suppressWarnings(suppressMessages(
+    maihda(y ~ x + (1 | g1:g2), data = d, group = "region", context = "site")))
+  expect_s3_class(a, "maihda_analysis")
+  expect_false(is.null(a$groups))
+  # The per-group table carries the contextual partition columns and attribute.
+  expect_true(all(c("var_context", "vpc_context") %in% names(a$groups)))
+  expect_identical(attr(a$groups, "context_var"), "site")
+  expect_false(is.null(attr(a$groups, "context_per")))
+  # Net-of-context share is a valid proportion for every fitted group.
+  ok <- a$groups[a$groups$status == "ok", , drop = FALSE]
+  expect_gt(nrow(ok), 0)
+  expect_true(all(is.finite(ok$vpc_context)))
+  expect_true(all(ok$vpc_context >= 0 & ok$vpc_context <= 1))
+  # The headline analysis still prints and reports the group comparison.
+  expect_output(print(a), "Group comparison")
+})
+
+test_that("compare_maihda_groups(context =) reports the per-group context partition", {
+  d <- make_context_data()
+  cmp <- suppressWarnings(compare_maihda_groups(
+    y ~ x + (1 | g1:g2), data = d, group = "region", context = "site"))
+  expect_true(all(c("var_context", "vpc_context") %in% names(cmp)))
+  per <- attr(cmp, "context_per")
+  expect_false(is.null(per))
+  ok <- cmp[cmp$status == "ok", , drop = FALSE]
+  g1 <- as.character(ok$group[1])
+  # The summed per-context split equals the reported (summed) var_context.
+  expect_equal(sum(per[[g1]]), ok$var_context[as.character(ok$group) == g1],
+               tolerance = 1e-6)
+  expect_output(print(cmp), "Context: site")
+})
+
+test_that("per-group PCV is essentially unchanged by an orthogonal context", {
+  # site membership is independent of the strata by construction, so adding the
+  # (1 | site) context RE to each per-group fit should barely move the between-
+  # stratum PCV (which reads only the stratum variance component).
+  d <- make_context_data()
+  base <- suppressWarnings(as.data.frame(compare_maihda_groups(
+    y ~ x + (1 | g1:g2), data = d, group = "region")))
+  ctx <- suppressWarnings(as.data.frame(compare_maihda_groups(
+    y ~ x + (1 | g1:g2), data = d, group = "region", context = "site")))
+  m <- merge(base[, c("group", "pcv")], ctx[, c("group", "pcv")],
+             by = "group", suffixes = c("_base", "_ctx"))
+  ok <- is.finite(m$pcv_base) & is.finite(m$pcv_ctx)
+  expect_gt(sum(ok), 0)
+  expect_equal(mean(m$pcv_ctx[ok]), mean(m$pcv_base[ok]), tolerance = 0.1)
+})
+
+test_that("group + context is rejected up front for wemix / ordinal", {
   d <- make_context_data()
   expect_error(
-    maihda(y ~ x + (1 | g1:g2), data = d, group = "region", context = "site"),
-    "either 'group'.*or 'context'")
+    maihda(y ~ x + (1 | g1:g2), data = d, group = "region", context = "site",
+           engine = "wemix"),
+    "does not support 'context'")
+  expect_error(
+    maihda(y ~ x + (1 | g1:g2), data = d, group = "region", context = "site",
+           engine = "ordinal"),
+    "does not support 'context'")
+  expect_error(
+    compare_maihda_groups(y ~ x + (1 | g1:g2), data = d, group = "region",
+                          context = "site", engine = "wemix"),
+    "does not support 'context'")
+})
+
+test_that("context may not name the group variable", {
+  d <- make_context_data()
+  expect_error(
+    compare_maihda_groups(y ~ x + (1 | g1:g2), data = d, group = "region",
+                          context = "region"),
+    "cannot include the group variable")
+})
+
+test_that("group + context warns when a group has too few context levels", {
+  set.seed(11)
+  n <- 600
+  region <- sample(c("A", "B"), n, replace = TRUE)
+  # Region A sees only 3 sites (weakly identified); region B sees 20.
+  site <- ifelse(region == "A",
+                 sample(paste0("a", 1:3), n, replace = TRUE),
+                 sample(paste0("b", 1:20), n, replace = TRUE))
+  d <- data.frame(
+    g1 = sample(c("m", "f"), n, replace = TRUE),
+    g2 = sample(c("lo", "hi"), n, replace = TRUE),
+    region = region, site = site, x = rnorm(n),
+    stringsAsFactors = FALSE
+  )
+  d$y <- 0.3 * d$x + rnorm(n)
+  # Other (singular-fit) warnings may fire too; capture all and assert the
+  # weak-identification one names region A x site.
+  w <- capture_warnings(
+    compare_maihda_groups(y ~ x + (1 | g1:g2), data = d, group = "region",
+                          context = "site"))
+  expect_true(any(grepl("few context levels", w)))
+  expect_true(any(grepl("A x site", w)))
+})
+
+test_that("plot(type = 'components') gains a context slice that still sums to 1", {
+  d <- make_context_data()
+  cmp <- suppressWarnings(compare_maihda_groups(
+    y ~ x + (1 | g1:g2), data = d, group = "region", context = "site"))
+  p <- plot(cmp, type = "components")
+  expect_s3_class(p, "ggplot")
+  expect_true("Context (higher level)" %in% as.character(p$data$component))
+  agg <- tapply(p$data$proportion, p$data$group, sum)
+  expect_true(all(abs(agg - 1) < 1e-6))
+})
+
+test_that("a non-contextual group comparison keeps no context columns", {
+  d <- make_context_data()
+  cmp <- suppressWarnings(compare_maihda_groups(
+    y ~ x + (1 | g1:g2), data = d, group = "region"))
+  expect_false(any(c("var_context", "vpc_context") %in% names(cmp)))
+  expect_null(attr(cmp, "context_var"))
 })
 
 test_that("maihda(decomposition = 'crossed-dimensions', context = ) composes", {
@@ -516,4 +648,141 @@ test_that("contextual brms summary returns posterior shares with intervals", {
   vc <- s$variance_components
   expect_true("Context: site" %in% vc$component)
   expect_equal(sum(vc$proportion[vc$component != "Total"]), 1, tolerance = 1e-6)
+})
+
+# ---- stepwise_pcv(context = ) --------------------------------------------------
+# The stepwise between-stratum PCV as a contextual cross-classified model: the
+# (1 | context) intercept is held in the null model and every step, so Step_PCV /
+# Total_PCV are the between-stratum PCV NET OF the context. Every step is fit through
+# fit_maihda(context = ), and extract_between_variance() already reads only the
+# stratum component, so the isolation is automatic; these tests pin the forwarding,
+# the shared complete-case sample, the Context_Variance column, and the engine guards.
+
+test_that("stepwise_pcv(context = ) isolates the between-stratum PCV net of context (lme4 gaussian)", {
+  d <- make_context_data()
+  s <- make_strata(d, vars = c("g1", "g2"))
+
+  out <- suppressWarnings(suppressMessages(
+    stepwise_pcv(s$data, "y", c("g1", "g2", "x"), context = "site")))
+  expect_s3_class(out, "maihda_stepwise")
+  expect_true(all(is.finite(out$Total_PCV)))
+  expect_true("Context_Variance" %in% names(out))
+
+  # The final step's between-stratum Variance equals the direct contextual fit's
+  # (ML-refit) stratum variance -- proving the (1 | site) effect is held every step
+  # and the stratum variance is read net of it.
+  m_ctx <- suppressWarnings(suppressMessages(
+    fit_maihda(y ~ g1 + g2 + x + (1 | stratum), data = s$data, context = "site")))
+  v_ctx <- extract_between_variance(maihda_pcv_refit_ml(m_ctx))
+  expect_equal(out$Variance[nrow(out)], v_ctx, tolerance = 1e-6)
+
+  # Context genuinely matters for this data: the same fit WITHOUT the context has a
+  # materially different stratum variance, so the match above is discriminating.
+  m_noctx <- suppressWarnings(suppressMessages(
+    fit_maihda(y ~ g1 + g2 + x + (1 | stratum), data = s$data)))
+  v_noctx <- extract_between_variance(maihda_pcv_refit_ml(m_noctx))
+  expect_false(isTRUE(all.equal(v_ctx, v_noctx, tolerance = 1e-4)))
+})
+
+test_that("stepwise_pcv Context_Variance reports the between-context variance and leaves other tables unchanged", {
+  d <- make_context_data()
+  s <- make_strata(d, vars = c("g1", "g2"))
+
+  out    <- suppressWarnings(suppressMessages(
+    stepwise_pcv(s$data, "y", c("g1", "g2", "x"), context = "site")))
+  out_no <- suppressWarnings(suppressMessages(
+    stepwise_pcv(s$data, "y", c("g1", "g2", "x"))))
+
+  # Present only with context =; the non-contextual gaussian table is byte-for-byte
+  # the historical six columns.
+  expect_true("Context_Variance" %in% names(out))
+  expect_identical(names(out_no),
+                   c("Step", "Model", "Added_Variable", "Variance",
+                     "Step_PCV", "Total_PCV"))
+  # ...and Context_Variance sits directly after the stratum Variance.
+  expect_equal(which(names(out) == "Context_Variance"),
+               which(names(out) == "Variance") + 1L)
+
+  # Positive at every step and equal to the fitted site variance at the final step.
+  expect_true(all(out$Context_Variance > 0))
+  m_ctx <- suppressWarnings(suppressMessages(
+    fit_maihda(y ~ g1 + g2 + x + (1 | stratum), data = s$data, context = "site")))
+  site_var <- unname(maihda_random_variances_lme4(
+    maihda_pcv_refit_ml(m_ctx)$model)["site"])
+  expect_equal(out$Context_Variance[nrow(out)], site_var, tolerance = 1e-6)
+})
+
+test_that("stepwise_pcv(context = ) filters context to one shared complete-case sample", {
+  d <- make_context_data()
+  d$site[1:50] <- NA
+  s <- make_strata(d, vars = c("g1", "g2"))
+
+  out <- suppressWarnings(suppressMessages(
+    stepwise_pcv(s$data, "y", c("g1", "g2", "x"), context = "site")))
+
+  # The 50 NA-site rows are dropped once, up front, so every step (here the null)
+  # uses the same reduced analytic sample as a manual complete-site fit.
+  s_cc <- s$data[!is.na(s$data$site), , drop = FALSE]
+  m_null <- suppressWarnings(suppressMessages(
+    fit_maihda(y ~ (1 | stratum), data = s_cc, context = "site")))
+  expect_equal(out$Variance[1],
+               extract_between_variance(maihda_pcv_refit_ml(m_null)),
+               tolerance = 1e-6)
+})
+
+test_that("stepwise_pcv omits the AUC/MOR trajectory for a binary contextual fit", {
+  set.seed(4242)
+  d <- make_context_data(n = 1500, n_sites = 20)
+  d$yb <- stats::rbinom(nrow(d), 1, stats::plogis(d$y - mean(d$y)))
+  s <- make_strata(d, vars = c("g1", "g2"))
+
+  # No discriminatory-accuracy columns (the AUC would include the context effect),
+  # but the net-of-context PCV trajectory and the context variance are reported.
+  outb <- suppressWarnings(suppressMessages(
+    stepwise_pcv(s$data, "yb", c("g1", "g2"), family = "binomial",
+                 context = "site")))
+  expect_false(any(c("AUC", "Step_AUC", "Total_AUC", "MOR") %in% names(outb)))
+  expect_true("Context_Variance" %in% names(outb))
+  expect_true(all(is.finite(outb$Total_PCV)))
+
+  # The same binary stepwise WITHOUT context still carries the AUC trajectory --
+  # confirming the omission is specific to the contextual structure, not the family.
+  outb0 <- suppressWarnings(suppressMessages(
+    stepwise_pcv(s$data, "yb", c("g1", "g2"), family = "binomial")))
+  expect_true(all(c("AUC", "MOR") %in% names(outb0)))
+})
+
+test_that("stepwise_pcv(context = ) rejects the wemix and ordinal engines", {
+  d <- make_context_data()
+  d$w <- stats::runif(nrow(d), 0.5, 2)
+  s <- make_strata(d, vars = c("g1", "g2"))
+
+  # sampling_weights routes to wemix, which fits no crossed random effects.
+  expect_error(
+    suppressMessages(stepwise_pcv(s$data, "y", c("g1", "g2"), context = "site",
+                                  sampling_weights = "w")),
+    "does not support 'context'")
+  # An ordinal family routes to the clmm engine, likewise no crossed REs.
+  expect_error(
+    suppressMessages(stepwise_pcv(s$data, "y", c("g1", "g2"), context = "site",
+                                  family = "ordinal")),
+    "does not support 'context'")
+})
+
+test_that("stepwise_pcv(context = ) works on the brms engine", {
+  # Compiles a Stan model per step, so OPT-IN (set MAIHDA_TEST_BRMS=true).
+  # stepwise_pcv() takes no `...`, so the per-step brms fits use default sampling;
+  # a two-fit trajectory (null + one step) keeps the opt-in run bounded.
+  skip_on_cran()
+  skip_if(Sys.getenv("MAIHDA_TEST_BRMS") != "true",
+          "brms Stan tests are opt-in; set MAIHDA_TEST_BRMS=true to run them")
+  skip_if_not_installed("brms")
+
+  d <- make_context_data(seed = 8300, n = 400, n_sites = 12)
+  s <- make_strata(d, vars = c("g1", "g2"))
+  out <- suppressWarnings(suppressMessages(
+    stepwise_pcv(s$data, "y", c("g1"), engine = "brms", context = "site")))
+  expect_s3_class(out, "maihda_stepwise")
+  expect_true("Context_Variance" %in% names(out))
+  expect_true(all(is.finite(out$Context_Variance)))
 })

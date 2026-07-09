@@ -18,7 +18,7 @@
 #' \code{summary_adjusted}, and the headline \code{print()} shows the null-model AUC.
 #'
 #' This is a convenience wrapper around \code{\link{fit_maihda}},
-#' \code{\link{calculate_pvc}}, \code{\link{summary.maihda_model}} and
+#' \code{\link{calculate_pcv}}, \code{\link{summary.maihda_model}} and
 #' \code{\link{compare_maihda_groups}}. It is \emph{intrinsically} a two-model
 #' decomposition and has no single-model mode -- for a single fit (e.g. just the
 #' null-model VPC / discriminatory accuracy), call \code{\link{fit_maihda}} directly.
@@ -60,7 +60,9 @@
 #'   is run and attached to the result. \code{group} runs a \emph{stratified}
 #'   analysis (one independent model per level); to instead model a higher level
 #'   \emph{jointly}, crossed with the strata, use \code{context}. The two are
-#'   different designs, so supplying both errors.
+#'   different designs but they \emph{compose}: supplying both runs the stratified
+#'   comparison where each per-group fit is itself a contextual cross-classified
+#'   model (see \code{context}).
 #' @param context Optional character vector naming higher-level \emph{context}
 #'   column(s) in \code{data} (e.g. \code{"school"}, \code{"hospital"},
 #'   \code{"region"}), forwarded to \code{\link{fit_maihda}}. Each context enters
@@ -71,8 +73,13 @@
 #'   between-context vs. residual, the headline VPC/ICC becomes the between-stratum
 #'   share \emph{net of} the context, and the PCV decomposition is computed with the
 #'   context partialled out (the context random intercept is carried by both the
-#'   null and the adjusted model). Cannot be combined with \code{group}; a context
-#'   with few levels weakly identifies its variance (consider \code{engine = "brms"}).
+#'   null and the adjusted model). May be combined with \code{group}: the
+#'   stratified comparison then fits a contextual cross-classified model within
+#'   each group and reports each group's stratum-vs-context partition (a per-group
+#'   subset shrinks the context level count, so weak identification is warned about
+#'   per group). Not available for the \code{wemix}/\code{ordinal} engines (they
+#'   fit no crossed random effect); a context with few levels weakly identifies its
+#'   variance (consider \code{engine = "brms"}).
 #' @param engine Modeling engine, "lme4" (default), "brms", "wemix" (the
 #'   design-weighted pseudo-maximum-likelihood fit; requires
 #'   \code{sampling_weights} and is selected automatically when they are supplied
@@ -110,7 +117,12 @@
 #'   (\code{dim:time}). The between-stratum variance is then time-varying and the
 #'   PCV is reported separately for the baseline (intercept) and the slope variance
 #'   -- the additive-vs-multiplicative split of the intersectional trajectory
-#'   inequality (Bell, Evans, Holman & Leckie 2024). See \code{\link{fit_maihda}}.
+#'   inequality (Bell, Evans, Holman & Leckie 2024). As with the two-model PCV,
+#'   REML \code{lmer} growth fits are refitted with maximum likelihood before the
+#'   null-vs-adjusted variance comparison (REML variances are not comparable
+#'   across different fixed effects; see \code{\link{calculate_pcv}}), while the
+#'   reported time-varying VPC keeps each fit's own (REML) estimate.
+#'   See \code{\link{fit_maihda}}.
 #' @param id,time,time_degree For a \strong{longitudinal} MAIHDA: the person/unit
 #'   identifier column, the numeric measurement-time column, and the growth-curve
 #'   polynomial degree (1 = linear). Supplying \code{id}/\code{time} selects
@@ -156,6 +168,20 @@
 #' @param ... Additional arguments passed to \code{\link{fit_maihda}} (and on to
 #'   \code{lmer}/\code{glmer}).
 #'
+#' @section Numeric stratum dimensions:
+#' The stratum-defining dimensions are categorical. A factor or character dimension
+#' enters the adjusted model as a categorical main effect, and a numeric dimension with
+#' more than 10 unique values is tertile-binned when \code{autobin = TRUE} (see
+#' \code{\link{make_strata}}). A numeric dimension that is \emph{not} auto-binned -- a
+#' category code such as \code{education = 1, 2, 3} (few unique values), or a many-valued
+#' numeric fitted with \code{autobin = FALSE} -- enters the adjusted model as a single
+#' \emph{linear} fixed effect rather than categorical main effects, which changes the
+#' PCV/decomposition interpretation. \code{maihda()} therefore \strong{warns} in that
+#' case (for three or more distinct values -- a binary numeric dimension is exempt, since
+#' with two levels a linear term and a factor are equivalent): wrap category codes in
+#' \code{factor()} before fitting, or, for a genuinely continuous variable, use it as a
+#' covariate rather than a stratum dimension.
+#'
 #' @return An object of class \code{maihda_analysis}: a list with
 #'   \item{model}{the fitted \code{maihda_model} (see \code{\link{fit_maihda}}); the
 #'     \strong{null} model in \code{"two-model"} mode, or the single
@@ -167,10 +193,12 @@
 #'   \item{model_adjusted}{the fitted \strong{adjusted} \code{maihda_model}
 #'     (\code{"two-model"} and \code{"longitudinal"} modes; \code{NULL} otherwise)}
 #'   \item{summary_adjusted}{the adjusted model's \code{maihda_summary}, or \code{NULL}}
-#'   \item{pcv}{the proportional change in variance: the \code{pvc_result} from
-#'     \code{\link{calculate_pvc}} in \code{"two-model"} mode, or a
+#'   \item{pcv}{the proportional change in variance: the \code{pcv_result} from
+#'     \code{\link{calculate_pcv}} in \code{"two-model"} mode, or a
 #'     \code{maihda_long_pcv} (the intercept/slope and time-specific PCV) in
-#'     \code{"longitudinal"} mode; \code{NULL} otherwise}
+#'     \code{"longitudinal"} mode; \code{NULL} otherwise. Both are computed on
+#'     the maximum-likelihood scale (REML \code{lmer} fits are ML-refitted for
+#'     the comparison; see \code{\link{calculate_pcv}})}
 #'   \item{decomposition}{the additive/interaction partition (additive and interaction
 #'     variances and shares, per-dimension variances; \code{"crossed-dimensions"} mode
 #'     only, \code{NULL} otherwise)}
@@ -278,14 +306,14 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
          call. = FALSE)
   }
 
-  # group= (stratified: one independent model per level) and context= (joint:
-  # strata crossed with the higher level in ONE model) are different designs for
-  # bringing in a higher level; combining them is ambiguous, so error early.
-  if (!is.null(group) && !is.null(context)) {
-    stop("Supply either 'group' (stratified comparison: one independent model per ",
-         "level) or 'context' (contextual cross-classified model: strata crossed ",
-         "with the higher level in one fit), not both.", call. = FALSE)
-  }
+  # group= (stratified: one independent model per level) and context= (a
+  # higher-level crossed random intercept) compose: when both are supplied the
+  # stratified comparison runs where each per-group fit is itself a contextual
+  # cross-classified model (see compare_maihda_groups(context=)). This was a
+  # historical scope choice, not a statistical constraint -- fitting a contextual
+  # model within each group stratum is coherent. wemix/ordinal fit no crossed
+  # context random effect, so context is rejected per-engine in the handshakes
+  # below (mirroring fit_maihda()).
 
   # Sampling weights select the design-weighted engine, mirroring fit_maihda():
   # the default engine switches to "wemix" (with a message), an explicit lme4 is
@@ -315,6 +343,11 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
       stop("Bootstrap intervals are not available for engine = \"wemix\" (a ",
            "design-based interval would require replicate weights). Set ",
            "bootstrap = FALSE.", call. = FALSE)
+    }
+    if (!is.null(context)) {
+      stop("engine = \"wemix\" does not support 'context' (WeMix fits no crossed ",
+           "random effects). Use engine = \"lme4\" or \"brms\" for a contextual ",
+           "cross-classified model.", call. = FALSE)
     }
   }
 
@@ -387,6 +420,12 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
            "bootstrap = FALSE, or use engine = \"brms\" for posterior credible ",
            "intervals.", call. = FALSE)
     }
+    if (!is.null(context)) {
+      stop("engine = \"ordinal\" does not support 'context' (the clmm path fits ",
+           "the canonical single (1 | stratum) structure only). Use engine = ",
+           "\"brms\" for a contextual cross-classified cumulative model.",
+           call. = FALSE)
+    }
   }
 
   # Fit the supplied formula first -- this resolves the stratum dimensions (and the
@@ -446,6 +485,13 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
   # before the two-model / crossed-dimensions / longitudinal branches split.
   maihda_check_no_dimension_interaction(model$formula, strata_vars, dim_terms,
                                         fn = "maihda")
+  # Warn if a numeric stratum dimension will enter the adjusted model as a raw linear
+  # term (a category code, or a many-valued numeric with autobin = FALSE) rather than
+  # categorical main effects -- once here, before the mode branches, on the overall
+  # data. The internal compare_maihda_groups() calls below pass warn_linear = FALSE so
+  # the group path does not warn about the same dimensions again.
+  maihda_warn_linear_strata_dims(strata_vars, model$strata_autobin_info,
+                                 model$original_data, fn = "maihda")
   supplied_fixed <- attr(stats::terms(reformulas::nobars(model$formula)), "term.labels")
   # terms() backtick-quotes non-syntactic term labels (e.g. `gender var`), so the
   # dimension main effects must be compared in their quoted form -- a raw-name
@@ -507,7 +553,8 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
         shared_strata = shared_strata, min_group_n = min_group_n,
         autobin = autobin, bootstrap = bootstrap, n_boot = n_boot,
         conf_level = conf_level, decomposition = "crossed-dimensions",
-        sampling_weights = sampling_weights, ...
+        context = context, sampling_weights = sampling_weights,
+        warn_linear = FALSE, ...
       )
     }
 
@@ -549,9 +596,15 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
     } else {
       model
     }
+    # The dim:time interaction terms must reference the variable the growth terms
+    # were actually built on -- the internally centered column for a fit whose
+    # time axis does not start at 0 -- not the raw user column, which the growth
+    # formula no longer carries there.
     laf <- maihda_longitudinal_adjusted_formula(
       null_model$formula, strata_vars, null_model$strata_autobin_info,
-      null_model$original_data, time = time, time_degree = time_degree)
+      null_model$original_data,
+      time = maihda_lng_time_term(null_model$longitudinal_info),
+      time_degree = time_degree)
     adjusted_model <- fit_maihda_fwd(laf$formula, laf$data, engine = engine,
                                      family = family_used, id = id, time = time,
                                      time_degree = time_degree)
@@ -649,7 +702,7 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
   # has zero between-stratum variance (a boundary/singular fit); keep both models and
   # warn rather than aborting in that numerical edge case.
   pcv <- tryCatch(
-    calculate_pvc(null_model, adjusted_model, bootstrap = bootstrap, n_boot = n_boot,
+    calculate_pcv(null_model, adjusted_model, bootstrap = bootstrap, n_boot = n_boot,
                   conf_level = conf_level),
     error = function(e) {
       warning("maihda(): the PCV could not be computed (", conditionMessage(e),
@@ -672,7 +725,8 @@ maihda <- function(formula, data, group = NULL, context = NULL, engine = "lme4",
       group_formula, data, group = group, engine = engine, family = family_used,
       shared_strata = shared_strata, min_group_n = min_group_n,
       autobin = autobin, bootstrap = bootstrap, n_boot = n_boot,
-      conf_level = conf_level, sampling_weights = sampling_weights, ...
+      conf_level = conf_level, context = context,
+      sampling_weights = sampling_weights, warn_linear = FALSE, ...
     )
   }
 
@@ -839,18 +893,18 @@ print.maihda_analysis <- function(x, ...) {
     pcv <- x$pcv
     if (isTRUE(pcv$bootstrap) && !is.null(pcv$ci_lower)) {
       cat(sprintf("PCV (null -> adjusted): %s [%.4f, %.4f]\n",
-                  pal$accent(sprintf("%.4f", pcv$pvc)), pcv$ci_lower, pcv$ci_upper))
+                  pal$accent(sprintf("%.4f", pcv$pcv)), pcv$ci_lower, pcv$ci_upper))
     } else {
-      cat(sprintf("PCV (null -> adjusted): %s\n", pal$accent(sprintf("%.4f", pcv$pvc))))
+      cat(sprintf("PCV (null -> adjusted): %s\n", pal$accent(sprintf("%.4f", pcv$pcv))))
     }
     cat(sprintf("Between-stratum variance: %.4f (null) -> %.4f (adjusted)\n",
                 pcv$var_model1, pcv$var_model2))
-    if (pcv$pvc >= 0) {
+    if (pcv$pcv >= 0) {
       cat(sprintf(paste0("  ~%.1f%% of the between-stratum variance is additive (the ",
                          "dimensions' main\n  effects); the remainder is the between-stratum ",
                          "variance remaining after the\n  additive main effects -- a ",
                          "model-dependent quantity\n"),
-                  pcv$pvc * 100))
+                  pcv$pcv * 100))
     } else {
       cat("  PCV < 0: the additive main effects do not account for the between-stratum\n",
           "  variance (possible suppression/rescaling).\n", sep = "")
@@ -897,7 +951,10 @@ summary.maihda_analysis <- function(object, ...) {
 #'
 #' Dispatches each \code{type} to the model it is valid on. The VPC and shrinkage
 #' views (\code{"vpc"}, \code{"obs_vs_shrunken"}, \code{"predicted"}) use the
-#' \strong{null} model. The additive-vs-intersectional views (\code{"effect_decomp"},
+#' \strong{null} model by default; for \code{type = "vpc"} the \code{model} argument
+#' selects the null model, the adjusted model, or \code{"both"} -- one combined plot
+#' that shows the null-to-adjusted change with the PCV annotated. The
+#' additive-vs-intersectional views (\code{"effect_decomp"},
 #' \code{"prediction_deviation"}) use the
 #' \strong{adjusted} model, whose fixed effects carry the dimensions' additive part so
 #' the stratum random effect is the pure interaction; with fewer than two dimensions
@@ -950,12 +1007,37 @@ summary.maihda_analysis <- function(object, ...) {
 #'   keep: \code{"order"} (default, first n_strata in stratum order) or
 #'   \code{"deviation"} (the n_strata furthest from the reference, both tails). See
 #'   \code{\link[=plot.maihda_model]{plot}}.
+#' @param order_by Display order of the strata on the \code{"predicted"} view
+#'   (display-only; does not change which strata are shown, nor any value):
+#'   \code{"predicted_desc"} (default) highest predicted first, \code{"stratum"}
+#'   native order, \code{"predicted_asc"} lowest first, or \code{"deviation"}
+#'   largest \code{|predicted - reference|} first. See
+#'   \code{\link[=plot.maihda_model]{plot}}.
+#' @param model For \code{type = "vpc"}, which model's variance partition to show:
+#'   \code{"null"} (default) the total between-stratum heterogeneity (the previous,
+#'   backward-compatible behaviour), \code{"adjusted"} the between-stratum
+#'   heterogeneity remaining after the dimensions' additive main effects (closer to
+#'   the pure intersectional component), or \code{"both"} -- a \strong{single} plot
+#'   placing the two partitions together and annotating the PCV, so the
+#'   null-to-adjusted change is visible in one figure. The null and adjusted single
+#'   views are labelled with a \code{"Null model"} / \code{"Adjusted model"}
+#'   subtitle. For a \strong{longitudinal} analysis the VPC view is the time-varying
+#'   VPC trajectory, and \code{"both"} overlays the null and adjusted curves. A
+#'   \code{"crossed-dimensions"} analysis fits a single model (no null/adjusted
+#'   pair), so only \code{"null"} is valid there; \code{"adjusted"}/\code{"both"}
+#'   error. \code{model} applies to the VPC view only -- combining a non-default
+#'   \code{model} with another \code{type} is an error.
 #' @param ... Additional arguments passed to the underlying plot method.
-#' @return A ggplot2 object, or (for \code{type = "all"}) an invisible list of them.
+#' @return A ggplot2 object -- including \code{type = "vpc", model = "both"}, which
+#'   is a single combined change plot -- or (for \code{type = "all"}) an invisible
+#'   list of them.
 #' @export
 plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE,
                                  only_flagged = FALSE, highlight_by = c("flag", "rope"),
-                                 rope = NULL, select = c("order", "deviation"), ...) {
+                                 rope = NULL, select = c("order", "deviation"),
+                                 order_by = c("predicted_desc", "stratum", "predicted_asc", "deviation"),
+                                 model = c("null", "adjusted", "both"),
+                                 ...) {
   type <- match.arg(type, c(
     "all", "vpc", "obs_vs_shrunken", "predicted", "upset",
     "effect_decomp", "prediction_deviation", "context_vpc",
@@ -976,6 +1058,19 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
   highlight_by <- match.arg(highlight_by)
   # Which strata survive the n_strata cap on the predicted / trajectory views.
   select <- match.arg(select)
+  # Display order for the predicted view (display-only; see plot.maihda_model()).
+  order_by <- match.arg(order_by)
+  # Which model's VPC the "vpc" view shows: the null model (default, backward
+  # compatible), the adjusted model, or "both" as a single change plot. It selects
+  # the VPC view only -- pairing a non-default `model` with any other `type` is a
+  # usage error rather than a silent no-op.
+  model <- match.arg(model)
+  if (model != "null" && !type %in% c("vpc", "vpc_trajectory")) {
+    stop("`model` selects which model's VPC to draw and only applies to ",
+         "type = \"vpc\"; got type = \"", type, "\". The additive-vs-intersectional ",
+         "views (effect_decomp, prediction_deviation) already use the adjusted model, ",
+         "and obs_vs_shrunken / predicted use the null model.", call. = FALSE)
+  }
 
   # Longitudinal analysis: the trajectory views replace the cross-sectional ones.
   # "all" shows the VPC-over-time and the stratum mean trajectories; "pcv_trajectory"
@@ -1000,9 +1095,13 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
       for (p in plots[!vapply(plots, is.null, logical(1))]) print(p)
       return(invisible(plots))
     }
-    if (type %in% c("vpc_trajectory", "trajectories", "vpc")) {
-      t <- if (type == "vpc") "vpc_trajectory" else type
-      return(plot(x$model, type = t, summary_obj = x$summary, select = select, ...))
+    if (type %in% c("vpc", "vpc_trajectory")) {
+      # The VPC-over-time view, honouring `model` (null / adjusted / both curves).
+      return(maihda_analysis_vpc_plot(x, model, ...))
+    }
+    if (type == "trajectories") {
+      return(plot(x$model, type = "trajectories", summary_obj = x$summary,
+                  select = select, ...))
     }
     # Other cross-sectional types fall through to the adjusted growth model below.
   }
@@ -1021,6 +1120,13 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
     }
     gtype <- sub("^group_", "", type)
     return(plot(x$groups, type = gtype))
+  }
+
+  # The VPC view: the null model (default), the adjusted model, or "both" as a
+  # single change plot. Handled here -- before the highlight resolution below --
+  # because the VPC bar ignores the highlight / select / order_by arguments.
+  if (type == "vpc") {
+    return(maihda_analysis_vpc_plot(x, model, ...))
   }
 
   # The additive-vs-intersectional views are only interpretable on the adjusted
@@ -1051,7 +1157,8 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
     null_plots$predicted <- tryCatch(
       plot(x$model, type = "predicted", summary_obj = x$summary,
            highlight_interactions = hl, only_flagged = only_flagged,
-           highlight_by = highlight_by, rope = rope, select = select, ...),
+           highlight_by = highlight_by, rope = rope, select = select,
+           order_by = order_by, ...),
       error = function(e) NULL)
     if (!is.null(x$context_vars)) {
       null_plots$context_vpc <- tryCatch(
@@ -1074,8 +1181,15 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
         group_components = plot(x$groups, type = "components"),
         group_between_variance = plot(x$groups, type = "between_variance")
       )
+      # PCV (two-model) and additive_share (crossed-dimensions) are mutually
+      # exclusive by decomposition mode: the group comparison carries exactly one
+      # of the two columns. Attempt both under tryCatch so the estimable one shows
+      # and the inapplicable one drops out cleanly -- otherwise a crossed-dimensions
+      # group analysis loses its additive-share view from the default plot().
       group_plots$group_pcv <- tryCatch(plot(x$groups, type = "pcv"),
                                          error = function(e) NULL)
+      group_plots$group_additive_share <- tryCatch(
+        plot(x$groups, type = "additive_share"), error = function(e) NULL)
       model_plots <- c(model_plots, group_plots)
     }
     for (p in model_plots[!vapply(model_plots, is.null, logical(1))]) print(p)
@@ -1091,7 +1205,8 @@ plot.maihda_analysis <- function(x, type = "all", highlight_interactions = FALSE
   # vpc, obs_vs_shrunken, predicted -> null model
   plot(x$model, type = type, summary_obj = x$summary,
        highlight_interactions = hl, only_flagged = only_flagged,
-       highlight_by = highlight_by, rope = rope, select = select, ...)
+       highlight_by = highlight_by, rope = rope, select = select,
+       order_by = order_by, ...)
 }
 
 # Resolve the highlight argument for a maihda_analysis: FALSE/NULL stays FALSE;
@@ -1133,4 +1248,74 @@ maihda_resolve_analysis_highlight <- function(x, highlight_interactions, rope = 
   stop("'highlight_interactions' must be FALSE, TRUE, a multiple-comparison ",
        "method name (e.g. \"BH\"), or a maihda_interactions object from ",
        "maihda_interactions().", call. = FALSE)
+}
+
+# Build the VPC view for a maihda_analysis honouring `model`:
+#   "null"     - the null model's VPC (the default; total between-stratum share)
+#   "adjusted" - the adjusted model's VPC (between-stratum share net of the
+#                dimensions' additive main effects)
+#   "both"     - ONE combined change plot: the null and adjusted partitions
+#                together with the PCV annotated (cross-sectional), or the null and
+#                adjusted VPC-over-time curves overlaid (longitudinal).
+# A longitudinal analysis uses the time-varying VPC trajectory in place of the
+# cross-sectional bar. A crossed-dimensions analysis fits a single model (no
+# null/adjusted pair), so only "null" is valid there. The null / adjusted single
+# views get a clarifying "Null model" / "Adjusted model" subtitle (prepended to any
+# subtitle the underlying plot already carries, e.g. the trajectory's reference-time
+# note); the crossed-dimensions single model gets none (there is nothing to
+# distinguish, so the historical output is preserved).
+maihda_analysis_vpc_plot <- function(x, model = c("null", "adjusted", "both"), ...) {
+  model <- match.arg(model)
+  is_long <- identical(x$mode, "longitudinal")
+  is_cc   <- identical(x$mode, "crossed-dimensions")
+  vpc_type <- if (is_long) "vpc_trajectory" else "vpc"
+
+  labeled <- function(m, s, label) {
+    p <- plot(m, type = vpc_type, summary_obj = s, ...)
+    if (!is.null(label)) {
+      existing <- p$labels$subtitle
+      new_sub <- if (is.null(existing) || !nzchar(existing)) {
+        label
+      } else {
+        paste0(label, " \u2014 ", existing)
+      }
+      p <- p + ggplot2::labs(subtitle = new_sub)
+    }
+    p
+  }
+
+  # Crossed-dimensions: a single fitted model already carrying the additive
+  # structure -- there is no null/adjusted pair to choose between.
+  if (is_cc) {
+    if (model != "null") {
+      stop("model = \"", model, "\" needs a null and an adjusted model, but a ",
+           "crossed-dimensions analysis (decomposition = \"crossed-dimensions\") ",
+           "fits a single model whose VPC already separates the additive dimensions ",
+           "from the intersectional interaction. Use model = \"null\" (the default).",
+           call. = FALSE)
+    }
+    return(labeled(x$model, x$summary, NULL))
+  }
+
+  if (model == "null") {
+    return(labeled(x$model, x$summary, "Null model"))
+  }
+
+  # adjusted / both need the adjusted model. maihda() always fits it for the
+  # two-model and longitudinal decompositions, so a NULL here means there is no
+  # adjusted model to compare against.
+  if (is.null(x$model_adjusted) || is.null(x$summary_adjusted)) {
+    stop("model = \"", model, "\" requested, but this analysis has no adjusted ",
+         "model to compare against. Use model = \"null\".", call. = FALSE)
+  }
+
+  if (model == "adjusted") {
+    return(labeled(x$model_adjusted, x$summary_adjusted, "Adjusted model"))
+  }
+
+  # both -> one combined change plot.
+  if (is_long) {
+    return(plot_vpc_trajectory_change(x$summary, x$summary_adjusted))
+  }
+  plot_vpc_change(x$summary, x$summary_adjusted, x$pcv)
 }

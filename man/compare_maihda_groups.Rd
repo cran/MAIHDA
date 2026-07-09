@@ -17,7 +17,9 @@ compare_maihda_groups(
   conf_level = 0.95,
   autobin = TRUE,
   decomposition = c("two-model", "crossed-dimensions"),
+  context = NULL,
   sampling_weights = NULL,
+  warn_linear = TRUE,
   ...
 )
 }
@@ -81,12 +83,37 @@ alias that warns). The crossed-dimensions form requires
 variance (additive + interaction). See \code{\link{maihda}} for the underlying
 model and its caveats.}
 
+\item{context}{Optional character vector naming higher-level \emph{context}
+column(s) in \code{data} (e.g. \code{"school"}, \code{"region"}). Each
+per-group fit then becomes a contextual cross-classified model --
+\code{outcome ~ covars + (1 | stratum) + (1 | context)} -- so within every
+group the stratum random intercept is crossed with the context random
+intercept(s). \code{vpc}/\code{var_between} are then the between-stratum
+quantities \emph{net of} the context, and two columns report the per-group
+context partition: \code{var_context} (the between-context variance, summed
+over contexts) and \code{vpc_context} (the contexts' share of the group's
+unexplained variance). The per-context split is kept on the
+\code{"context_per"} attribute. A per-group subset shrinks each context's
+level count, so groups with too few context levels (< 10) to identify the
+context variance are named in a single warning. Forwarded to
+\code{\link{fit_maihda}}; not available for the \code{wemix}/\code{ordinal}
+engines (they fit no crossed random effect), and the \code{context} may not
+name the \code{group} variable itself.}
+
 \item{sampling_weights}{Optional name of a sampling-weight column in
 \code{data} for design-weighted per-group fits; see \code{\link{fit_maihda}}.
 The column is sliced with each group's rows, so every group is fitted with
 its own members' weights. Not compatible with \code{engine = "lme4"},
 \code{bootstrap = TRUE}, or (under the wemix engine)
 \code{decomposition = "crossed-dimensions"}.}
+
+\item{warn_linear}{Logical; when \code{TRUE} (default) a one-time warning is
+emitted if a numeric stratum-defining dimension enters the per-group
+\emph{adjusted} models as a raw linear slope rather than as categorical main
+effects, which silently changes the PCV/decomposition interpretation (see
+\code{\link{maihda_adjusted_terms}}). Set to \code{FALSE} internally when
+\code{\link{maihda}} delegates here, because it has already warned on the same
+data.}
 
 \item{...}{Additional arguments passed to \code{\link{fit_maihda}} (and on to
 \code{lmer}/\code{glmer}).}
@@ -100,7 +127,7 @@ A \code{data.frame} of class \code{maihda_group_comparison} with one
   dimensions, two further columns report the per-group null -> adjusted
   decomposition: \code{pcv} (proportional change in between-stratum variance when
   the dimensions' additive main effects are added; computed on the
-  maximum-likelihood scale -- see \code{\link{calculate_pvc}} -- because REML
+  maximum-likelihood scale -- see \code{\link{calculate_pcv}} -- because REML
   variances are not comparable across the null vs. adjusted fixed effects),
   \code{var_between_adjusted} (a \emph{derived} coherence quantity, reported as
   \code{var_between * (1 - pcv)} so it shares the scale of the REML
@@ -112,7 +139,13 @@ A \code{data.frame} of class \code{maihda_group_comparison} with one
   maximum-likelihood scale as the PCV; it differs from \code{var_between_adjusted}
   only by the small REML-vs-ML gap in the null variance). All three are
   \code{NA} for a group whose adjusted fit failed, and the columns are
-  omitted entirely when the strata have a single dimension. \code{n} is the analytic sample size used by the
+  omitted entirely when the strata have a single dimension. When \code{context}
+  is supplied, two further columns report each group's contextual partition:
+  \code{var_context} (the between-context variance, summed over contexts) and
+  \code{vpc_context} (the contexts' share of the group's unexplained variance);
+  the per-context split is on the \code{"context_per"} attribute and the
+  context name(s) on \code{"context_var"}. These are dropped when no context is
+  supplied. \code{n} is the analytic sample size used by the
   model (after dropping rows with a missing outcome/covariate) for both fitted
   and skipped groups, falling back to the raw row count only when the model
   frame cannot be built. \code{var_other} is the variance of any additional
@@ -162,7 +195,7 @@ already carries a \code{stratum} column. Under \code{shared_strata = FALSE}
 strata are rebuilt inside each group, so a degenerate single-stratum group is
 instead reported with a "fit failed" status rather than a pre-fit skip. A
 singular fit yields a VPC of 0 rather than an error (unlike
-\code{\link{calculate_pvc}}). A hard fit failure in one group records \code{NA}
+\code{\link{calculate_pcv}}). A hard fit failure in one group records \code{NA}
 and a status note without aborting the whole comparison.
 
 Fit-quality diagnostics: for the \code{lme4} engine, groups whose model is

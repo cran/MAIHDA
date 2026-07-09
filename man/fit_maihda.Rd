@@ -77,8 +77,10 @@ Although any valid family object is accepted for fitting, the MAIHDA variance
 summaries (\code{\link{summary.maihda_model}}, VPC/ICC, PCV) are only defined
 for \code{gaussian("identity")}, the binomial/Bernoulli families with a logit
 or probit link, \code{poisson("log")}, and the negative binomial with a log
-link (level-1 variance \code{log(1 + 1/mu + 1/theta)}; Nakagawa, Johnson &
-Schielzeth 2017). Other families (for example \code{Gamma(link = "log")})
+link (level-1 variance \code{log(1 + 1/lambda + 1/theta)} at the
+\emph{marginal} expected count \code{lambda}; Nakagawa, Johnson & Schielzeth
+2017 -- see \code{\link{summary.maihda_model}} for how \code{lambda} is
+computed). Other families (for example \code{Gamma(link = "log")})
 will fit, but \code{summary()} and the VPC/PCV helpers will stop with an
 "not implemented" error because no level-1 variance is defined for them.}
 
@@ -156,7 +158,14 @@ Bell, Evans, Holman & Leckie (2024).}
 
 \item{time}{Optional single character string naming a numeric measurement-time
 column (e.g. wave 0, 1, 2, ... or age), required for a longitudinal MAIHDA;
-see \code{id}. Default \code{NULL}.}
+see \code{id}. When the time axis does not start at 0 (age, calendar year,
+waves coded 10, 11, ...), the growth terms are fit on internally
+\emph{centered} time (\code{time - min(time)}, with a message): the raw
+polynomial basis over an offset range is ill-conditioned and can silently
+converge to a wrong solution. All results (the time-varying VPC, the
+PCV, plots, predictions) are reported on the original \code{time} scale;
+the column name \code{.maihda_ctime} is reserved for the internal centered
+variable. Default \code{NULL}.}
 
 \item{time_degree}{Polynomial degree of the growth curve when \code{time} is
 supplied: 1 (default) linear, 2 quadratic, etc. The brms engine supports

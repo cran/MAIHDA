@@ -39,6 +39,14 @@
 #' column for a variable it is about to auto-bin, so an existing user column is never
 #' silently overwritten (rename it, or pass \code{autobin = FALSE}).
 #'
+#' A numeric grouping variable with 10 or fewer unique values (or any numeric when
+#' \code{autobin = FALSE}) is kept as its raw values: distinct values still define
+#' distinct strata, but the variable is \emph{not} binned. If such a variable is then
+#' used to build an adjusted MAIHDA (\code{\link{maihda}}), it enters the adjusted model
+#' as a linear fixed effect rather than categorical main effects, and \code{maihda()}
+#' warns (when it has three or more distinct values). Wrap category codes in
+#' \code{factor()} before creating strata if you want them treated categorically.
+#'
 #' @examples
 #' # Create strata from gender and race variables
 #' result <- make_strata(maihda_sim_data, vars = c("gender", "race"))
@@ -143,18 +151,21 @@ make_strata <- function(data, vars, sep = " \u00d7 ", min_n = 1, autobin = TRUE)
   }
 
   valid_strata <- unique_strata[valid_idx, , drop = FALSE]
+  # Labels are built per column via as.character() (maihda_paste_label_rows), not
+  # apply(): apply()'s as.matrix() coercion format()-pads numeric columns in a
+  # mixed-type frame, producing labels like "m ×  1" next to "m × 10".
   labels <- if (nrow(valid_strata) > 0) {
-    apply(valid_strata, 1, function(x) paste(x, collapse = sep))
+    maihda_paste_label_rows(valid_strata, sep)
   } else {
     character()
   }
   duplicated_labels <- duplicated(labels) | duplicated(labels, fromLast = TRUE)
   if (any(duplicated_labels)) {
-    labels[duplicated_labels] <- apply(
-      valid_strata[duplicated_labels, , drop = FALSE],
-      1,
-      function(x) paste(paste0(vars, "=", x), collapse = sep)
-    )
+    dup_rows <- valid_strata[duplicated_labels, , drop = FALSE]
+    for (v in vars) {
+      dup_rows[[v]] <- paste0(v, "=", as.character(dup_rows[[v]]))
+    }
+    labels[duplicated_labels] <- maihda_paste_label_rows(dup_rows, sep)
   }
 
   # Create stratum information table

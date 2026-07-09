@@ -11,6 +11,65 @@ test_that("maihda_var_at_time evaluates a(t)' Sigma a(t)", {
   expect_equal(maihda_var_at_time(Sigma, c(0, 3)), c(2, 7.1))
 })
 
+test_that("maihda_slope_var_at_time evaluates b(t)' Sigma b(t), b = da/dt", {
+  # Linear block: the instantaneous-slope variance is Sigma[2,2] at every t.
+  S2 <- matrix(c(2, 0.1, 0.1, 0.5), nrow = 2)
+  expect_equal(maihda_slope_var_at_time(S2, c(0, 3, 10)), rep(0.5, 3))
+  # Quadratic block: b(t) = (0, 1, 2t), so the slope variance is time-varying.
+  S3 <- matrix(c(2,    0.3,  0.05,
+                 0.3,  0.5,  0.02,
+                 0.05, 0.02, 0.1), nrow = 3, byrow = TRUE)
+  expect_equal(maihda_slope_var_at_time(S3, 0), 0.5)
+  # at t = 1: S22 + 2*(2*S23) + 4*S33 = 0.5 + 4*0.02 + 4*0.1
+  expect_equal(maihda_slope_var_at_time(S3, 1), 0.5 + 4 * 0.02 + 4 * 0.1)
+})
+
+test_that("internal time centering: helpers and reserved-name guards", {
+  # Centering offset: the minimum finite time; 0 when the axis starts at 0.
+  expect_identical(maihda_longitudinal_center(c(0, 1, 2)), 0)
+  expect_identical(maihda_longitudinal_center(c(10, 11, NA, 14)), 10)
+  expect_identical(maihda_longitudinal_center(c(-2, 0, 2)), -2)
+  expect_identical(maihda_longitudinal_center(numeric(0)), 0)
+
+  # NULL-safe accessors (objects stored by pre-centering package versions).
+  expect_identical(maihda_lng_time_term(list(time = "wave")), "wave")
+  expect_identical(maihda_lng_time_term(list(time = "wave",
+                                             time_term = ".maihda_ctime")),
+                   ".maihda_ctime")
+  expect_identical(maihda_lng_time_center(list(time = "wave")), 0)
+  expect_identical(maihda_lng_time_center(list(time_center = 10)), 10)
+
+  d <- data.frame(pid = rep(1:4, each = 2), wave = rep(10:11, 4), y = rnorm(8),
+                  g = rep(c("a", "b"), 4), h = rep(c("x", "y"), each = 4),
+                  .maihda_ctime = 1)
+  # A fresh user call whose data carries the reserved column is rejected (the
+  # centered fit would overwrite it) ...
+  expect_error(maihda_validate_longitudinal("pid", "wave", 1, d,
+                                            formula = y ~ (1 | g:h)),
+               "reserved")
+  # ... but a package-derived refit -- whose formula already references the
+  # internal column -- passes (the column is the package's own).
+  expect_silent(maihda_validate_longitudinal("pid", "wave", 1, d,
+                                             formula = y ~ .maihda_ctime + (1 | g:h)))
+  # id/time may not use the reserved name.
+  expect_error(maihda_validate_longitudinal("pid", ".maihda_ctime", 1, d),
+               "reserved")
+})
+
+test_that("maihda_longitudinal_formula replaces raw time terms under centering", {
+  f <- maihda_longitudinal_formula(y ~ wave + x + (1 | stratum), id = "pid",
+                                   time = ".maihda_ctime", time_degree = 1,
+                                   orig_time = "wave")
+  labs <- attr(stats::terms(reformulas::nobars(f)), "term.labels")
+  expect_true(".maihda_ctime" %in% labs)
+  expect_false("wave" %in% labs)   # replaced, not kept alongside (collinear)
+  expect_true("x" %in% labs)
+  bars <- vapply(reformulas::findbars(f),
+                 function(b) paste(deparse(b), collapse = ""), character(1))
+  expect_true(any(grepl("maihda_ctime \\| pid", bars)))
+  expect_true(any(grepl("maihda_ctime \\| stratum", bars)))
+})
+
 test_that("maihda_longitudinal_formula builds the 3-level growth structure", {
   f <- maihda_longitudinal_formula(y ~ x + (1 | stratum), id = "pid",
                                    time = "wave", time_degree = 1)
@@ -70,9 +129,16 @@ test_that("longitudinal components table is honest about intercept-vs-baseline a
   tab <- maihda_longitudinal_components_table(Ss, Si, var_resid = 0.7,
                                               time = "wave", id = "pid")
 
-  # The intercept variance is the time-0 quantity, NOT the baseline (ref_time).
+  # The intercept variance is labelled with the coefficient origin (raw time 0
+  # here), NOT called the baseline (ref_time).
   expect_true("Between-stratum: intercept (time = 0)" %in% tab$component)
   expect_false(any(grepl("baseline", tab$component)))
+
+  # Under internal centering the label carries the centering offset instead.
+  tab10 <- maihda_longitudinal_components_table(Ss, Si, var_resid = 0.7,
+                                                time = "wave", id = "pid",
+                                                center = 10)
+  expect_true("Between-stratum: intercept (time = 10)" %in% tab10$component)
 
   # A quadratic block contributes ALL THREE off-diagonal covariances (not just
   # intercept-slope), each carrying the corresponding Sigma cell.
@@ -118,6 +184,20 @@ a_g <- maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
               data = maihda_long_data, id = "id", time = "wave",
               decomposition = "longitudinal")
 
+# Shifted-axis twins of m_g / a_g (waves moved to 10..): exercise the internal
+# time centering, which must reproduce the zero-anchored results exactly -- the
+# centered design is numerically identical to the 0-anchored coding. Before
+# centering, offset-axis fits could silently converge to a false optimum.
+d_shift <- maihda_long_data
+d_shift$wave <- d_shift$wave + 10
+m_s <- suppressMessages(
+  fit_maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
+             data = d_shift, id = "id", time = "wave"))
+a_s <- suppressMessages(
+  maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
+         data = d_shift, id = "id", time = "wave",
+         decomposition = "longitudinal"))
+
 test_that("fit tags the model and builds the growth formula", {
   expect_s3_class(m_g, "maihda_model")
   expect_false(is.null(m_g$longitudinal_info))
@@ -154,6 +234,51 @@ test_that("longitudinal PCV recovers a mostly-additive trajectory split", {
   expect_gt(a$pcv$Sigma_stratum_adjusted[2, 2], 0)
 })
 
+test_that("longitudinal PCV compares ML-refitted variances, not REML", {
+  # The null and adjusted growth models differ in fixed effects (the dimensions'
+  # main effects + dim:time), across which REML between-stratum variances are not
+  # comparable -- the same pitfall calculate_pcv() ML-refits for. The stored fits
+  # (and hence summary()'s time-varying VPC) keep REML; only the PCV comparison
+  # is on the ML scale, and the object records that basis.
+  expect_true(lme4::isREML(a_g$model$model))
+  expect_true(lme4::isREML(a_g$model_adjusted$model))
+  expect_true(isTRUE(a_g$pcv$ml_refit))
+
+  # Recompute the baseline PCV from hand-ML-refitted blocks: must match exactly.
+  null_ml <- a_g$model
+  null_ml$model <- lme4::refitML(a_g$model$model)
+  adj_ml <- a_g$model_adjusted
+  adj_ml$model <- lme4::refitML(a_g$model_adjusted$model)
+  ref_c <- a_g$model$longitudinal_info$ref_time -
+    maihda_lng_time_center(a_g$model$longitudinal_info)
+  vn <- maihda_var_at_time(maihda_re_block(null_ml, "stratum"), ref_c)
+  va <- maihda_var_at_time(maihda_re_block(adj_ml, "stratum"), ref_c)
+  expect_equal(a_g$pcv$var_baseline_null, vn, tolerance = 1e-6)
+  expect_equal(a_g$pcv$var_baseline_adjusted, va, tolerance = 1e-6)
+  expect_equal(a_g$pcv$pcv_intercept, (vn - va) / vn, tolerance = 1e-6)
+
+  # ... and it genuinely differs from the naive REML-block value it replaces.
+  vn_reml <- maihda_var_at_time(maihda_re_block(a_g$model, "stratum"), ref_c)
+  expect_false(isTRUE(all.equal(a_g$pcv$var_baseline_null, vn_reml,
+                                tolerance = 1e-6)))
+
+  # An explicitly ML-fitted pair (REML = FALSE forwarded to both growth fits)
+  # reproduces the same decomposition: the internal refit is a no-op there.
+  a_ml <- suppressMessages(
+    maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
+           data = maihda_long_data, id = "id", time = "wave",
+           decomposition = "longitudinal", REML = FALSE))
+  expect_false(isTRUE(a_ml$pcv$ml_refit))   # nothing needed refitting
+  expect_equal(a_ml$pcv$pcv_intercept, a_g$pcv$pcv_intercept, tolerance = 1e-4)
+  expect_equal(a_ml$pcv$pcv_slope, a_g$pcv$pcv_slope, tolerance = 1e-4)
+
+  # The print method discloses the ML basis when (and only when) a refit ran.
+  expect_output(print(a_g$pcv), "refitted with maximum likelihood")
+  expect_output(print(a_ml$pcv), "mostly additive")
+  expect_false(any(grepl("refitted with maximum likelihood",
+                         capture.output(print(a_ml$pcv)))))
+})
+
 test_that("maihda_interactions refuses a longitudinal analysis or model", {
   # A direct call must NOT fall through to the scalar crossed-dimensions diagnostic:
   # each stratum's interaction is a TRAJECTORY (intercept + slope), so the single
@@ -164,35 +289,66 @@ test_that("maihda_interactions refuses a longitudinal analysis or model", {
   expect_error(maihda_interactions(m_g), "longitudinal MAIHDA")
 })
 
-test_that("longitudinal PCV baseline is the variance at ref_time, not raw time 0", {
-  # Shift time off zero (waves 10..14): the baseline PCV must be the PCV of the
-  # between-stratum variance AT the observed baseline (ref_time = 10), evaluated
-  # via a(t)'Sigma a(t), not the raw time-0 intercept-variance cell Sn[1, 1].
-  d <- maihda_long_data
-  d$wave <- d$wave + 10
-  # Fitting on raw time far from zero stresses lme4's optimizer (the time-0
-  # intercept variance is a far extrapolation); the convergence notice is
-  # immaterial here -- the assertions below are algebraic identities on whatever
-  # covariance block is returned.
-  a <- suppressWarnings(
-    maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
-           data = d, id = "id", time = "wave", decomposition = "longitudinal"))
-  pcv <- a$pcv
-  expect_identical(pcv$ref_time, 10)
+test_that("a shifted time axis reproduces the zero-anchored fit (internal centering)", {
+  # Waves moved to 10..: the growth terms are fit on internally centered time,
+  # so the fit is the SAME optimization problem as the 0-anchored coding. Before
+  # centering, this offset-axis fit silently converged far below the true
+  # optimum (no lme4 warning), corrupting the VPC and the baseline variance.
+  expect_identical(m_s$longitudinal_info$time_term, ".maihda_ctime")
+  expect_equal(m_s$longitudinal_info$time_center, 10)
+  expect_equal(m_s$longitudinal_info$ref_time, 10)
+  expect_equal(as.numeric(logLik(m_s$model)), as.numeric(logLik(m_g$model)),
+               tolerance = 1e-6)
 
-  Sn <- pcv$Sigma_stratum_null
-  Sa <- pcv$Sigma_stratum_adjusted
-  v_base_n <- maihda_var_at_time(Sn, 10)
-  v_base_a <- maihda_var_at_time(Sa, 10)
-  expect_equal(pcv$var_baseline_null, v_base_n)
-  expect_equal(pcv$var_baseline_adjusted, v_base_a)
-  expect_equal(pcv$pcv_intercept, (v_base_n - v_base_a) / v_base_n)
+  s <- summary(m_s); s0 <- summary(m_g)
+  expect_equal(s$longitudinal$time_center, 10)
+  expect_equal(s$vpc$estimate, s0$vpc$estimate, tolerance = 1e-6)
+  # The reporting grid stays on the ORIGINAL axis; the VPC curve matches the
+  # zero-anchored fit's point for point.
+  expect_equal(s$longitudinal$vpc_t$time, s0$longitudinal$vpc_t$time + 10)
+  expect_equal(s$longitudinal$vpc_t$estimate, s0$longitudinal$vpc_t$estimate,
+               tolerance = 1e-6)
+  # The headline VPC anchors at ref_time = 10 on the original axis; recomputed by
+  # hand the covariance blocks are in CENTERED coordinates, so the baseline is
+  # a(0)' Sigma a(0).
+  vt <- s$longitudinal$vpc_t
+  expect_equal(s$vpc$estimate, vt$estimate[vt$time == 10], tolerance = 1e-8)
+  Ss <- s$longitudinal$Sigma_stratum; Si <- s$longitudinal$Sigma_id
+  vr <- s$longitudinal$var_resid
+  vs <- maihda_var_at_time(Ss, 0); vi <- maihda_var_at_time(Si, 0)
+  expect_equal(s$vpc$estimate, vs / (vs + vi + vr), tolerance = 1e-8)
+  # The components table names the coefficient origin (the centering offset).
+  expect_true(any(grepl("intercept \\(time = 10\\)",
+                        s$variance_components$component)))
+  # The stored analytic data carries BOTH the original and the centered column.
+  expect_true(all(c("wave", ".maihda_ctime") %in% names(m_s$data)))
+  expect_equal(m_s$data$wave, m_s$data$.maihda_ctime + 10)
+})
 
-  # It must NOT equal the (meaningless) raw time-0 cell PCV when time is off zero.
-  raw_cell_pcv <- (Sn[1, 1] - Sa[1, 1]) / Sn[1, 1]
-  expect_false(isTRUE(all.equal(pcv$pcv_intercept, raw_cell_pcv)))
+test_that("the longitudinal PCV is invariant to the time anchoring", {
+  pcv <- a_s$pcv
+  expect_equal(pcv$ref_time, 10)
+  expect_equal(pcv$time_center, 10)
 
-  # The print method reports the baseline at ref_time (= 10), not time 0.
+  # Matches the zero-anchored decomposition exactly: pcv_slope is the
+  # instantaneous-slope variance PCV at the baseline (for linear growth the
+  # slope variance is the same at every time), and pcv_intercept the baseline
+  # variance PCV.
+  expect_equal(pcv$pcv_intercept, a_g$pcv$pcv_intercept, tolerance = 1e-6)
+  expect_equal(pcv$pcv_slope, a_g$pcv$pcv_slope, tolerance = 1e-6)
+  expect_equal(pcv$var_baseline_null, a_g$pcv$var_baseline_null, tolerance = 1e-6)
+  expect_equal(pcv$var_slope_null, a_g$pcv$var_slope_null, tolerance = 1e-6)
+  expect_equal(unname(pcv$Sigma_stratum_null), unname(a_g$pcv$Sigma_stratum_null),
+               tolerance = 1e-6)
+
+  # Blocks are in centered coordinates: the baseline is the intercept cell.
+  expect_equal(pcv$var_baseline_null,
+               maihda_var_at_time(pcv$Sigma_stratum_null, 0))
+  # The time-specific PCV grid stays on the original axis.
+  expect_equal(pcv$pcv_t$time, a_g$pcv$pcv_t$time + 10)
+  expect_equal(pcv$pcv_t$pcv, a_g$pcv$pcv_t$pcv, tolerance = 1e-6)
+
+  # The print method reports the baseline on the original axis.
   expect_output(print(pcv), "Baseline \\(wave = 10\\)")
 })
 
@@ -222,18 +378,28 @@ test_that("predict(type = 'strata') returns trajectory parameters", {
   expect_equal(ps$baseline, ps$intercept + ps$slope * ref, tolerance = 1e-8)
 })
 
-test_that("predict(type = 'strata') baseline differs from the raw intercept off zero", {
-  # With waves shifted to 10.., the baseline deviation (at ref_time = 10) is NOT
-  # the raw time-0 intercept -- the column must reflect ref_time, not time 0.
-  d <- maihda_long_data
-  d$wave <- d$wave + 10
-  m <- suppressWarnings(
-    fit_maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
-               data = d, id = "id", time = "wave"))
-  ps <- predict_maihda(m, type = "strata")
-  expect_identical(m$longitudinal_info$ref_time, 10)
-  expect_equal(ps$baseline, ps$intercept + ps$slope * 10, tolerance = 1e-8)
-  expect_false(isTRUE(all.equal(ps$baseline, ps$intercept)))
+test_that("predict(type = 'strata') trajectory parameters are anchoring-invariant", {
+  # With waves shifted to 10.., the coefficients are in centered coordinates
+  # anchored at the baseline: the baseline deviation IS the intercept (deviation
+  # at the centering origin = ref_time), and both match the zero-anchored fit.
+  ps <- predict_maihda(m_s, type = "strata")
+  ps0 <- predict_maihda(m_g, type = "strata")
+  expect_equal(m_s$longitudinal_info$ref_time, 10)
+  expect_equal(ps$baseline, ps$intercept, tolerance = 1e-8)
+  expect_equal(ps$baseline, ps0$baseline, tolerance = 1e-6)
+  expect_equal(ps$slope, ps0$slope, tolerance = 1e-6)
+})
+
+test_that("individual predictions accept newdata on the original time axis", {
+  # Caller newdata carries only the original time column; the centered column is
+  # rebuilt internally, so predictions match those on the fitted rows -- and the
+  # shifted fit predicts the same values as the zero-anchored fit.
+  nd <- m_s$data[1:8, setdiff(names(m_s$data), ".maihda_ctime"), drop = FALSE]
+  p_nd <- predict_maihda(m_s, newdata = nd, type = "individual")
+  p_all <- predict_maihda(m_s, type = "individual")
+  expect_equal(unname(p_nd), unname(p_all[1:8]), tolerance = 1e-8)
+  p0 <- predict_maihda(m_g, type = "individual")
+  expect_equal(unname(p_all), unname(p0), tolerance = 1e-6)
 })
 
 test_that("longitudinal ref_time/time_range come from the fitted frame, not dropped rows", {
@@ -330,7 +496,10 @@ test_that("plot(type = 'all') dispatches the longitudinal trajectory views", {
 })
 
 test_that("bootstrap gives a VPC-trajectory ribbon", {
-  s <- summary(m_g, bootstrap = TRUE, n_boot = 10)
+  # A refit on a simulated draw occasionally trips lme4's convergence-warning
+  # tolerance by a hair (max|grad| marginally over 0.002) -- expected Monte-Carlo
+  # chatter in a 10-draw bootstrap, not the behaviour under test (the ribbon).
+  s <- suppressWarnings(summary(m_g, bootstrap = TRUE, n_boot = 10))
   expect_true(is.finite(s$vpc$ci_lower) && is.finite(s$vpc$ci_upper))
   expect_true(any(is.finite(s$longitudinal$vpc_t$lower)))
 })
@@ -394,6 +563,31 @@ test_that("binomial longitudinal fit gives a latent-scale time-varying VPC", {
   s <- summary(mb)
   expect_false(is.null(s$longitudinal))
   expect_true(all(is.finite(s$longitudinal$vpc_t$estimate)))
+})
+
+test_that("count longitudinal fit evaluates the level-1 variance at time-varying marginal means", {
+  # A Poisson growth model's marginal expected count carries a TIME-VARYING
+  # lognormal correction: lambda_i = exp(x_i'beta + v_i/2) with v_i the stratum
+  # plus individual growth-block variance a(t_i)' Sigma a(t_i) at the row's
+  # time -- not the conditional fitted mean, whose BLUPs the level-1 variance
+  # must not depend on. Recompute v_i independently from the summary's blocks.
+  d <- subset(maihda_long_data, id %in% unique(maihda_long_data$id)[1:150])
+  set.seed(909)
+  d$events <- rpois(nrow(d), lambda = exp(0.6 + 0.15 * d$wave))
+  mp <- suppressWarnings(suppressMessages(
+    fit_maihda(events ~ wave + (1 | gender:ethnicity:education), data = d,
+               id = "id", time = "wave", family = "poisson")))
+  s <- suppressWarnings(summary(mp))
+  expect_false(is.null(s$longitudinal))
+  expect_true(all(is.finite(s$longitudinal$vpc_t$estimate)))
+
+  tv <- mp$data$wave - s$longitudinal$time_center
+  v_rows <- maihda_var_at_time(s$longitudinal$Sigma_stratum, tv) +
+    maihda_var_at_time(s$longitudinal$Sigma_id, tv)
+  eta <- as.numeric(stats::predict(mp$model, re.form = NA, type = "link"))
+  lambda <- pmax(exp(eta + v_rows / 2), .Machine$double.eps)
+  expect_equal(s$longitudinal$var_resid, mean(log1p(1 / lambda)),
+               tolerance = 1e-8)
 })
 
 # ---- edge cases: higher time_degree, singular fits, explicit-times PCV ------
@@ -483,23 +677,24 @@ test_that("a VPC-trajectory bootstrap survives singular bootstrap refits", {
   expect_lte(s$vpc$ci_lower, s$vpc$ci_upper)
 })
 
-test_that("longitudinal summary anchors the headline VPC at a nonzero ref_time", {
-  # Waves shifted to 10..14: the headline VPC must be VPC(ref_time = 10), i.e.
-  # the partition of a(10)' Sigma a(10) -- NOT the raw time-0 value.
-  d <- maihda_long_data
-  d$wave <- d$wave + 10
-  m <- suppressWarnings(suppressMessages(
-    fit_maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
-               data = d, id = "id", time = "wave")))
-  s <- summary(m)
-  expect_identical(s$longitudinal$ref_time, 10)
-  vt <- s$longitudinal$vpc_t
-  expect_equal(s$vpc$estimate, vt$estimate[vt$time == 10], tolerance = 1e-8)
-  # equals the partition recomputed by hand at ref_time = 10
-  Ss <- s$longitudinal$Sigma_stratum; Si <- s$longitudinal$Sigma_id
-  vr <- s$longitudinal$var_resid
-  vs <- maihda_var_at_time(Ss, 10); vi <- maihda_var_at_time(Si, 10)
-  expect_equal(s$vpc$estimate, vs / (vs + vi + vr), tolerance = 1e-8)
+test_that("quadratic growth is anchoring-invariant (regression: silent false convergence)", {
+  # THE original defect: before internal centering, a quadratic growth fit on an
+  # offset time axis (waves 10..) silently converged ~128 log-likelihood units
+  # below the true optimum WITHOUT any lme4 convergence warning, reporting a
+  # baseline between-stratum variance orders of magnitude off; and pcv_slope
+  # read the raw Sigma[2,2] cell -- the slope variance at raw time 0, an
+  # extrapolation that is NOT invariant to the time coding for degree >= 2.
+  a_qs <- suppressWarnings(suppressMessages(
+    maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
+           data = d_shift, id = "id", time = "wave",
+           time_degree = 2, decomposition = "longitudinal")))
+  expect_equal(as.numeric(logLik(a_qs$model$model)),
+               as.numeric(logLik(a_q$model$model)), tolerance = 1e-6)
+  expect_equal(a_qs$pcv$pcv_intercept, a_q$pcv$pcv_intercept, tolerance = 1e-5)
+  expect_equal(a_qs$pcv$pcv_slope, a_q$pcv$pcv_slope, tolerance = 1e-5)
+  expect_equal(a_qs$pcv$var_baseline_null, a_q$pcv$var_baseline_null,
+               tolerance = 1e-5)
+  expect_equal(a_qs$pcv$var_slope_null, a_q$pcv$var_slope_null, tolerance = 1e-5)
 })
 
 test_that("maihda_longitudinal_pcv honours an explicit times grid", {
@@ -540,7 +735,7 @@ test_that("scalar between-variance helpers reject a longitudinal model", {
   expect_error(extract_between_variance(m_g), "time-varying")
   m2 <- fit_maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
                    data = maihda_long_data, id = "id", time = "wave")
-  expect_error(calculate_pvc(m_g, m2), "time-varying")
+  expect_error(calculate_pcv(m_g, m2), "time-varying")
 })
 
 test_that("a non-longitudinal random slope is still rejected by summary", {

@@ -81,10 +81,10 @@ summary(model_null)
 model_cov <- fit_maihda(BMI ~ Age + Poverty + (1 | Gender:Race:Education),
                         data = health_complete)
 
-calculate_pvc(model_null, model_cov)
+calculate_pcv(model_null, model_cov)
 
 ## ----bb-pcv-boot, eval=FALSE--------------------------------------------------
-# calculate_pvc(model_null, model_cov, bootstrap = TRUE, n_boot = 500)
+# calculate_pcv(model_null, model_cov, bootstrap = TRUE, n_boot = 500)
 
 ## ----bb-stepwise--------------------------------------------------------------
 stepwise_results <- stepwise_pcv(

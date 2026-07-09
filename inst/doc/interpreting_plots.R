@@ -18,11 +18,6 @@ model <- maihda(
   BMI ~ Age + Gender + Race + Education + (1 | Gender:Race:Education),
   data = health_complete
 )
-# or equivalently with the helper:
-# model <- fit_maihda(
-#   BMI ~ Age + Gender + Race + Education + (1 | Gender:Race:Education),
-#   data = health_complete
-# )
 
 ## ----vpc----------------------------------------------------------------------
 plot(model, type = "vpc")

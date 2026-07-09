@@ -43,7 +43,9 @@ variable, if used).}
 is run and attached to the result. \code{group} runs a \emph{stratified}
 analysis (one independent model per level); to instead model a higher level
 \emph{jointly}, crossed with the strata, use \code{context}. The two are
-different designs, so supplying both errors.}
+different designs but they \emph{compose}: supplying both runs the stratified
+comparison where each per-group fit is itself a contextual cross-classified
+model (see \code{context}).}
 
 \item{context}{Optional character vector naming higher-level \emph{context}
 column(s) in \code{data} (e.g. \code{"school"}, \code{"hospital"},
@@ -55,8 +57,13 @@ then partition the unexplained variance into between-stratum vs.
 between-context vs. residual, the headline VPC/ICC becomes the between-stratum
 share \emph{net of} the context, and the PCV decomposition is computed with the
 context partialled out (the context random intercept is carried by both the
-null and the adjusted model). Cannot be combined with \code{group}; a context
-with few levels weakly identifies its variance (consider \code{engine = "brms"}).}
+null and the adjusted model). May be combined with \code{group}: the
+stratified comparison then fits a contextual cross-classified model within
+each group and reports each group's stratum-vs-context partition (a per-group
+subset shrinks the context level count, so weak identification is warned about
+per group). Not available for the \code{wemix}/\code{ordinal} engines (they
+fit no crossed random effect); a context with few levels weakly identifies its
+variance (consider \code{engine = "brms"}).}
 
 \item{engine}{Modeling engine, "lme4" (default), "brms", "wemix" (the
 design-weighted pseudo-maximum-likelihood fit; requires
@@ -97,7 +104,12 @@ dimensions' main effects \emph{and their interactions with time}
 (\code{dim:time}). The between-stratum variance is then time-varying and the
 PCV is reported separately for the baseline (intercept) and the slope variance
 -- the additive-vs-multiplicative split of the intersectional trajectory
-inequality (Bell, Evans, Holman & Leckie 2024). See \code{\link{fit_maihda}}.}
+inequality (Bell, Evans, Holman & Leckie 2024). As with the two-model PCV,
+REML \code{lmer} growth fits are refitted with maximum likelihood before the
+null-vs-adjusted variance comparison (REML variances are not comparable
+across different fixed effects; see \code{\link{calculate_pcv}}), while the
+reported time-varying VPC keeps each fit's own (REML) estimate.
+See \code{\link{fit_maihda}}.}
 
 \item{autobin}{Logical passed to \code{\link{make_strata}}; tertile-bins numeric
 grouping variables. Default TRUE.}
@@ -167,10 +179,12 @@ An object of class \code{maihda_analysis}: a list with
   \item{model_adjusted}{the fitted \strong{adjusted} \code{maihda_model}
     (\code{"two-model"} and \code{"longitudinal"} modes; \code{NULL} otherwise)}
   \item{summary_adjusted}{the adjusted model's \code{maihda_summary}, or \code{NULL}}
-  \item{pcv}{the proportional change in variance: the \code{pvc_result} from
-    \code{\link{calculate_pvc}} in \code{"two-model"} mode, or a
+  \item{pcv}{the proportional change in variance: the \code{pcv_result} from
+    \code{\link{calculate_pcv}} in \code{"two-model"} mode, or a
     \code{maihda_long_pcv} (the intercept/slope and time-specific PCV) in
-    \code{"longitudinal"} mode; \code{NULL} otherwise}
+    \code{"longitudinal"} mode; \code{NULL} otherwise. Both are computed on
+    the maximum-likelihood scale (REML \code{lmer} fits are ML-refitted for
+    the comparison; see \code{\link{calculate_pcv}})}
   \item{decomposition}{the additive/interaction partition (additive and interaction
     variances and shares, per-dimension variances; \code{"crossed-dimensions"} mode
     only, \code{NULL} otherwise)}
@@ -204,7 +218,7 @@ VPC as well. These are read from \code{summary(x)} and the attached
 \code{summary_adjusted}, and the headline \code{print()} shows the null-model AUC.
 
 This is a convenience wrapper around \code{\link{fit_maihda}},
-\code{\link{calculate_pvc}}, \code{\link{summary.maihda_model}} and
+\code{\link{calculate_pcv}}, \code{\link{summary.maihda_model}} and
 \code{\link{compare_maihda_groups}}. It is \emph{intrinsically} a two-model
 decomposition and has no single-model mode -- for a single fit (e.g. just the
 null-model VPC / discriminatory accuracy), call \code{\link{fit_maihda}} directly.
@@ -234,6 +248,22 @@ dimensions cannot be recovered (a hand-built \code{stratum} column records none)
 there is only one dimension (no intersection to decompose). Use \code{\link{fit_maihda}}
 for those single-model fits.
 }
+\section{Numeric stratum dimensions}{
+
+The stratum-defining dimensions are categorical. A factor or character dimension
+enters the adjusted model as a categorical main effect, and a numeric dimension with
+more than 10 unique values is tertile-binned when \code{autobin = TRUE} (see
+\code{\link{make_strata}}). A numeric dimension that is \emph{not} auto-binned -- a
+category code such as \code{education = 1, 2, 3} (few unique values), or a many-valued
+numeric fitted with \code{autobin = FALSE} -- enters the adjusted model as a single
+\emph{linear} fixed effect rather than categorical main effects, which changes the
+PCV/decomposition interpretation. \code{maihda()} therefore \strong{warns} in that
+case (for three or more distinct values -- a binary numeric dimension is exempt, since
+with two levels a linear term and a factor are equivalent): wrap category codes in
+\code{factor()} before fitting, or, for a genuinely continuous variable, use it as a
+covariate rather than a stratum dimension.
+}
+
 \examples{
 \donttest{
 data(maihda_health_data)

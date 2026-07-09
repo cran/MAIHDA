@@ -47,7 +47,7 @@ test_that("the formula builders quote non-syntactic dimension names safely", {
   a2 <- suppressMessages(suppressWarnings(maihda(y ~ (1 | `gender var`:race), data = d)))
   expect_match(paste(deparse(a2$adjusted_formula), collapse = " "), "`gender var`",
                fixed = TRUE)
-  expect_true(is.finite(a2$pcv$pvc))
+  expect_true(is.finite(a2$pcv$pcv))
 
   # Crossed-dimensions path strips the explicit main effects via remove_terms().
   a3 <- suppressMessages(suppressWarnings(
@@ -117,14 +117,76 @@ test_that("plot.maihda_analysis dispatches to model and group plots", {
   expect_error(plot(a_nogroup, type = "group_vpc"), "group", ignore.case = TRUE)
 })
 
+test_that("plot(type = 'vpc') honours model = null / adjusted / both", {
+  d <- make_workflow_data(4006)
+  a <- suppressMessages(maihda(y ~ age + (1 | gender:race), data = d))
+  expect_true(is.finite(a$pcv$pcv))
+
+  # Default: the null-model VPC (backward compatible), now labelled "Null model";
+  # the title carries the null model's VPC/ICC value.
+  p_null <- plot(a, type = "vpc")
+  expect_s3_class(p_null, "ggplot")
+  expect_false(inherits(p_null, "patchwork"))
+  expect_identical(p_null$labels$subtitle, "Null model")
+  expect_true(grepl(sprintf("%.3f", a$summary$vpc$estimate), p_null$labels$title))
+
+  # Adjusted-model VPC: drawn from the adjusted summary (its distinct VPC/ICC value)
+  # and labelled "Adjusted model".
+  p_adj <- plot(a, type = "vpc", model = "adjusted")
+  expect_s3_class(p_adj, "ggplot")
+  expect_identical(p_adj$labels$subtitle, "Adjusted model")
+  expect_true(grepl(sprintf("%.3f", a$summary_adjusted$vpc$estimate), p_adj$labels$title))
+
+  # both: ONE change plot (a single ggplot, not a patchwork or a list) holding both
+  # models, with the PCV in the subtitle.
+  p_both <- plot(a, type = "vpc", model = "both")
+  expect_s3_class(p_both, "ggplot")
+  expect_false(inherits(p_both, "patchwork"))
+  expect_setequal(as.character(unique(p_both$data$model)),
+                  c("Null model", "Adjusted model"))
+  expect_match(p_both$labels$subtitle, "PCV")
+
+  # `model` applies to the VPC view only.
+  expect_error(plot(a, type = "predicted", model = "adjusted"), "vpc")
+})
+
+test_that("plot(type = 'vpc', model = ) on a crossed-dimensions analysis", {
+  set.seed(4211)
+  n <- 900
+  d <- data.frame(
+    a = sample(c("a1", "a2", "a3"), n, replace = TRUE),
+    b = sample(c("b1", "b2", "b3"), n, replace = TRUE),
+    x = rnorm(n),
+    stringsAsFactors = FALSE
+  )
+  sk <- interaction(d$a, d$b, drop = TRUE)
+  d$y <- 1 + 0.3 * d$x +
+    stats::setNames(rnorm(3, sd = 0.8), c("a1", "a2", "a3"))[d$a] +
+    stats::setNames(rnorm(3, sd = 0.6), c("b1", "b2", "b3"))[d$b] +
+    rnorm(nlevels(sk), sd = 0.7)[sk] + rnorm(n, sd = 1)
+  cc <- suppressWarnings(suppressMessages(
+    maihda(y ~ x + (1 | a:b), data = d, decomposition = "crossed-dimensions")))
+  expect_identical(cc$mode, "crossed-dimensions")
+  expect_null(cc$model_adjusted)
+
+  # A single crossed-dimensions model: model = "null" draws it (no misleading label).
+  p <- plot(cc, type = "vpc")
+  expect_s3_class(p, "ggplot")
+  expect_null(p$labels$subtitle)
+
+  # No null/adjusted pair to compare -> "adjusted"/"both" error with a clear message.
+  expect_error(plot(cc, type = "vpc", model = "adjusted"), "crossed-dimensions")
+  expect_error(plot(cc, type = "vpc", model = "both"), "crossed-dimensions")
+})
+
 test_that("maihda() fits the adjusted model and reports a PCV", {
   d <- make_workflow_data(4101)
   a <- suppressMessages(maihda(y ~ age + (1 | gender:race), data = d))
 
   expect_s3_class(a$model_adjusted, "maihda_model")
   expect_s3_class(a$summary_adjusted, "maihda_summary")
-  expect_s3_class(a$pcv, "pvc_result")
-  expect_true(is.finite(a$pcv$pvc))
+  expect_s3_class(a$pcv, "pcv_result")
+  expect_true(is.finite(a$pcv$pcv))
 
   # Adjusted formula = null formula + the dimensions' additive main effects;
   # the null model carries NO dimension main effects.
@@ -133,9 +195,9 @@ test_that("maihda() fits the adjusted model and reports a PCV", {
   expect_true(all(c("gender", "race") %in% adj_terms))
   expect_false(any(c("gender", "race") %in% null_terms))
 
-  # PCV matches a manual calculate_pvc() on the two fitted models
-  manual <- calculate_pvc(a$model, a$model_adjusted)
-  expect_equal(a$pcv$pvc, manual$pvc, tolerance = 1e-8)
+  # PCV matches a manual calculate_pcv() on the two fitted models
+  manual <- calculate_pcv(a$model, a$model_adjusted)
+  expect_equal(a$pcv$pcv, manual$pcv, tolerance = 1e-8)
 })
 
 test_that("maihda() print and summary surface the PCV and adjusted model", {
@@ -146,7 +208,7 @@ test_that("maihda() print and summary surface the PCV and adjusted model", {
   expect_output(print(a), "Adjusted formula")
 
   s <- summary(a)
-  expect_s3_class(attr(s, "pcv"), "pvc_result")
+  expect_s3_class(attr(s, "pcv"), "pcv_result")
   expect_s3_class(attr(s, "adjusted"), "maihda_summary")
 })
 
@@ -168,7 +230,65 @@ test_that("maihda() enters an auto-binned numeric dimension as the tertile facto
   binned <- a$model_adjusted$original_data[[".maihda_dim_ses"]]
   expect_s3_class(binned, "factor")
   expect_equal(nlevels(binned), 3L)
-  expect_true(is.finite(a$pcv$pvc))
+  expect_true(is.finite(a$pcv$pcv))
+})
+
+test_that("maihda() warns when a numeric coded stratum dimension enters as a linear term", {
+  set.seed(4105)
+  n <- 400
+  d <- data.frame(
+    gender = sample(c("F", "M"), n, TRUE),
+    edu = sample(1:3, n, TRUE)          # numeric category code: 3 unique values (<= 10)
+  )
+  sk <- interaction(d$gender, d$edu, drop = TRUE)
+  d$y <- 1 + rnorm(nlevels(sk), sd = 0.7)[sk] + rnorm(n, sd = 0.4)
+
+  w <- capture_warnings(a <- suppressMessages(maihda(y ~ 1 + (1 | gender:edu), data = d)))
+  expect_match(w, "linear fixed effect", all = FALSE)
+
+  # Warn-only: the dimension still enters as its raw (linear) numeric column, NOT a
+  # reconstructed factor -- the model is unchanged, only no longer silent.
+  adj_terms <- attr(stats::terms(reformulas::nobars(a$adjusted_formula)), "term.labels")
+  expect_true("edu" %in% adj_terms)
+  expect_false(".maihda_dim_edu" %in% adj_terms)
+  expect_true(is.numeric(a$model_adjusted$original_data$edu))
+})
+
+test_that("maihda() does not warn once a coded dimension is wrapped in factor()", {
+  set.seed(4105)
+  n <- 400
+  d <- data.frame(
+    gender = sample(c("F", "M"), n, TRUE),
+    edu = sample(1:3, n, TRUE)
+  )
+  sk <- interaction(d$gender, d$edu, drop = TRUE)
+  d$y <- 1 + rnorm(nlevels(sk), sd = 0.7)[sk] + rnorm(n, sd = 0.4)
+  d$edu <- factor(d$edu)                # the documented fix
+
+  w <- capture_warnings(a <- suppressMessages(maihda(y ~ 1 + (1 | gender:edu), data = d)))
+  expect_false(any(grepl("linear fixed effect", w)))
+  # The factor enters the adjusted model categorically (one term, factor levels).
+  adj_terms <- attr(stats::terms(reformulas::nobars(a$adjusted_formula)), "term.labels")
+  expect_true("edu" %in% adj_terms)
+  expect_true(is.factor(a$model_adjusted$original_data$edu))
+})
+
+test_that("maihda() warns for a many-valued numeric dimension with autobin = FALSE", {
+  set.seed(4106)
+  n <- 500
+  d <- data.frame(
+    gender = sample(c("F", "M"), n, TRUE),
+    score = sample(11:22, n, TRUE)      # 12 unique values (> 10), not binned when autobin = FALSE
+  )
+  sk <- interaction(d$gender, d$score, drop = TRUE)
+  d$y <- 1 + rnorm(nlevels(sk), sd = 0.6)[sk] + rnorm(n, sd = 0.4)
+
+  w <- capture_warnings(
+    a <- suppressMessages(maihda(y ~ 1 + (1 | gender:score), data = d, autobin = FALSE))
+  )
+  expect_match(w, "linear fixed effect", all = FALSE)
+  adj_terms <- attr(stats::terms(reformulas::nobars(a$adjusted_formula)), "term.labels")
+  expect_true("score" %in% adj_terms)
 })
 
 test_that("maihda() errors with a single stratum dimension (no intersection)", {
@@ -233,11 +353,11 @@ test_that("maihda() accepts the dimensions' main effects in the formula (no PCV-
   adj_terms  <- attr(stats::terms(reformulas::nobars(b$adjusted_formula)), "term.labels")
   expect_false(any(c("gender", "race") %in% null_terms))   # null excludes the dimensions
   expect_true(all(c("gender", "race") %in% adj_terms))      # adjusted includes them
-  expect_true(is.finite(b$pcv$pvc) && b$pcv$pvc != 0)
+  expect_true(is.finite(b$pcv$pcv) && b$pcv$pcv != 0)
 
   # Equivalent to omitting the main effects (the legacy form): identical null VPC + PCV.
   a <- suppressMessages(maihda(y ~ age + (1 | gender:race), data = d))
-  expect_equal(b$pcv$pvc, a$pcv$pvc, tolerance = 1e-8)
+  expect_equal(b$pcv$pcv, a$pcv$pcv, tolerance = 1e-8)
   expect_equal(b$summary$vpc$estimate, a$summary$vpc$estimate, tolerance = 1e-8)
 })
 
@@ -267,7 +387,7 @@ test_that("maihda() rejects a fixed interaction among the stratum dimensions", {
   )
   # The additive form is unaffected (no false positive).
   a <- suppressMessages(maihda(y ~ age + gender + race + (1 | gender:race), data = d))
-  expect_true(is.finite(a$pcv$pvc))
+  expect_true(is.finite(a$pcv$pcv))
 })
 
 test_that("maihda_dimension_interaction_terms() flags only dimension-only interactions", {

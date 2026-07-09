@@ -377,7 +377,7 @@ test_that("maihda_mor returns the median cumulative odds ratio for a logit fit",
 
 # ---- PCV / workflows -----------------------------------------------------------
 
-test_that("calculate_pvc and maihda() run the two-model ordinal decomposition", {
+test_that("calculate_pcv and maihda() run the two-model ordinal decomposition", {
   skip_on_cran()
   skip_if_not_installed("ordinal")
 
@@ -388,21 +388,23 @@ test_that("calculate_pvc and maihda() run the two-model ordinal decomposition", 
   ))
   expect_s3_class(a, "maihda_analysis")
   expect_identical(a$model$engine, "ordinal")
-  expect_true(is.finite(a$pcv$pvc))
+  expect_true(is.finite(a$pcv$pcv))
   expect_output(print(a), "cumulative")
 
-  # The standalone PVC over the pair agrees and the bootstrap is rejected.
-  pcv <- calculate_pvc(a$model, a$model_adjusted)
-  expect_equal(pcv$pvc, a$pcv$pvc)
+  # The standalone PCV over the pair agrees and the bootstrap is rejected with
+  # the honest point-estimate guidance (not an engine-switch suggestion: no
+  # engine computes a PCV interval).
+  pcv <- calculate_pcv(a$model, a$model_adjusted)
+  expect_equal(pcv$pcv, a$pcv$pcv)
   expect_error(
-    calculate_pvc(a$model, a$model_adjusted, bootstrap = TRUE, n_boot = 10),
-    "engine = \"brms\""
+    calculate_pcv(a$model, a$model_adjusted, bootstrap = TRUE, n_boot = 10),
+    "point estimate"
   )
 
   # All-defaults path: the ordered factor selects the ordinal model end-to-end.
   a2 <- suppressMessages(suppressWarnings(maihda(y ~ x + (1 | gender:race), data = d)))
   expect_identical(a2$model$engine, "ordinal")
-  expect_true(is.finite(a2$pcv$pvc))
+  expect_true(is.finite(a2$pcv$pcv))
 
   expect_error(
     suppressMessages(maihda(y ~ x + (1 | gender:race), data = d,
@@ -529,10 +531,17 @@ test_that("brms cumulative stratum predictions are expected category scores (Sta
 
   # posterior_linpred(re_formula = NA) returns the location mu; fixef() carries
   # the thresholds as Intercept[1], Intercept[2] PLUS a location predictor row
-  # 'x' that the threshold extractor must ignore.
+  # 'x' that the threshold extractor must ignore. The mock returns what real
+  # brms returns: the ndraws x nobs DRAWS matrix (no dimnames, no summary
+  # columns; a summary= argument is ignored), which the package collapses via
+  # maihda_brms_linpred_mean(). Symmetric +/- 0.05 jitter keeps the posterior
+  # mean exactly eta_fixed while failing any non-averaging read of the matrix.
   local_mocked_bindings(
     posterior_linpred = function(object, ...) {
-      matrix(eta_fixed, ncol = 1, dimnames = list(NULL, "Estimate"))
+      rbind(
+        matrix(rep(eta_fixed + 0.05, each = 20), nrow = 20),
+        matrix(rep(eta_fixed - 0.05, each = 20), nrow = 20)
+      )
     },
     fixef = function(object, ...) {
       matrix(c(thresholds, 0.4), ncol = 1,
@@ -612,4 +621,11 @@ test_that("brms cumulative summary returns a draws-based latent VPC", {
   # expected category score.
   sc <- predict_maihda(m, type = "individual", scale = "response")
   expect_true(all(sc >= 1 & sc <= 4))
+
+  # A SINGLE prediction row must work too: the fitted() array's Estimate slice
+  # drops to a bare vector for one row, which used to error (ncol() = NULL).
+  sc1 <- predict_maihda(m, newdata = d[1, , drop = FALSE],
+                        type = "individual", scale = "response")
+  expect_length(sc1, 1L)
+  expect_true(sc1 >= 1 && sc1 <= 4)
 })

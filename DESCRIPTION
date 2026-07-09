@@ -2,7 +2,7 @@ Package: MAIHDA
 Type: Package
 Title: Multilevel Analysis of Individual Heterogeneity and
         Discriminatory Accuracy
-Version: 0.2.0
+Version: 0.2.1
 Authors@R: c(
     person("Hamid", "Bulut", email = "me@hamidbulut.com", role = c("aut", "cre"))
     )
@@ -29,8 +29,8 @@ URL: https://github.com/hdbt/MAIHDA, https://hdbt.github.io/MAIHDA/
 BugReports: https://github.com/hdbt/MAIHDA/issues
 RoxygenNote: 7.3.3
 NeedsCompilation: no
-Packaged: 2026-07-02 07:01:30 UTC; hamid
+Packaged: 2026-07-09 20:01:17 UTC; hamid
 Author: Hamid Bulut [aut, cre]
 Maintainer: Hamid Bulut <me@hamidbulut.com>
 Repository: CRAN
-Date/Publication: 2026-07-02 08:00:02 UTC
+Date/Publication: 2026-07-09 21:00:08 UTC

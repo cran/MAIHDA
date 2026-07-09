@@ -1,4 +1,4 @@
-# Internal helpers shared across model summaries, PVC, predictions, and plots.
+# Internal helpers shared across model summaries, PCV, predictions, and plots.
 
 # Map engine-specific family labels onto the package's canonical names so every
 # downstream `fam$family ==` / `%in%` comparison sees one spelling per family.
@@ -737,7 +737,7 @@ maihda_nobs <- function(model) {
 # Content fingerprint of a model's analytic response vector. Two models fitted to
 # the same data share a fingerprint even if the rows were reordered or carry
 # default 1:n names; models fitted to unrelated data do not. Used to catch
-# comparisons/PVC across different datasets that happen to share n, row names and
+# comparisons/PCV across different datasets that happen to share n, row names and
 # stratum ids.
 maihda_response_fingerprint <- function(model) {
   frame <- maihda_model_frame(model)
@@ -756,7 +756,7 @@ maihda_response_fingerprint <- function(model) {
   }
 }
 
-# Fingerprint of a model's prior weights, so PVC / model comparisons do not
+# Fingerprint of a model's prior weights, so PCV / model comparisons do not
 # silently combine fits that share an outcome, sample and strata but used DIFFERENT
 # prior weights (which change the variance estimates). An unweighted fit and an
 # explicit weights = rep(1, n) fit both map to "unit", so they compare as equal;
@@ -787,7 +787,7 @@ maihda_row_ids <- function(model) {
 # object's model frame, which is undefined for some engines -- notably
 # WeMixResults, whose stats::nobs()/model.frame() are not implemented. These
 # wrapper-level companions take the maihda_model and fall back to its stored
-# analytic $data (the exact rows the engine fit) so the PVC and model-comparison
+# analytic $data (the exact rows the engine fit) so the PCV and model-comparison
 # sample-identity checks are NOT silently skipped for those engines (two WeMix
 # fits with the same formula/n/strata but different outcome values must still be
 # distinguished).
@@ -987,7 +987,7 @@ maihda_stratum_variance_brms <- function(model, group = "stratum") {
 
   # Posterior-mean between-stratum variance E[sd^2] from the SD draws. Using the
   # draws (rather than the posterior summary SD squared, E[sd]^2) keeps
-  # calculate_pvc()/stepwise_pcv() consistent with the draws-based VPC reported by
+  # calculate_pcv()/stepwise_pcv() consistent with the draws-based VPC reported by
   # summary.maihda_model(). Falls back to the summary SD if draws are unavailable.
   draws <- tryCatch(maihda_posterior_draws_brms(model), error = function(e) NULL)
   if (!is.null(draws)) {
@@ -1505,7 +1505,7 @@ maihda_fit_prior_weights <- function(model) {
 
 # Mean of a per-observation latent-scale quantity, weighted by prior weights when
 # present. The count-family (Poisson/negative-binomial) level-1 VPC averages a
-# per-row latent variance log1p(1/mu + ...); with frequency weights w_i that average
+# per-row latent variance log1p(1/lambda + ...); with frequency weights w_i that average
 # must be sum(w_i v_i) / sum(w_i) so a weighted fit reproduces the plain mean over the
 # equivalent duplicated-row data. Reduces to mean(v, na.rm = TRUE) when weights are
 # absent, length-mismatched, or all 1.
@@ -1545,6 +1545,186 @@ maihda_negbin_theta_lme4 <- function(model) {
        call. = FALSE)
 }
 
+# ---- marginal (population-averaged) count mean for the latent-scale VPC -----
+# The count-family level-1 variances below -- Stryhn et al. (2006)
+# log1p(1/lambda) for Poisson, Nakagawa, Johnson & Schielzeth (2017)
+# log1p(1/lambda + 1/theta) for the negative binomial -- are defined at the
+# MARGINAL expectation of the response, lambda_i = E[y_i] =
+# exp(x_i'beta + v_i/2), with v_i the row's total latent random-effect variance
+# (the log-normal mean correction), NOT at the conditional fitted mean
+# exp(x_i'beta + u_hat) that stats::fitted() returns: the BLUPs would make the
+# level-1 variance depend on the realized (and shrunken) random effects, which
+# none of the cited references do. For the canonical null model every row's
+# lambda is exactly Nakagawa's plug-in exp(beta0 + sigma^2/2); with covariates
+# the per-row lambda_i extends it Austin-et-al.-style across the sample, and the
+# callers average the per-row terms (prior-weighted where applicable).
+
+# Per-observation latent-scale random-effect variance: sum over every
+# random-effect term of z_i' Sigma_g z_i, where z_i is the row's RE design
+# vector for that term and Sigma_g the term's covariance block. For the
+# canonical intercept-only MAIHDA structures this is the constant sum of the
+# intercept variances; for a longitudinal growth model it varies with the row's
+# time value (z_i = (1, t_i, ...)). `bars` are reformulas::findbars() terms and
+# `blocks` a parallel list of covariance blocks whose dimnames carry the design
+# column names ("(Intercept)", the time term, ...). Pure (no fit object), so it
+# serves lme4 and brms alike and is unit-testable Stan-free.
+maihda_latent_re_variance_rows <- function(bars, blocks, data) {
+  v <- numeric(nrow(data))
+  for (k in seq_along(bars)) {
+    Sg <- as.matrix(blocks[[k]])
+    lhs_txt <- paste(deparse(bars[[k]][[2]]), collapse = " ")
+    X <- stats::model.matrix(stats::as.formula(paste("~", lhs_txt)), data = data)
+    if (nrow(X) != nrow(data)) {
+      stop("Could not build the random-effect design rows for the marginal ",
+           "count mean (rows were dropped).", call. = FALSE)
+    }
+    want <- rownames(Sg)
+    idx <- match(want, colnames(X))
+    if (anyNA(idx)) {
+      stop("Could not align the random-effect design column(s) ",
+           paste(want[is.na(idx)], collapse = ", "),
+           " for the marginal count mean.", call. = FALSE)
+    }
+    Xk <- X[, idx, drop = FALSE]
+    v <- v + unname(rowSums((Xk %*% Sg) * Xk))
+  }
+  v
+}
+
+# The grouping-factor name of a random-effect bar term, as VarCorr()/brms name
+# it (no backticks around a non-syntactic column).
+maihda_bar_group_name <- function(bar) {
+  g <- bar[[3]]
+  if (is.name(g)) as.character(g) else paste(deparse(g), collapse = " ")
+}
+
+# Marginal count mean lambda_i = exp(x_i'beta + v_i/2) of an lme4 count fit
+# (see the section header). eta is the fixed-part linear predictor (offset
+# included); v_i comes from the VarCorr blocks over the fitted model frame, so
+# growth-model random slopes contribute their time-varying share.
+maihda_count_marginal_mu_lme4 <- function(model) {
+  eta <- as.numeric(stats::predict(model, re.form = NA, type = "link"))
+  bars <- reformulas::findbars(stats::formula(model))
+  if (is.null(bars) || length(bars) == 0) {
+    stop("Could not read the random-effect terms off the lme4 formula for the ",
+         "marginal count mean.", call. = FALSE)
+  }
+  vc <- lme4::VarCorr(model)
+  blocks <- lapply(bars, function(b) {
+    blk <- vc[[maihda_bar_group_name(b)]]
+    if (is.null(blk)) {
+      stop("No '", maihda_bar_group_name(b), "' variance block found for the ",
+           "marginal count mean.", call. = FALSE)
+    }
+    blk
+  })
+  v <- maihda_latent_re_variance_rows(bars, blocks, maihda_model_frame(model))
+  pmax(exp(eta + v / 2), .Machine$double.eps)
+}
+
+# Posterior-mean covariance block of a brms random-effect term, keyed by the
+# DESIGN column names ("(Intercept)", the slope column, ...) so it aligns with
+# maihda_latent_re_variance_rows(). Diagonals are E[sd^2]; off-diagonals
+# E[cor * sd_i * sd_j] (brms orders cor_<g>__<a>__<b> by parameter order, so
+# both orders are tried). Pure function of the draws, unit-testable Stan-free.
+maihda_brms_re_block_mean <- function(draws, group, design_names) {
+  to_par <- function(nm) if (identical(nm, "(Intercept)")) "Intercept" else nm
+  k <- length(design_names)
+  sds <- lapply(design_names, function(nm) {
+    col <- paste0("sd_", group, "__", to_par(nm))
+    if (!col %in% names(draws)) {
+      stop("No 'sd_", group, "__", to_par(nm), "' draws found in the brms ",
+           "posterior for the marginal count mean.", call. = FALSE)
+    }
+    as.numeric(draws[[col]])
+  })
+  S <- matrix(0, k, k, dimnames = list(design_names, design_names))
+  for (i in seq_len(k)) {
+    S[i, i] <- mean(sds[[i]]^2)
+    for (j in seq_len(i - 1L)) {
+      c1 <- paste0("cor_", group, "__", to_par(design_names[j]), "__",
+                   to_par(design_names[i]))
+      c2 <- paste0("cor_", group, "__", to_par(design_names[i]), "__",
+                   to_par(design_names[j]))
+      rho <- if (c1 %in% names(draws)) {
+        as.numeric(draws[[c1]])
+      } else if (c2 %in% names(draws)) {
+        as.numeric(draws[[c2]])
+      } else {
+        0
+      }
+      S[i, j] <- S[j, i] <- mean(rho * sds[[i]] * sds[[j]])
+    }
+  }
+  S
+}
+
+# Posterior-mean linear predictor of a brms fit, one value per prediction row.
+# brms's posterior_linpred() returns the ndraws x nobs DRAWS matrix and has no
+# summary argument: a `summary = TRUE` passed by the caller is silently
+# swallowed by prepare_predictions() (brms hard-codes summary = FALSE in its
+# internal posterior_epred() call), so the historical
+# posterior_linpred(..., summary = TRUE)[, "Estimate"] idiom fails on the
+# unnamed draws matrix ("no 'dimnames' attribute"). Collapse the draws to their
+# posterior mean here -- the same estimand that idiom intended -- in one shared
+# place. `...` is forwarded to posterior_linpred (newdata, re_formula,
+# allow_new_levels, ...). If a brms version ever returns a summary matrix
+# again, its "Estimate" column is that same posterior mean, so it is accepted.
+maihda_brms_linpred_mean <- function(model, ...) {
+  draws <- brms::posterior_linpred(model, ...)
+  # A categorical() likelihood returns a 3-D ndraws x nobs x ncat array (one
+  # linear predictor per response category), for which a single posterior-mean
+  # linear predictor per row is undefined -- and colMeans() below would silently
+  # flatten it to a wrong-length nobs * ncat vector. No family the MAIHDA
+  # summaries support produces more than 2 dims; reject rather than return
+  # garbage.
+  if (length(dim(draws)) > 2L) {
+    stop("brms::posterior_linpred() returned a ", length(dim(draws)),
+         "-dimensional draws array (one linear predictor per response ",
+         "category, as for a categorical() likelihood), so a single ",
+         "posterior-mean linear predictor per row is not defined for this ",
+         "model's family.", call. = FALSE)
+  }
+  if (!is.null(colnames(draws)) && "Estimate" %in% colnames(draws)) {
+    return(as.numeric(draws[, "Estimate"]))
+  }
+  if (is.null(dim(draws))) {
+    # Defensive: a dimensionless return can only be the draws of a single
+    # prediction row (brms never returns one draw), so its mean is that row's
+    # posterior-mean linear predictor.
+    return(mean(as.numeric(draws)))
+  }
+  as.numeric(colMeans(draws))
+}
+
+# brms counterpart of maihda_count_marginal_mu_lme4(): lambda_i =
+# exp(eta_i + v_i/2) with eta the posterior-mean fixed-part linear predictor
+# and v_i built from the posterior-mean covariance blocks -- point-estimate
+# plug-ins, consistent with the "mu held at its posterior mean" treatment the
+# per-draw residual-variance path documents.
+maihda_count_marginal_mu_brms <- function(model,
+                                          draws = maihda_posterior_draws_brms(model)) {
+  eta <- maihda_brms_linpred_mean(model, re_formula = NA)
+  f <- model$formula
+  if (inherits(f, "brmsformula") && inherits(f$formula, "formula")) {
+    f <- f$formula
+  }
+  bars <- tryCatch(reformulas::findbars(f), error = function(e) NULL)
+  if (is.null(bars) || length(bars) == 0) {
+    stop("Could not read the random-effect terms off the brms formula for the ",
+         "marginal count mean.", call. = FALSE)
+  }
+  data <- model$data
+  blocks <- lapply(bars, function(b) {
+    lhs_txt <- paste(deparse(b[[2]]), collapse = " ")
+    design_names <- colnames(
+      stats::model.matrix(stats::as.formula(paste("~", lhs_txt)), data = data))
+    maihda_brms_re_block_mean(draws, maihda_bar_group_name(b), design_names)
+  })
+  v <- maihda_latent_re_variance_rows(bars, blocks, data)
+  pmax(exp(eta + v / 2), .Machine$double.eps)
+}
+
 maihda_residual_variance_lme4 <- function(model, vc = lme4::VarCorr(model)) {
   fam <- maihda_family(model)
   if (is.null(fam)) {
@@ -1568,23 +1748,27 @@ maihda_residual_variance_lme4 <- function(model, vc = lme4::VarCorr(model)) {
     return(1)
   }
   if (fam$family == "poisson" && fam$link == "log") {
-    # Stryhn et al. (2006) latent-scale level-1 variance approximation: log(1 + 1/mu).
-    # The simpler 1/mu form is the first-order Taylor expansion and matches log1p(1/mu)
-    # only when 1/mu is small (i.e. mu large); for low-count Poisson outcomes (mu < ~2)
-    # it overestimates residual variance and biases VPC downward. With prior weights the
-    # per-row variances are averaged by those weights (see maihda_weighted_obs_mean()).
-    mu <- stats::fitted(model)
-    mu <- pmax(as.numeric(mu), .Machine$double.eps)
+    # Stryhn et al. (2006) latent-scale level-1 variance approximation
+    # log(1 + 1/lambda), evaluated at the MARGINAL expected count lambda_i =
+    # exp(x_i'beta + v_i/2) (see maihda_count_marginal_mu_lme4) -- exactly
+    # Nakagawa et al.'s exp(beta0 + sigma^2/2) plug-in for the null model --
+    # not at the conditional fitted mean, whose BLUPs would tie the level-1
+    # variance to the realized random effects. The simpler 1/lambda form is the
+    # first-order Taylor expansion and matches log1p(1/lambda) only when
+    # 1/lambda is small; for low-count outcomes it overestimates residual
+    # variance and biases VPC downward. With prior weights the per-row
+    # variances are averaged by those weights (see maihda_weighted_obs_mean()).
+    mu <- maihda_count_marginal_mu_lme4(model)
     return(maihda_weighted_obs_mean(log1p(1 / mu), maihda_fit_prior_weights(model)))
   }
   if (fam$family == "negbinomial" && fam$link == "log") {
     # Negative-binomial analogue of the Poisson approximation above: the
-    # lognormal latent-scale level-1 variance ln(1 + 1/mu + 1/theta) of
-    # Nakagawa, Johnson & Schielzeth (2017, J R Soc Interface 14:20170213).
-    # The extra 1/theta term carries the overdispersion, so it reduces to the
-    # Stryhn Poisson form as theta -> Inf. Prior weights average the per-row terms.
-    mu <- stats::fitted(model)
-    mu <- pmax(as.numeric(mu), .Machine$double.eps)
+    # lognormal latent-scale level-1 variance ln(1 + 1/lambda + 1/theta) of
+    # Nakagawa, Johnson & Schielzeth (2017, J R Soc Interface 14:20170213),
+    # likewise at the marginal expected count. The extra 1/theta term carries
+    # the overdispersion, so it reduces to the Stryhn Poisson form as
+    # theta -> Inf. Prior weights average the per-row terms.
+    mu <- maihda_count_marginal_mu_lme4(model)
     theta <- maihda_negbin_theta_lme4(model)
     return(maihda_weighted_obs_mean(log1p(1 / mu + 1 / theta),
                                     maihda_fit_prior_weights(model)))
@@ -1636,21 +1820,22 @@ maihda_residual_variance_brms <- function(model) {
     return(1)
   }
   if (fam$family == "poisson" && fam$link == "log") {
-    # Stryhn et al. (2006) latent-scale level-1 variance approximation: log(1 + 1/mu).
-    # See the lme4 sibling for the rationale; 1/mu alone biases VPC downward at low mu.
-    # Likelihood weights average the per-row terms (see maihda_weighted_obs_mean()).
-    mu <- stats::fitted(model, summary = TRUE)[, "Estimate"]
-    mu <- pmax(as.numeric(mu), .Machine$double.eps)
+    # Stryhn et al. (2006) latent-scale level-1 variance approximation
+    # log(1 + 1/lambda), at the MARGINAL expected count (posterior-mean fixed
+    # part + lognormal RE-variance correction; see maihda_count_marginal_mu_brms
+    # and the lme4 sibling for the rationale). Likelihood weights average the
+    # per-row terms (see maihda_weighted_obs_mean()).
+    mu <- maihda_count_marginal_mu_brms(model)
     return(maihda_weighted_obs_mean(log1p(1 / mu), maihda_fit_prior_weights(model)))
   }
   if (fam$family == "negbinomial" && fam$link == "log") {
     # Nakagawa, Johnson & Schielzeth (2017) lognormal latent-scale level-1
-    # variance ln(1 + 1/mu + 1/theta); brms's 'shape' parameter IS theta.
-    # Evaluated at the posterior-mean fitted means and posterior-mean shape
-    # (see maihda_residual_variance_draws_brms for the per-draw treatment).
-    mu <- stats::fitted(model, summary = TRUE)[, "Estimate"]
-    mu <- pmax(as.numeric(mu), .Machine$double.eps)
+    # variance ln(1 + 1/lambda + 1/theta); brms's 'shape' parameter IS theta.
+    # Evaluated at the marginal expected counts (posterior-mean plug-ins) and
+    # posterior-mean shape (see maihda_residual_variance_draws_brms for the
+    # per-draw treatment).
     draws <- maihda_posterior_draws_brms(model)
+    mu <- maihda_count_marginal_mu_brms(model, draws)
     if (!"shape" %in% names(draws)) {
       stop("Could not extract the negative-binomial 'shape' (theta) draws from ",
            "the brms posterior.")
@@ -1734,17 +1919,19 @@ maihda_random_variance_draws_brms <- function(draws, group = "stratum") {
 #   gaussian       -> sigma draws squared (exact)
 #   logit latent   -> pi^2 / 3 (constant across draws)
 #   probit latent  -> 1        (constant across draws)
-#   poisson(log)   -> mean(log1p(1 / mu)) at the POSTERIOR-MEAN fitted means
-#                     (constant across draws). A per-draw version would need an
-#                     ndraws x nobs posterior_epred() matrix, which is
-#                     prohibitively expensive; the random-effect SD draws (the
-#                     dominant source of VPC uncertainty) are still propagated --
-#                     only the small level-1 term is held at its posterior mean.
-#   negbinomial(log) -> mean(log1p(1 / mu + 1 / shape_d)) per draw d: the
-#                     'shape' (= theta) draws are propagated, while mu is held
-#                     at the posterior-mean fitted means for the same cost
-#                     reason as the poisson case.
-# Takes the model (for the family and, for poisson/negbinomial, the fitted
+#   poisson(log)   -> mean(log1p(1 / lambda)) at MARGINAL expected counts built
+#                     from the posterior-mean fixed part and posterior-mean
+#                     RE-variance blocks (maihda_count_marginal_mu_brms;
+#                     constant across draws). A per-draw version would need an
+#                     ndraws x nobs computation, which is prohibitively
+#                     expensive; the random-effect SD draws (the dominant source
+#                     of VPC uncertainty) are still propagated -- only the small
+#                     level-1 term is held at its posterior-mean plug-ins.
+#   negbinomial(log) -> mean(log1p(1 / lambda + 1 / shape_d)) per draw d: the
+#                     'shape' (= theta) draws are propagated, while lambda is
+#                     held at the posterior-mean marginal means for the same
+#                     cost reason as the poisson case.
+# Takes the model (for the family and, for poisson/negbinomial, the marginal
 # means) and the draws data frame (for the sigma/shape draws and the draw count).
 maihda_residual_variance_draws_brms <- function(model, draws) {
   fam <- maihda_family(model)
@@ -1775,17 +1962,16 @@ maihda_residual_variance_draws_brms <- function(model, draws) {
     return(rep(1, n))
   }
   if (fam$family == "poisson" && fam$link == "log") {
-    mu <- stats::fitted(model, summary = TRUE)[, "Estimate"]
-    mu <- pmax(as.numeric(mu), .Machine$double.eps)
+    mu <- maihda_count_marginal_mu_brms(model, draws)
     w <- maihda_fit_prior_weights(model)
     return(rep(maihda_weighted_obs_mean(log1p(1 / mu), w), n))
   }
   if (fam$family == "negbinomial" && fam$link == "log") {
-    # Nakagawa et al. (2017) ln(1 + 1/mu + 1/theta), theta = brms 'shape'.
-    # The shape draws are propagated; mu is held at the posterior-mean fitted
-    # means (see the header comment). Likelihood weights average the per-row terms.
-    mu <- stats::fitted(model, summary = TRUE)[, "Estimate"]
-    mu <- pmax(as.numeric(mu), .Machine$double.eps)
+    # Nakagawa et al. (2017) ln(1 + 1/lambda + 1/theta), theta = brms 'shape'.
+    # The shape draws are propagated; lambda is held at the posterior-mean
+    # marginal means (see the header comment). Likelihood weights average the
+    # per-row terms.
+    mu <- maihda_count_marginal_mu_brms(model, draws)
     if (!"shape" %in% names(draws)) {
       stop("Could not extract the negative-binomial 'shape' (theta) draws from ",
            "the brms posterior.")
@@ -2222,16 +2408,28 @@ maihda_autobin_out_of_range <- function(data, autobin_info) {
   out
 }
 
+# Row-wise display labels from stratum-defining columns, joining each row's
+# values with `sep`. Each column is converted with as.character() individually --
+# NOT via apply(), whose as.matrix() coercion runs numeric columns through
+# format() in a mixed-type frame and pads them to a common width (values 1 and
+# 10 would label as " 1" / "10", leaving a stray space in "m \u00d7  1"). Using
+# as.character() also matches the value encoding of the stratum matcher
+# (maihda_match_strata_rows), so labels and matching agree. unname() keeps a
+# stratum variable literally named "sep"/"collapse" from being captured by
+# paste()'s own arguments.
+maihda_paste_label_rows <- function(df, sep) {
+  cols <- unname(lapply(df, as.character))
+  do.call(paste, c(cols, list(sep = sep)))
+}
+
 maihda_stratum_labels <- function(data, vars, sep = " \u00d7 ", autobin_info = NULL) {
   strata_data <- data[, vars, drop = FALSE]
   strata_data <- maihda_apply_autobin_info(strata_data, autobin_info)
 
   has_missing <- apply(strata_data, 1, function(x) any(is.na(x)))
   labels <- rep(NA_character_, nrow(strata_data))
-  labels[!has_missing] <- apply(
-    strata_data[!has_missing, , drop = FALSE],
-    1,
-    function(x) paste(x, collapse = sep)
+  labels[!has_missing] <- maihda_paste_label_rows(
+    strata_data[!has_missing, , drop = FALSE], sep
   )
   labels
 }
@@ -2316,6 +2514,24 @@ maihda_prepare_prediction_data <- function(object, newdata, type = "individual",
   # caller already supplies a 'stratum' column (as long as the numeric source columns
   # are present).
   newdata <- maihda_add_binned_dim_columns(newdata, object$strata_autobin_info)
+
+  # A longitudinal fit on internally centered time references the derived
+  # .maihda_ctime column; rebuild it from the original time column so newdata in
+  # original time units predicts correctly. Always recomputed (idempotent when
+  # predicting on the fitted data, which already carries the package's own copy),
+  # so a caller can never double-center by passing rows copied from object$data.
+  lng <- object$longitudinal_info
+  if (!is.null(lng)) {
+    time_term <- maihda_lng_time_term(lng)
+    if (!identical(time_term, lng$time)) {
+      if (lng$time %in% names(newdata)) {
+        newdata[[time_term]] <- newdata[[lng$time]] - maihda_lng_time_center(lng)
+      } else if (!time_term %in% names(newdata)) {
+        stop("Cannot predict from this longitudinal model: newdata must contain ",
+             "the time column '", lng$time, "'.", call. = FALSE)
+      }
+    }
+  }
 
   # allow_new_levels only relaxes individual-level predictions (which fall back to
   # the population average); stratum-level predictions always require known strata.
@@ -2419,7 +2635,7 @@ maihda_stratum_predictions_brms <- function(object, summary_obj, scale = c("resp
   fam <- maihda_family(model)
   linkinv <- maihda_linkinv(fam)
   prior_w <- maihda_prediction_weights(object)
-  eta_fixed <- brms::posterior_linpred(model, newdata = data, re_formula = NA, summary = TRUE)[, "Estimate"]
+  eta_fixed <- maihda_brms_linpred_mean(model, newdata = data, re_formula = NA)
 
   # A cumulative (ordinal) brms fit's response scale is the EXPECTED CATEGORY
   # SCORE sum_k k * P(Y = k) in [1, K], NOT the scalar inverse link (which would
@@ -2462,11 +2678,10 @@ maihda_stratum_predictions_brms <- function(object, summary_obj, scale = c("resp
   # eta(all REs) - u_stratum, so adding the stratum RE recovers the full prediction.
   eta_base <- eta_fixed
   if (!is.null(object$cc_info)) {
-    eta_allre <- brms::posterior_linpred(model, newdata = data,
-                                         summary = TRUE)[, "Estimate"]
+    eta_allre <- maihda_brms_linpred_mean(model, newdata = data)
     u_row <- stratum_est$random_effect[idx]
     u_row[is.na(u_row)] <- 0
-    eta_base <- as.numeric(eta_allre) - u_row
+    eta_base <- eta_allre - u_row
   }
 
   pred_df <- data.frame(

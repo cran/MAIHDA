@@ -60,7 +60,7 @@ plot(analysis) # plots all plot types
 ### `maihda()`
 A wrapper that runs the standard two-model MAIHDA workflow: it
 fits the **null** model (covariates only) and the **adjusted** model (plus the
-dimensions' additive main effects, summarises the null-model VPC/ICC, and reports the **PCV** (the
+dimensions' additive main effects), summarises the null-model VPC/ICC, and reports the **PCV** (the
 additive share of the intersectional inequality). When a `group` is supplied it also
 runs this decomposition within each group. Alternatively,
 `decomposition = "crossed-dimensions"` reads the additive/interaction split off a
@@ -141,7 +141,7 @@ Reports the relative-fit information criteria for one or more models (or a `maih
 ### `compare_maihda_groups()`
 Compares the between-stratum *share* of variance (VPC/ICC) and the between-/within-stratum variance components across the levels of a higher-level grouping variable such as country, region, or survey wave, fitting a stratified MAIHDA model per group.
 
-### `calculate_pvc()`
+### `calculate_pcv()`
 Calculates the proportional change in between-stratum variance (PCV) between two models.
 
 - Formula: PCV = (Var_model1 - Var_model2) / Var_model1
@@ -149,7 +149,7 @@ Calculates the proportional change in between-stratum variance (PCV) between two
 - Supports bootstrap confidence intervals for lme4 models
 
 ### `stepwise_pcv()`
-Evaluates multiple sequential models by iteratively adding covariates step-by-step. Each step's PCV is the change in between-stratum variance contributed by a predictor given the variables already in the model. For a binary outcome it also reports the discriminatory-accuracy trajectory (`AUC`, the step/total change in AUC, and `MOR`) alongside the PCV, so the strata's discriminatory accuracy can be tracked as covariates are added.
+Evaluates multiple sequential models by iteratively adding covariates step-by-step. Each step's PCV is the change in between-stratum variance contributed by a predictor given the variables already in the model. For a binary outcome it also reports the discriminatory-accuracy trajectory (`AUC`, the step/total change in AUC, and `MOR`) alongside the PCV, so the strata's discriminatory accuracy can be tracked as covariates are added. Pass `context =` to run it as a contextual cross-classified model (a `(1 | context)` intercept held in every step, as in `maihda(context = )`): the reported PCV is then net of the context, and a `Context_Variance` column surfaces the between-context share.
 
 ### Longitudinal (growth-curve) MAIHDA
 Supply `id` and `time` to `fit_maihda()`/`maihda()` for a 3-level growth-curve MAIHDA (occasions within individuals within strata, with random intercept *and* slope on time at both levels), the life-course extension of Bell, Evans, Holman & Leckie (2024). The between-stratum VPC is then time-varying, and `maihda(decomposition = "longitudinal")` reports the PCV separately for the baseline (intercept) and the slope variance — the additive-vs-multiplicative split of the intersectional *trajectory* inequality.
@@ -323,7 +323,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 If you use this package in your research, please cite:
 
 ```text
-Bulut (2025). *MAIHDA: Multilevel Analysis of Individual Heterogeneity and Discriminatory Accuracy.* R package version 0.2.0, https://github.com/hdbt/MAIHDA. doi: 10.32614/CRAN.package.MAIHDA
+Bulut (2025). *MAIHDA: Multilevel Analysis of Individual Heterogeneity and Discriminatory Accuracy.* R package version 0.2.1, https://github.com/hdbt/MAIHDA. doi: 10.32614/CRAN.package.MAIHDA
 ```
 
 A BibTeX entry for LaTeX users is:
@@ -333,7 +333,7 @@ A BibTeX entry for LaTeX users is:
   title  = {MAIHDA: Multilevel Analysis of Individual Heterogeneity and Discriminatory Accuracy},
   author = {Hamid Bulut},
   year   = {2025},
-  note   = {R package version 0.2.0},
+  note   = {R package version 0.2.1},
   url    = {https://github.com/hdbt/MAIHDA},
   doi    = {10.32614/CRAN.package.MAIHDA}
 }

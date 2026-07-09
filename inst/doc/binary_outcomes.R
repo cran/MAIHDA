@@ -49,7 +49,7 @@ model_adj <- fit_maihda(
   data = health_complete, family = "binomial"
 )
 
-pcv <- calculate_pvc(model_null2, model_adj)
+pcv <- calculate_pcv(model_null2, model_adj)
 print(pcv)
 
 ## ----da-----------------------------------------------------------------------

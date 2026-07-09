@@ -68,7 +68,7 @@ test_that("maihda_model_family_key normalizes and falls back to the stored famil
   expect_identical(maihda_model_family_key(m), "NA(NA)")
 })
 
-test_that("calculate_pvc rejects two fixed-theta NB fits with different thetas", {
+test_that("calculate_pcv rejects two fixed-theta NB fits with different thetas", {
   skip_on_cran()
   skip_if_not_installed("MASS")
 
@@ -82,14 +82,14 @@ test_that("calculate_pvc rejects two fixed-theta NB fits with different thetas",
 
   # Different fixed dispersion assumptions are not comparable: the family/link
   # check must fire on the theta-bearing key rather than silently returning a PCV.
-  expect_error(calculate_pvc(m1, m10), "same model family")
+  expect_error(calculate_pcv(m1, m10), "same model family")
 
   # The SAME fixed theta is comparable (here a null/adjusted pair).
   m1_adj <- suppressWarnings(
     fit_maihda(y ~ age + gender + race + edu + (1 | gender:race:edu), data = d,
                family = MASS::negative.binomial(1)))
-  pcv <- calculate_pvc(m1, m1_adj)
-  expect_true(is.finite(pcv$pvc))
+  pcv <- calculate_pcv(m1, m1_adj)
+  expect_true(is.finite(pcv$pcv))
 })
 
 test_that("the family string switch accepts negbinomial and rejects non-log links", {
@@ -126,13 +126,16 @@ test_that("fit_maihda(family = 'negbinomial') fits via glmer.nb with the canonic
   theta <- maihda_negbin_theta_lme4(m$model)
   expect_true(is.finite(theta) && theta > 0)
 
-  # Nakagawa, Johnson & Schielzeth (2017) level-1 variance, vs hand computation.
+  # Nakagawa, Johnson & Schielzeth (2017) level-1 variance at the MARGINAL
+  # expected count lambda = exp(x'beta + v/2), vs hand computation.
   rv <- maihda_residual_variance_lme4(m$model)
-  mu <- pmax(as.numeric(fitted(m$model)), .Machine$double.eps)
-  expect_equal(rv, mean(log1p(1 / mu + 1 / theta)))
+  eta <- as.numeric(stats::predict(m$model, re.form = NA, type = "link"))
+  v <- as.numeric(lme4::VarCorr(m$model)$stratum[1, 1])
+  lambda <- pmax(exp(eta + v / 2), .Machine$double.eps)
+  expect_equal(rv, mean(log1p(1 / lambda + 1 / theta)))
   # The 1/theta overdispersion term makes it strictly larger than the Poisson
-  # approximation on the same fitted means.
-  expect_gt(rv, mean(log1p(1 / mu)))
+  # approximation on the same marginal means.
+  expect_gt(rv, mean(log1p(1 / lambda)))
 
   s <- summary(m)
   expect_true(s$vpc$estimate > 0 && s$vpc$estimate < 1)
@@ -178,7 +181,7 @@ test_that("maihda_negbin_theta_lme4 falls back to parsing the family label", {
 
 # ---- PCV / workflow ----------------------------------------------------------
 
-test_that("calculate_pvc works across two glmer.nb fits despite differing thetas", {
+test_that("calculate_pcv works across two glmer.nb fits despite differing thetas", {
   skip_on_cran()
 
   d <- make_nb_data()
@@ -187,19 +190,19 @@ test_that("calculate_pvc works across two glmer.nb fits despite differing thetas
 
   # The raw labels embed each fit's own theta estimate; pre-normalization this
   # made the family/link equality check fail between a null/adjusted pair.
-  pcv <- calculate_pvc(null_m, adj_m)
-  expect_true(is.finite(pcv$pvc))
+  pcv <- calculate_pcv(null_m, adj_m)
+  expect_true(is.finite(pcv$pcv))
   expect_true(pcv$var_model1 > 0)
 })
 
-test_that("calculate_pvc still rejects a negbinomial vs poisson pair", {
+test_that("calculate_pcv still rejects a negbinomial vs poisson pair", {
   skip_on_cran()
 
   d <- make_nb_data()
   m_nb <- fit_nb(d, y ~ age + (1 | gender:race:edu))
   m_pois <- suppressWarnings(
     fit_maihda(y ~ age + (1 | gender:race:edu), data = d, family = "poisson"))
-  expect_error(calculate_pvc(m_nb, m_pois), "same model family")
+  expect_error(calculate_pcv(m_nb, m_pois), "same model family")
 })
 
 test_that("maihda() runs the two-model negbinomial decomposition end-to-end", {
@@ -212,7 +215,7 @@ test_that("maihda() runs the two-model negbinomial decomposition end-to-end", {
   )
   expect_s3_class(a, "maihda_analysis")
   expect_identical(a$mode, "two-model")
-  expect_true(is.finite(a$pcv$pvc))
+  expect_true(is.finite(a$pcv$pcv))
   expect_true(a$summary$vpc$estimate > 0 && a$summary$vpc$estimate < 1)
   expect_output(print(a), "negbinomial")
 })

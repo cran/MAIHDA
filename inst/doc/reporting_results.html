@@ -12,7 +12,7 @@
 
 <meta name="author" content="Hamid Bulut" />
 
-<meta name="date" content="2026-07-02" />
+<meta name="date" content="2026-07-09" />
 
 <title>Reporting MAIHDA results: tidy output and publication tables</title>
 
@@ -342,7 +342,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 <h1 class="title toc-ignore">Reporting MAIHDA results: tidy output and
 publication tables</h1>
 <h4 class="author">Hamid Bulut</h4>
-<h4 class="date">2026-07-02</h4>
+<h4 class="date">2026-07-09</h4>
 
 
 
@@ -442,8 +442,12 @@ default null:</p>
 <span id="cb5-15"><a href="#cb5-15" tabindex="-1"></a><span class="co">#&gt; 11 EducationCollege Grad    -0.960         NA       NA        NA</span></span></code></pre></div>
 <p>Because the output is a plain tibble, you can build your <em>own</em>
 figure instead of using the built-in <code>plot()</code> – here a
-caterpillar of the stratum interaction estimates, ordered by
-magnitude:</p>
+caterpillar of the stratum estimates, ordered by size. The default
+(<code>which = &quot;null&quot;</code>) estimates plotted below are the null
+model’s <em>total</em> between-stratum deviations (additive +
+interaction); for a caterpillar of the pure interaction estimates, tidy
+the adjusted model instead:
+<code>tidy(a, component = &quot;strata&quot;, which = &quot;adjusted&quot;)</code>.</p>
 <div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">library</span>(ggplot2)</span>
 <span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a></span>
 <span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a>strata_ord <span class="ot">&lt;-</span> strata[<span class="fu">order</span>(strata<span class="sc">$</span>estimate), ]</span>
@@ -481,7 +485,7 @@ shows both in the familiar “estimate [low, high]” layout:</p>
 <span id="cb7-14"><a href="#cb7-14" tabindex="-1"></a><span class="co">#&gt;                   VPC/ICC          0.063              0.026</span></span>
 <span id="cb7-15"><a href="#cb7-15" tabindex="-1"></a><span class="co">#&gt;    PCV (null -&gt; adjusted)                             0.766</span></span>
 <span id="cb7-16"><a href="#cb7-16" tabindex="-1"></a><span class="co">#&gt; </span></span>
-<span id="cb7-17"><a href="#cb7-17" tabindex="-1"></a><span class="co">#&gt; Note: The PCV is computed from maximum-likelihood-refitted between-stratum variances (required for a valid cross-model comparison; see ?calculate_pvc), while the Between-stratum variance/SD and VPC/ICC rows are each model&#39;s own REML estimate. The PCV therefore need not equal the variance reduction implied by the displayed variance rows.</span></span>
+<span id="cb7-17"><a href="#cb7-17" tabindex="-1"></a><span class="co">#&gt; Note: The PCV is computed from maximum-likelihood-refitted between-stratum variances (required for a valid cross-model comparison; see ?calculate_pcv), while the Between-stratum variance/SD and VPC/ICC rows are each model&#39;s own REML estimate. The PCV therefore need not equal the variance reduction implied by the displayed variance rows.</span></span>
 <span id="cb7-18"><a href="#cb7-18" tabindex="-1"></a><span class="co">#&gt; </span></span>
 <span id="cb7-19"><a href="#cb7-19" tabindex="-1"></a><span class="co">#&gt; Strata ranked by predicted value (null model):</span></span>
 <span id="cb7-20"><a href="#cb7-20" tabindex="-1"></a><span class="co">#&gt;  Rank                          Stratum   N               Predicted</span></span>

@@ -12,7 +12,7 @@
 
 <meta name="author" content="Hamid Bulut" />
 
-<meta name="date" content="2026-07-02" />
+<meta name="date" content="2026-07-09" />
 
 <title>Planning a MAIHDA analysis</title>
 
@@ -341,15 +341,18 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 <h1 class="title toc-ignore">Planning a MAIHDA analysis</h1>
 <h4 class="author">Hamid Bulut</h4>
-<h4 class="date">2026-07-02</h4>
+<h4 class="date">2026-07-09</h4>
 
 
 
 <div id="before-you-fit" class="section level2">
 <h2>Before you fit</h2>
-<p>through those design decisions, with small runnable checks you can do
-on your own data first to evaluate dimensions, the number of strata, and
-the analytic sample</p>
+<p>Most of the decisions that make or break a MAIHDA analysis are taken
+before any model is fitted: which dimensions define the strata, how many
+cells that implies, and whether the sample can populate them. This
+vignette walks through those design decisions, with small runnable
+checks you can do on your own data first to evaluate the dimensions, the
+number of strata, and the analytic sample.</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(MAIHDA)</span>
 <span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">data</span>(<span class="st">&quot;maihda_health_data&quot;</span>)</span></code></pre></div>
 </div>
