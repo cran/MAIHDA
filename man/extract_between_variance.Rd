@@ -13,6 +13,7 @@ extract_between_variance(model)
 Numeric value of between-stratum variance
 }
 \description{
-Internal function to extract between-stratum variance from a MAIHDA model.
+Internal function to extract between-stratum variance from a MAIHDA model. For a
+\code{brms} fit it is the posterior median of the variance draws.
 }
 \keyword{internal}

@@ -84,6 +84,28 @@ maihda_app_pcv_display <- function(pcv_percent) {
   )
 }
 
+# The lines of maihda_format_fit_diagnostics() as one item per diagnostic, for the
+# app's "Fit diagnostics" card. Those lines are broken for a console: a diagnostic
+# starts on a line without indent and continues on lines indented by two spaces,
+# and a convergence message is an indented "- " line. Here each diagnostic's lines
+# are joined into one text, and its "- " lines become its sub-items. A list of
+# items, each with `text` and `sub` (character, possibly empty).
+maihda_app_diagnostics_items <- function(lines) {
+  items <- list()
+  for (line in lines) {
+    if (!startsWith(line, " ") || length(items) == 0L) {
+      items[[length(items) + 1L]] <- list(text = trimws(line), sub = character(0))
+    } else if (grepl("^\\s*- ", line)) {
+      k <- length(items)
+      items[[k]]$sub <- c(items[[k]]$sub, sub("^\\s*- ", "", line))
+    } else {
+      k <- length(items)
+      items[[k]]$text <- paste(items[[k]]$text, trimws(line))
+    }
+  }
+  items
+}
+
 # PCV is genuinely undefined for some otherwise valid fits -- most commonly when
 # the baseline (null) model has zero or negative between-stratum variance (a
 # singular fit / no between-stratum variation). calculate_pcv() errors in that
@@ -123,8 +145,8 @@ maihda_app_calculate_pcv_safe <- function(null_model, adjusted_model,
 
   # The point PCV itself is undefined. Surface the variances we can still report
   # alongside an availability flag and the underlying message for the UI.
-  var1 <- tryCatch(extract_between_variance(null_model), error = function(e) NA_real_)
-  var2 <- tryCatch(extract_between_variance(adjusted_model), error = function(e) NA_real_)
+  var1 <- tryCatch(maihda_pcv_between_variance(null_model), error = function(e) NA_real_)
+  var2 <- tryCatch(maihda_pcv_between_variance(adjusted_model), error = function(e) NA_real_)
   structure(
     list(
       pcv = NA_real_,
@@ -166,7 +188,9 @@ maihda_app_bootstrap_vpc_cis <- function(null_model, adjusted_model,
       return(NULL)
     }
     tryCatch(
-      bootstrap_vpc(model$model, model$data, model$formula, args$n_boot, args$conf_level),
+      bootstrap_vpc(model$model, model$data, model$formula, args$n_boot,
+                    args$conf_level,
+                    approximation = maihda_count_approximation(model)),
       error = function(e) NULL
     )
   }
@@ -333,12 +357,22 @@ maihda_app_fit_models <- function(dat, outcome_var, grouping_vars,
   # strata auto-bin recipe (strata_autobin_info), so stepwise_pcv() reconstructs an
   # auto-binned numeric dimension as the SAME tertile factor used by the adjusted
   # model (.maihda_dim_*), keeping the sequential decomposition consistent with it.
-  stepwise <- stepwise_pcv(
-    model_dat,
-    outcome = outcome_var,
-    vars = c(grouping_vars, additional_covars),
-    engine = engine,
-    family = family
+  #
+  # Like the point PCV above, the stepwise decomposition is undefined when the null
+  # model's between-stratum variance sits at the zero boundary (a singular fit):
+  # stepwise_pcv() now rejects that degenerate denominator rather than tabulating a
+  # spurious 100% / huge PCV. Degrade to NULL there -- the dashboard's stepwise
+  # panel already guards on it with req(), as it does in crossed-dimensions mode --
+  # rather than aborting the whole fit.
+  stepwise <- tryCatch(
+    stepwise_pcv(
+      model_dat,
+      outcome = outcome_var,
+      vars = c(grouping_vars, additional_covars),
+      engine = engine,
+      family = family
+    ),
+    error = function(e) NULL
   )
 
   list(

@@ -31,16 +31,61 @@
 #' \code{estimator} column then reads \code{"REML"}).
 #'
 #' \strong{Comparability.} Like the VPC, information criteria are only comparable
-#' across models fitted to the \emph{same} analytic sample (same rows and outcome).
-#' AIC/BIC additionally require the same response distribution -- they are not
-#' comparable across families (e.g. a Gaussian vs a Poisson fit), nor between the
-#' likelihood engines and \code{brms} (AIC/BIC vs WAIC/LOOIC are different scales).
-#' \code{maihda_ic()} does not enforce this; \code{\link{compare_maihda}} warns when
-#' the supplied models differ in outcome, sample, or family.
+#' across models fitted to the \emph{same} analytic sample (same rows and outcome)
+#' with the \emph{same} weights -- prior (precision) weights and sampling
+#' (design) weights each change which likelihood, or pseudo-likelihood, is being
+#' maximised, so the criteria of a weighted and an unweighted fit of the identical
+#' model are not on a common scale. Unlike the VPC and PCV, they do not always need
+#' the same family: a criterion compares log-likelihoods of the same observations,
+#' so Poisson and negative-binomial fits of the same counts are comparable, as are
+#' binomial or cumulative (ordinal) fits that differ in their link, and a delta is
+#' reported for them. Any other change of family or link withholds it -- a Gaussian
+#' vs a Poisson fit compares a density with a probability, and the continuous
+#' families are compared only within the same family and link. Criteria are never
+#' comparable between the likelihood engines and \code{brms} (AIC/BIC vs
+#' WAIC/LOOIC are different scales). When the supplied models differ in any of
+#' these respects \code{maihda_ic()} warns and omits the \code{delta} column,
+#' still reporting each model's own criteria.
+#'
+#' \strong{Parameter count.} \code{df} counts the estimated parameters. A
+#' negative-binomial \code{lme4} fit with a fixed \code{theta}
+#' (\code{family = MASS::negative.binomial(theta)}) therefore has one fewer than
+#' \code{lme4}'s own count, which includes theta for every negative-binomial
+#' family, so its \code{AIC} is 2 and its \code{BIC} \code{log(n)} below
+#' \code{AIC()} and \code{BIC()} on the fitted model; \code{glm()} counts that
+#' family the same way. A \code{family = "negbinomial"} fit estimates theta and
+#' counts it.
+#'
+#' \strong{lme4 GLMM likelihoods.} The criteria of a quadrature fit (\code{nAGQ > 1})
+#' are the complete likelihood and compare with a Laplace fit's: where \code{lme4}'s
+#' \code{logLik()} of such a fit leaves out the saturated log-likelihood,
+#' \code{maihda_ic()} adds it back. A \code{glmer} fit of a family with a scale
+#' parameter -- a Gaussian with a non-identity link, Gamma, inverse Gaussian -- reports
+#' \code{NA} criteria (estimator \code{"ML (glmer scale family: no likelihood)"}):
+#' \code{lme4}'s \code{logLik()} for those families is not the marginal likelihood, and
+#' on test fits it exceeded the largest value that likelihood attains.
+#'
+#' \strong{Predictive target of the Bayesian criteria.} \code{brms::waic()} and
+#' \code{brms::loo()} are computed from pointwise log-likelihoods
+#' \emph{conditional on the fitted random effects}, so WAIC/LOOIC assess
+#' prediction of new observations \emph{within the strata (and persons or
+#' contexts) already represented in the data} -- not performance for a new,
+#' unseen intersectional stratum. Choosing between strata definitions on LOOIC
+#' therefore compares conditional predictive fit; generalisation to new strata
+#' is a leave-one-group-out cross-validation question (e.g.
+#' \code{brms::kfold()} with \code{group = "stratum"}), which this package does
+#' not wrap. AIC/BIC for the likelihood engines are instead computed from the
+#' \emph{marginal} likelihood (random effects integrated out) -- a further
+#' reason the likelihood and Bayesian criteria are never comparable with each
+#' other.
 #'
 #' \strong{Design-weighted fits.} For the \code{wemix} (design-weighted) engine the
 #' criteria are reported as \code{NA}: a pseudo-likelihood with sampling weights does
-#' not define a standard AIC/BIC.
+#' not define a standard AIC/BIC. A \code{brms} fit with \code{sampling_weights} is
+#' treated the same way: its sampling weights enter as likelihood weights, giving a
+#' pseudo-posterior whose weighted pointwise log-likelihoods are not log predictive
+#' densities, so WAIC/LOOIC are likewise reported as \code{NA} (the
+#' \code{estimator} column reads \code{"Bayesian (weighted pseudo-posterior)"}).
 #'
 #' @param ... One or more \code{maihda_model} objects (from \code{\link{fit_maihda}})
 #'   or \code{maihda_analysis} objects (from \code{\link{maihda}}). A
@@ -130,9 +175,56 @@ maihda_ic <- function(..., model_names = NULL) {
   # used, otherwise the Bayesian LOOIC (then WAIC). Only meaningful with >1 row.
   primary <- maihda_ic_primary(out)
   if (nrow(out) > 1L && !is.na(primary)) {
-    vals <- out[[primary]]
-    if (any(is.finite(vals))) {
-      out$delta <- vals - min(vals, na.rm = TRUE)
+    # A delta is only meaningful across models fitted to the SAME analytic sample
+    # whose likelihoods are on a common response scale (see Details): the same
+    # family and link, or families / links within one response class
+    # (maihda_ic_response_class: Poisson vs negative binomial, a binomial or
+    # cumulative link) -- and it is never meaningful across the likelihood/Bayesian
+    # divide (AIC/BIC and WAIC/LOOIC are different scales). maihda_ic() does not
+    # otherwise enforce this, so a direct call could rank a Gaussian against a
+    # Poisson fit, fits on different rows, or an lme4 fit against a brms fit -- each
+    # with a seemingly meaningful delta (the cross-scale case picking AIC as the
+    # primary criterion and leaving the Bayesian row a bare NA). Withhold the delta
+    # (and say why) when the supplied models are not mutually comparable; the
+    # per-model criteria are still reported. The canonical null-vs-adjusted
+    # comparison (same outcome/sample/family, differing only in fixed effects) is
+    # comparable, so its delta is unaffected.
+    delta_issues <- maihda_ic_delta_issues(lapply(named_models, function(x) x$model))
+    # Whether the POPULATED criterion columns span both scales -- the same guard
+    # compare_maihda() applies, which the outcome/family/sample check above does NOT
+    # catch (a same-family lme4-vs-brms comparison agrees on all three). Test only the
+    # columns that carry a finite value: `out` still has all four IC columns here,
+    # most of them all-NA, so an all-lme4 table is not misread as mixed.
+    populated_ic <- Filter(function(col) any(is.finite(out[[col]])),
+                           intersect(c("AIC", "BIC", "WAIC", "LOOIC"), names(out)))
+    if (maihda_ic_spans_scales(populated_ic)) {
+      delta_issues <- c(delta_issues,
+                        "scale (likelihood AIC/BIC vs Bayesian WAIC/LOOIC)")
+    }
+    # An intended ML refit (ml = TRUE whenever there is >1 model) that FELL BACK to
+    # REML leaves that row's estimator at "REML" -- a successful refit reads "ML
+    # (refit from REML)", a glmer fit "ML", so a "REML" row here means refitML() failed.
+    # AIC/BIC then mix REML and ML bases, and a delta across the differing fixed effects
+    # is not comparable; withhold it rather than rank on a mixed basis.
+    if (isTRUE(ml) && any(out$estimator == "REML", na.rm = TRUE)) {
+      delta_issues <- c(delta_issues,
+                        "estimation basis (an ML refit failed, leaving a REML fit)")
+    }
+    if (length(delta_issues) > 0) {
+      warning("maihda_ic(): the models differ in ",
+              paste(delta_issues, collapse = " and "),
+              ", so a delta is not meaningful and is omitted -- information ",
+              "criteria are only comparable across models fitted to the same ",
+              "analytic sample with the same weights, and the same family and link ",
+              "unless all are count (Poisson / negative binomial), all binomial or ",
+              "all cumulative fits; they are never comparable across the ",
+              "likelihood/Bayesian divide. The per-model criteria are still ",
+              "reported.", call. = FALSE)
+    } else {
+      vals <- out[[primary]]
+      if (any(is.finite(vals))) {
+        out$delta <- vals - min(vals, na.rm = TRUE)
+      }
     }
   }
 
@@ -148,6 +240,29 @@ maihda_ic <- function(..., model_names = NULL) {
   attr(out, "ic_primary") <- primary
   class(out) <- c("maihda_ic", "data.frame")
   out
+}
+
+# Evaluate a brms IC call (waic/loo) keeping brms's progress MESSAGES quiet, but
+# CAPTURING its warnings and re-emitting them as a single branded summary. brms's
+# own reliability warnings -- high Pareto-k for PSIS-LOO, low effective sample
+# size, large p_waic -- are exactly the signal that a criterion (and therefore any
+# model ranking built on it) may be untrustworthy, so they must be surfaced, not
+# swallowed. `what` names the criterion for the message.
+maihda_ic_quiet_but_warn <- function(expr, what) {
+  warns <- character(0)
+  val <- withCallingHandlers(
+    suppressMessages(expr),
+    warning = function(w) {
+      warns <<- c(warns, conditionMessage(w))
+      invokeRestart("muffleWarning")
+    }
+  )
+  if (length(warns) > 0) {
+    warning(sprintf("%s reliability diagnostics flagged this fit: %s", what,
+                    paste(unique(trimws(warns)), collapse = " | ")),
+            call. = FALSE)
+  }
+  val
 }
 
 #' Information criteria for a single MAIHDA model
@@ -189,6 +304,13 @@ maihda_ic_one <- function(model, ml = FALSE) {
       fit_for_ic <- tryCatch(lme4::refitML(fm), error = function(e) fm)
       ml_used <- !identical(fit_for_ic, fm)
     }
+    row$estimator <- if (ml_used) "ML (refit from REML)" else if (reml) "REML" else "ML"
+    if (maihda_glmer_has_scale(fit_for_ic)) {
+      # No criteria for a glmer family with a scale parameter (see
+      # maihda_glmer_has_scale): lme4's logLik() for it is not the likelihood.
+      row$estimator <- "ML (glmer scale family: no likelihood)"
+      return(as.data.frame(row, stringsAsFactors = FALSE))
+    }
     ll <- tryCatch(stats::logLik(fit_for_ic), error = function(e) NULL)
     if (!is.null(ll)) {
       row$logLik <- as.numeric(ll)
@@ -196,7 +318,63 @@ maihda_ic_one <- function(model, ml = FALSE) {
     }
     row$AIC <- tryCatch(as.numeric(stats::AIC(fit_for_ic)), error = function(e) na_real)
     row$BIC <- tryCatch(as.numeric(stats::BIC(fit_for_ic)), error = function(e) na_real)
-    row$estimator <- if (ml_used) "ML (refit from REML)" else if (reml) "REML" else "ML"
+    completed <- FALSE
+    # Under adaptive quadrature (nAGQ > 1) the logLik() of a glmer fit that lme4 made
+    # without the normalising constants leaves out the saturated log-likelihood (see
+    # maihda_glmer_saturated_loglik); add it back so the criteria are the complete
+    # likelihood that a Laplace fit, and every other engine, reports.
+    nagq <- tryCatch(lme4::getME(fit_for_ic, "devcomp")$dims[["nAGQ"]],
+                     error = function(e) NA_integer_)
+    if (!is.null(ll) && isTRUE(lme4::isGLMM(fit_for_ic)) && isTRUE(nagq > 1) &&
+        !maihda_glmer_quadrature_complete(fit_for_ic)) {
+      saturated <- maihda_glmer_saturated_loglik(fit_for_ic)
+      if (is.na(saturated)) {
+        row$logLik <- row$df <- row$AIC <- row$BIC <- na_real
+        row$estimator <- "ML (nAGQ > 1: incomplete likelihood)"
+        return(as.data.frame(row, stringsAsFactors = FALSE))
+      }
+      if (saturated != 0) {
+        ll_attributes <- attributes(ll)
+        ll <- as.numeric(ll) + saturated
+        attributes(ll) <- ll_attributes
+        completed <- TRUE
+      }
+    }
+    # lme4's parameter count adds one for ANY "Negative Binomial" family, for the
+    # theta glmer.nb() estimates. A MASS::negative.binomial(theta) family passed to
+    # glmer() estimates no theta, so count only the estimated parameters, as glm()
+    # does for that family (MASS::glm.nb() counts its estimated theta). Applied only
+    # when lme4's count is exactly one above them, so a corrected lme4 is left alone.
+    if (!is.null(ll) && maihda_negbin_theta_is_fixed(model)) {
+      n_estimated <- tryCatch(
+        length(lme4::getME(fit_for_ic, "beta")) + length(lme4::getME(fit_for_ic, "theta")) +
+          lme4::getME(fit_for_ic, "devcomp")$dims[["useSc"]],
+        error = function(e) NA_real_)
+      if (isTRUE(attr(ll, "df") == n_estimated + 1)) {
+        attr(ll, "df") <- attr(ll, "df") - 1
+        completed <- TRUE
+      }
+    }
+    if (completed) {
+      row$logLik <- as.numeric(ll)
+      row$df <- attr(ll, "df")
+      row$AIC <- as.numeric(stats::AIC(ll))
+      row$BIC <- as.numeric(stats::BIC(ll))
+    }
+    # A REML log-likelihood depends on how the fixed-effect columns are scaled: a growth
+    # fit on internally scaled time (maihda_lng_time_scale()) has each column of time to
+    # the power d divided by scale^d, which adds d * log(scale) per column. Report the
+    # REML log-likelihood of the model in the user's time, as before the scaling; an ML
+    # log-likelihood does not depend on it.
+    lng <- model$longitudinal_info
+    sc <- maihda_lng_time_scale(lng)
+    if (!is.null(lng) && sc != 1 && reml && !ml_used && is.finite(row$logLik)) {
+      shift <- sum(maihda_lng_coef_time_power(colnames(lme4::getME(fit_for_ic, "X")), lng)) *
+        log(sc)
+      row$logLik <- row$logLik - shift
+      row$AIC <- row$AIC + 2 * shift
+      row$BIC <- row$BIC + 2 * shift
+    }
 
   } else if (inherits(fm, "clmm")) {
     # ordinal::clmm is maximum-likelihood; AIC/BIC dispatch through the stats
@@ -211,20 +389,32 @@ maihda_ic_one <- function(model, ml = FALSE) {
     row$estimator <- "ML"
 
   } else if (inherits(fm, "brmsfit")) {
-    # Bayesian analogues: WAIC and the leave-one-out IC (LOOIC). brms chatters
-    # (progress messages, Pareto-k warnings); keep it quiet here.
-    row$estimator <- "Bayesian"
-    if (requireNamespace("brms", quietly = TRUE)) {
-      row$WAIC <- tryCatch(
-        suppressWarnings(suppressMessages({
-          w <- brms::waic(fm)
+    if (!is.null(model$sampling_weights)) {
+      # Sampling weights enter brms as likelihood weights, giving a
+      # PSEUDO-posterior (see fit_maihda): the weighted pointwise
+      # log-likelihood terms are not log predictive densities for any
+      # observation process, so they define no standard WAIC/LOOIC -- exactly
+      # as the wemix pseudo-likelihood defines no standard AIC/BIC. Report NA
+      # (silently, matching the wemix branch below; fit_maihda already
+      # messaged the pseudo-posterior caveat at fit time).
+      row$estimator <- "Bayesian (weighted pseudo-posterior)"
+    } else {
+      # Bayesian analogues: WAIC and the leave-one-out IC (LOOIC). brms emits
+      # progress messages (kept quiet) alongside genuine reliability warnings (high
+      # Pareto-k, low ESS); the latter are surfaced via maihda_ic_quiet_but_warn
+      # rather than suppressed, so a criterion is never reported as if reliable when
+      # its own diagnostics say otherwise.
+      row$estimator <- "Bayesian"
+      if (requireNamespace("brms", quietly = TRUE)) {
+        row$WAIC <- tryCatch({
+          w <- maihda_ic_quiet_but_warn(brms::waic(fm), "WAIC")
           as.numeric(w$estimates["waic", "Estimate"])
-        })), error = function(e) na_real)
-      row$LOOIC <- tryCatch(
-        suppressWarnings(suppressMessages({
-          l <- brms::loo(fm)
+        }, error = function(e) na_real)
+        row$LOOIC <- tryCatch({
+          l <- maihda_ic_quiet_but_warn(brms::loo(fm), "PSIS-LOO")
           as.numeric(l$estimates["looic", "Estimate"])
-        })), error = function(e) na_real)
+        }, error = function(e) na_real)
+      }
     }
 
   } else if (inherits(fm, "WeMixResults")) {
@@ -234,6 +424,55 @@ maihda_ic_one <- function(model, ml = FALSE) {
   }
 
   as.data.frame(row, stringsAsFactors = FALSE)
+}
+
+# TRUE for a glmer fit of a family with a scale parameter -- a Gaussian with a
+# non-identity link, Gamma, inverse Gaussian -- which lme4 flags with useSc in a GLMM.
+# glmer's objective for these builds on the family's aic(), which plugs in the moment
+# estimate dev / n for the dispersion and adds 2, and the logLik() it reports is not
+# the marginal likelihood: against a direct integration maximised over every
+# parameter, it was above the achievable maximum by 15.4 (Gaussian, log link), 6.4
+# (Gamma) and 12.8 (inverse Gaussian), and nested AIC differences were off by 45.2,
+# 4.2 and 4.0. lme4's help pages do not mention this. lmer() fits (useSc, but not a
+# GLMM) and the families without a scale parameter are unaffected.
+maihda_glmer_has_scale <- function(fit) {
+  isTRUE(tryCatch(
+    lme4::isGLMM(fit) && isTRUE(lme4::getME(fit, "devcomp")$dims[["useSc"]] == 1),
+    error = function(e) FALSE))
+}
+
+# TRUE when the glmer fit `fit` was made by an lme4 that includes the normalising
+# constants in the deviance under adaptive quadrature (nAGQ > 1), so that its logLik() is
+# the complete likelihood. lme4 2.1-0 and later do, and they write dispProfile into a
+# fit's devcomp$dims, which lme4 before 2.1-0 does not; lme4's own refit() tells the two
+# apart by that entry. The deviance is stored when the model is fitted, so this depends
+# on the lme4 that made the fit, not on the one loaded.
+maihda_glmer_quadrature_complete <- function(fit) {
+  isTRUE(tryCatch("dispProfile" %in% names(fit@devcomp$dims), error = function(e) FALSE))
+}
+
+# The saturated log-likelihood sum(log p(y | mu = y)) that glmer's logLik() leaves out
+# under adaptive quadrature for a fit made by lme4 before 2.1-0 (see
+# maihda_glmer_quadrature_complete()): with nAGQ > 1 such a fit's likelihood is relative to
+# the saturated model (?merMod: "only proportional" to the likelihood), and the gap to
+# a direct integration equals this term to 2e-4 for Poisson, aggregated binomial and
+# negative-binomial fits. It does not depend on mu, and lme4's own response module
+# gives it at the fitted state as (sum(devResid) - aic) / 2 -- equal to the explicit
+# dpois / dbinom / dnbinom sums at mu = y to 1e-12, prior weights included. Exactly 0
+# for Bernoulli outcomes, whose saturated likelihood is 1 (the difference is only
+# rounding there, so it is snapped to 0). NA when it cannot be read.
+maihda_glmer_saturated_loglik <- function(fit) {
+  tryCatch({
+    aic <- fit@resp$aic()
+    saturated <- (sum(fit@resp$devResid()) - aic) / 2
+    if (length(saturated) != 1L || !is.finite(saturated)) {
+      NA_real_
+    } else if (abs(saturated) <= 1e-10 * max(1, abs(aic))) {
+      0
+    } else {
+      saturated
+    }
+  }, error = function(e) NA_real_)
 }
 
 # Choose the criterion the delta column is computed on: AIC for the likelihood
@@ -246,6 +485,99 @@ maihda_ic_primary <- function(df) {
   if (has("WAIC")) return("WAIC")
   if (has("BIC")) return("BIC")
   NA_character_
+}
+
+# The outcome a family's likelihood is a probability mass function of, for the
+# families whose criteria stay comparable when the family or link differs: counts
+# (Poisson, negative binomial -- estimated or fixed theta), binomial / Bernoulli
+# outcomes, and ordered categories (cumulative). A criterion compares
+# log-likelihoods of the same observations, so it needs a common response measure
+# and complete normalising constants, not a common parametric family; lme4,
+# ordinal and brms evaluate each of these as the full mass function (lme4 under
+# adaptive quadrature with the saturated term, which maihda_ic_one() restores where a
+# fit leaves it out). NA for every other family, which keeps the strict family/link
+# equality: a density is not
+# comparable with a probability, and the continuous families are not checked for a
+# common normalisation (lme4 reports no likelihood for its glmer scale families at
+# all; see maihda_glmer_has_scale()).
+maihda_ic_response_class <- function(model) {
+  fam <- maihda_model_family(model)
+  name <- if (is.list(fam)) fam$family else NULL
+  if (!is.character(name) || length(name) != 1L || is.na(name)) {
+    return(NA_character_)
+  }
+  switch(name,
+         poisson = , negbinomial = "count",
+         binomial = , bernoulli = "binomial",
+         cumulative = "ordered categories",
+         NA_character_)
+}
+
+# The ways a set of models differ that make a delta between their information
+# criteria meaningless: a differing outcome, analytic sample, or set of weights,
+# or a family/link difference outside one response class
+# (maihda_ic_response_class). A delta is a difference of criteria, so it inherits
+# exactly the comparability requirements the criteria themselves have -- the
+# caveat spelled out in the maihda_ic Details. Returns the human-readable list of
+# differences (empty when the models are mutually comparable). Uses the same
+# response/family/sample/weight fingerprints as compare_maihda(), and deliberately
+# does NOT compare fixed effects: the canonical null-vs-adjusted comparison differs
+# only there and must keep its delta. Nor does it require the strict family/link
+# equality that the VPC and PCV need: their level-1 variance depends on the family
+# and link, a likelihood criterion does not.
+maihda_ic_delta_issues <- function(models) {
+  if (length(models) < 2L) {
+    return(character(0))
+  }
+  responses <- vapply(models, function(m) {
+    paste(deparse(m$formula[[2]]), collapse = "")
+  }, character(1))
+  fam_keys <- vapply(models, maihda_model_family_key, character(1))
+  nobs_vec <- vapply(models, function(m) {
+    n <- maihda_wrapper_nobs(m)
+    if (is.finite(n)) as.integer(n) else NA_integer_
+  }, integer(1))
+  # Sort the id set so a reordered-but-identical sample is not read as a different
+  # one; the response fingerprint is likewise row-order independent.
+  row_keys <- vapply(models, function(m) {
+    rid <- maihda_wrapper_row_ids(m)
+    if (is.null(rid)) NA_character_ else paste(sort(rid), collapse = "\r")
+  }, character(1))
+  response_keys <- vapply(models, maihda_wrapper_response_fingerprint, character(1))
+  # Weights define WHICH likelihood is being maximised, so criteria built on
+  # different weights are not on a common scale at all -- an unweighted fit and a
+  # weighted fit of the identical model report different AICs, and their
+  # difference measures the weighting, not the models. The same two fingerprints
+  # calculate_pcv() hard-errors on and compare_maihda() warns about; PRIOR
+  # (precision) weights live on the fitted object, SAMPLING (design) weights on
+  # the maihda_model wrapper.
+  weight_keys <- vapply(models, function(m) maihda_weight_fingerprint(m$model),
+                        character(1))
+  sampling_keys <- vapply(models, maihda_sampling_weight_fingerprint, character(1))
+
+  issues <- character(0)
+  if (length(unique(responses)) > 1L) {
+    issues <- c(issues, paste0("outcomes (", paste(unique(responses), collapse = ", "), ")"))
+  }
+  if (length(unique(fam_keys)) > 1L) {
+    classes <- vapply(models, maihda_ic_response_class, character(1))
+    if (anyNA(classes) || length(unique(classes)) > 1L) {
+      issues <- c(issues, paste0("families/links (", paste(unique(fam_keys), collapse = ", "), ")"))
+    }
+  }
+  if (length(unique(stats::na.omit(weight_keys))) > 1L) {
+    issues <- c(issues, "prior weights")
+  }
+  if (length(unique(stats::na.omit(sampling_keys))) > 1L) {
+    issues <- c(issues, "sampling weights")
+  }
+  sample_differs <- length(unique(stats::na.omit(nobs_vec))) > 1L ||
+    length(unique(stats::na.omit(row_keys))) > 1L ||
+    length(unique(stats::na.omit(response_keys))) > 1L
+  if (sample_differs) {
+    issues <- c(issues, paste0("analytic sample (n = ", paste(nobs_vec, collapse = ", "), ")"))
+  }
+  issues
 }
 
 # TRUE when a set of information-criterion column names spans BOTH the likelihood
@@ -270,8 +602,11 @@ print.maihda_ic <- function(x, ...) {
   cat("===========================\n\n")
   print(as.data.frame(x), row.names = FALSE, digits = 4)
 
+  # `primary` is NULL when a subset dropped the ic_primary attribute (older objects,
+  # or a `[` that did not preserve it); guard the length so the `if` never tests a
+  # zero-length `!is.na()` (which errors after the table has already printed).
   primary <- attr(x, "ic_primary")
-  if ("delta" %in% names(x) && !is.na(primary)) {
+  if ("delta" %in% names(x) && length(primary) == 1L && !is.na(primary)) {
     cat(pal$muted(sprintf("\ndelta = difference from the best model on %s (lower is better).\n",
                 primary)))
   }
@@ -281,7 +616,35 @@ print.maihda_ic <- function(x, ...) {
   }
   if (any(c("AIC", "BIC", "WAIC", "LOOIC") %in% names(x))) {
     cat(pal$muted(paste0("Information criteria are only comparable across models fitted to the same ",
-        "analytic sample (and, for AIC/BIC, the same family).\n")))
+        "analytic sample with the same weights,\nand the same family and link unless all are count ",
+        "(Poisson / negative binomial), all binomial or all cumulative fits.\n")))
   }
   invisible(x)
+}
+
+#' Subset MAIHDA information criteria
+#'
+#' Indexing method for \code{\link{maihda_ic}} results that preserves the
+#' \code{ic_primary} metadata attribute (which names the criterion the
+#' \code{delta} column is computed on) after a row/column subset. Plain
+#' \code{[.data.frame} keeps the \code{maihda_ic} class but drops that attribute,
+#' which would leave \code{print.maihda_ic()} testing a dropped (\code{NULL})
+#' attribute as a scalar condition and erroring after the table prints.
+#'
+#' @param x A \code{maihda_ic} object.
+#' @param ... Row/column indices forwarded to \code{[.data.frame}.
+#' @return A \code{maihda_ic} with \code{ic_primary} carried over, or a bare vector
+#'   when the selection drops to a single column.
+#' @keywords internal
+#' @export
+`[.maihda_ic` <- function(x, ...) {
+  out <- NextMethod()
+  # A single-column selection with drop = TRUE returns a bare vector; leave it
+  # unclassed. Otherwise restore the class and the ic_primary attribute the print
+  # method relies on.
+  if (is.data.frame(out)) {
+    attr(out, "ic_primary") <- attr(x, "ic_primary")
+    class(out) <- class(x)
+  }
+  out
 }

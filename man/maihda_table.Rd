@@ -53,9 +53,10 @@ An object of class \code{maihda_table}: a list with
     produced}
   \item{models_note}{a character note (or \code{NULL}) flagging that the PCV was
     computed from maximum-likelihood-refitted between-stratum variances while the
-    variance/VPC rows are each model's own (REML) estimate, so the PCV need not
-    equal the reduction implied by the displayed variance rows; see
-    \code{\link{calculate_pcv}}}
+    variance/VPC rows are each model's own (REML) estimate -- or from REML-type
+    variances (\code{estimation = "REML"}) while those rows are maximum-likelihood
+    estimates -- so the PCV need not equal the reduction implied by the displayed
+    variance rows; see \code{\link{calculate_pcv}}}
   \item{model_keys, model_labels}{the estimate-column keys and their display labels}
   \item{family, engine, mode, scale, ranked_by, n_obs, n_strata_total, context_vars}{
     metadata used by \code{print()}}
@@ -78,10 +79,12 @@ The model-results table is mostly numeric and export-ready (e.g.
 \code{write.csv(maihda_table(a)$models, ...)} or pass it to \code{knitr::kable()}):
 statistics are rows, models are columns, and each estimate has accompanying
 \code{*_lower}/\code{*_upper} columns that hold the confidence/credible interval
-when one is available (the VPC bootstrap or posterior interval, and the bootstrap
-PCV interval) and \code{NA} otherwise. The intercept and the variance/SD rows are
-point estimates. The \code{print()} method renders the same table in the
-familiar \dQuote{estimate [low, high]} layout.
+when one is available (the intercept's interval, the VPC bootstrap or posterior
+interval, and the bootstrap PCV interval) and \code{NA} otherwise. The intercept
+carries the same interval \code{summary()} reports for it -- a Wald interval
+for the likelihood engines, a credible interval for brms. The variance and SD
+rows are point estimates. The \code{print()} method renders the same table in the familiar
+\dQuote{estimate [low, high]} layout.
 
 For a \code{"crossed-dimensions"} analysis (one model, no null/adjusted pair) the
 results table has a single estimate column and gains \dQuote{Additive share} /

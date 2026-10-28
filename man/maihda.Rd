@@ -24,7 +24,9 @@ maihda(
   id = NULL,
   time = NULL,
   time_degree = 1,
+  stratum_slope = TRUE,
   interactions = TRUE,
+  estimation = c("fitted", "ML", "REML"),
   ...
 )
 }
@@ -33,7 +35,16 @@ maihda(
 \code{outcome ~ covars + (1 | var1:var2)} or \code{... + (1 | stratum)} when
 \code{data} already has a \code{stratum} column from \code{\link{make_strata}}.
 The dimensions' additive main effects may be listed (the fully-specified adjusted
-model) or omitted (added automatically, with a message); see Details.}
+model) or omitted (added automatically, with a message); see Details.
+Any dimension main effect listed must be written as its bare column name: a
+transformed term such as \code{factor(edu)} is rejected, because only a bare
+name is recognised as a dimension's main effect and the transform would
+otherwise survive into the derived null model. Transform the column in
+\code{data} instead (\code{data$edu <- factor(data$edu)}). For the same reason a
+fixed interaction involving a dimension is rejected, whether with another
+dimension (\code{gender * race}) or with a covariate (\code{age * gender}): only
+the bare main effect is removed, so the interaction survives into the null model,
+which would then already adjust for that dimension.}
 
 \item{data}{A data frame with the model variables (and the \code{group}
 variable, if used).}
@@ -62,8 +73,22 @@ stratified comparison then fits a contextual cross-classified model within
 each group and reports each group's stratum-vs-context partition (a per-group
 subset shrinks the context level count, so weak identification is warned about
 per group). Not available for the \code{wemix}/\code{ordinal} engines (they
-fit no crossed random effect); a context with few levels weakly identifies its
-variance (consider \code{engine = "brms"}).}
+fit no crossed random effect). A context with few levels identifies its
+variance weakly with either engine: \code{lme4} estimates it imprecisely, at
+zero (a singular fit) when the levels differ little, and with
+\code{engine = "brms"} its posterior depends on the prior on its standard
+deviation -- with two levels roughly in proportion to the prior's scale --
+and under the default prior it comes out high when the context effects are
+smaller than that prior's scale, most with two or three levels; the context
+share and the VPC depend on it. \code{print()} of the analysis and of its
+\code{summary()} names the contexts of a \code{brms} fit that have fewer than
+10 levels, and the contextual partition of a \code{brms} summary holds the
+level counts as \code{context_levels}. A \code{brms} fit also reports the
+realised partition: the variances and shares of the effects of the strata and
+context levels in the data, which depend little on that prior when each context
+and stratum has enough data (see the section Realised strata and contexts).
+Prefer contexts with many levels (see \code{context} in
+\code{\link{fit_maihda}} for what to do with few).}
 
 \item{engine}{Modeling engine, "lme4" (default), "brms", "wemix" (the
 design-weighted pseudo-maximum-likelihood fit; requires
@@ -90,13 +115,24 @@ the additive and interaction \emph{shares} of the total between-strata variance 
 read directly from that one fit. The two modes target the same scientific question
 with different estimators, so their additive shares are conceptually parallel but
 not numerically identical. The crossed-dimensions additive share is a partial-pooling
-estimate: dimensions with few levels (e.g. a binary sex variable, whose variance is
-estimated from two groups) are poorly identified and often give a singular lme4 fit
--- the \code{brms} engine handles this better. See Details.
-(\code{"cross-classified"} is accepted as a deprecated alias for
-\code{"crossed-dimensions"}, with a warning: in the MAIHDA literature
-\dQuote{cross-classified} refers to the contextual stratum-by-place model,
-which this package fits via \code{context}.)
+estimate, and each dimension's variance is estimated from that dimension's levels
+alone, so a dimension with few levels (a binary sex variable has two) is poorly
+identified with either engine. \code{lme4} often returns a singular fit. With
+\code{engine = "brms"} the posterior of such a variance depends on the prior on
+its standard deviation -- with two levels roughly in proportion to the prior's
+scale -- and the VPC and the additive share follow it: under the default prior
+they are overstated, most with two- to four-level dimensions, and with two- or
+three-level dimensions the additive share comes out high even where the
+dimensions have no additive effect. \code{print()} names the dimensions of a
+\code{brms} fit that have fewer than 10 levels. A \code{brms} fit also reports
+the realised strata: the VPC, shares and variances of the effects of the strata
+and dimension levels in the data, which depend little on that prior when each
+stratum has enough data, whatever the number of levels (see the section Realised
+strata).
+Otherwise prefer \code{"two-model"} (with few strata see \code{estimation})
+unless every dimension has about ten or more levels. See Details.
+(In the MAIHDA literature \dQuote{cross-classified} refers to the contextual
+stratum-by-place model, which this package fits via \code{context}.)
 \code{"longitudinal"} fits a 3-level \strong{growth-curve} MAIHDA (requires
 \code{id} and \code{time}; selected automatically when they are supplied): a
 null and an adjusted growth model, where the adjusted model adds the
@@ -105,10 +141,12 @@ dimensions' main effects \emph{and their interactions with time}
 PCV is reported separately for the baseline (intercept) and the slope variance
 -- the additive-vs-multiplicative split of the intersectional trajectory
 inequality (Bell, Evans, Holman & Leckie 2024). As with the two-model PCV,
-REML \code{lmer} growth fits are refitted with maximum likelihood before the
-null-vs-adjusted variance comparison (REML variances are not comparable
-across different fixed effects; see \code{\link{calculate_pcv}}), while the
-reported time-varying VPC keeps each fit's own (REML) estimate.
+the \code{estimation} argument sets the variance-estimation basis: the default
+\code{"fitted"} keeps each REML \code{lmer} growth fit's own variance, while
+\code{"ML"} refits them with maximum likelihood before the null-vs-adjusted
+comparison, which overstates the PCV when strata are few (see
+\code{\link{calculate_pcv}}). The reported time-varying VPC always keeps each
+fit's own (REML) estimate.
 See \code{\link{fit_maihda}}.}
 
 \item{autobin}{Logical passed to \code{\link{make_strata}}; tertile-bins numeric
@@ -132,17 +170,26 @@ Default FALSE.}
 \item{response_vpc}{Logical; for a binomial (lme4) outcome, also attach the
 response-scale VPC (\code{\link{maihda_vpc_response}}) to the model summaries.
 It is estimated by simulation, so it is opt-in (default \code{FALSE}) and uses
-\code{seed}. The discriminatory accuracy (AUC + MOR) is attached automatically
-for a binomial/Bernoulli outcome regardless of this flag (see Details).}
+\code{seed}. For a Poisson or negative-binomial (lme4) outcome it attaches the
+count-scale VPC instead, a closed form (see
+\code{\link{summary.maihda_model}}). The discriminatory accuracy (AUC + MOR)
+is attached automatically for a binomial/Bernoulli outcome regardless of this
+flag (see Details).}
 
-\item{seed}{Optional integer seed for the response-scale VPC simulation.}
+\item{seed}{Optional integer seed for the response-scale VPC simulation. It is
+NOT forwarded to \code{brms::brm()}: an \code{engine = "brms"} fit's MCMC
+sampler is unseeded by it (a warning says so). Call \code{set.seed()} before
+\code{maihda()} to make a Bayesian fit reproducible, or use
+\code{fit_maihda(seed = )}, which has no \code{seed} formal and so passes it
+through to \code{brm()}.}
 
 \item{sampling_weights}{Optional name of a sampling-weight column for a
-\strong{design-weighted MAIHDA} on complex-survey data; see
-\code{\link{fit_maihda}} for the full semantics (engine selection, the
-pseudo-likelihood weighting, and what is/is not design-based). Both the null
-and the adjusted model (and any per-group fits) use the same weights, so the
-PCV is a design-weighted decomposition. Not compatible with
+\strong{weighted MAIHDA} on survey data; see \code{\link{fit_maihda}} for the
+full semantics (engine selection, the pseudo-likelihood weighting, and --
+importantly -- why a single person weight does not deliver design-based
+inference for a multistage or stratified sample). Both the null and the
+adjusted model (and any per-group fits) use the same weights, so the
+PCV is a weighted decomposition. Not compatible with
 \code{engine = "lme4"}, \code{decomposition = "crossed-dimensions"} under
 the wemix engine, or \code{bootstrap = TRUE}.}
 
@@ -152,6 +199,12 @@ polynomial degree (1 = linear). Supplying \code{id}/\code{time} selects
 \code{decomposition = "longitudinal"}. See \code{\link{fit_maihda}} for the
 model structure; \code{group}, \code{context}, and \code{sampling_weights} are
 not supported alongside them. Default \code{NULL} (cross-sectional).}
+
+\item{stratum_slope}{Longitudinal only: keep the stratum-level random slope(s)
+on \code{time}? \code{FALSE} fits a random intercept at the stratum level, so
+the between-stratum variance is constant over time and the decomposition
+reports \code{PCV_intercept} only. Applied to the null and adjusted growth
+models alike. See \code{\link{fit_maihda}}.}
 
 \item{interactions}{Whether to compute the per-stratum interaction diagnostic
 (\code{\link{maihda_interactions}}) on the adjusted / crossed-dimensions model
@@ -164,8 +217,21 @@ individual-testing view. Uses \code{conf_level}. Not computed for a longitudinal
 decomposition. The computation is cheap (it reads the stratum estimates the
 summary already holds; no refit).}
 
+\item{estimation}{Variance-estimation basis for the PCV (\code{"two-model"} and
+\code{"longitudinal"} decompositions), \code{"fitted"} (default), \code{"ML"} or
+\code{"REML"}; see \code{\link{calculate_pcv}}. \code{"fitted"} differences each
+model's own between-stratum variance (the REML estimate for a Gaussian
+\code{lmer} fit, as \code{summary()} reports); \code{"ML"} refits REML
+\code{lmer} fits with maximum likelihood first. \code{"REML"} compares REML-type
+variances for a binomial or Poisson lme4 fit in the \code{"two-model"}
+decomposition, whose maximum-likelihood PCV runs high with few or small strata;
+it is an error with \code{group}, with \code{context} on such a fit, and in the
+\code{"longitudinal"} decomposition.}
+
 \item{...}{Additional arguments passed to \code{\link{fit_maihda}} (and on to
-\code{lmer}/\code{glmer}).}
+\code{lmer}/\code{glmer}). Includes \code{count_approximation}, which selects
+the log-link count level-1 variance approximation for the VPC and is applied
+to every derived fit.}
 }
 \value{
 An object of class \code{maihda_analysis}: a list with
@@ -182,12 +248,24 @@ An object of class \code{maihda_analysis}: a list with
   \item{pcv}{the proportional change in variance: the \code{pcv_result} from
     \code{\link{calculate_pcv}} in \code{"two-model"} mode, or a
     \code{maihda_long_pcv} (the intercept/slope and time-specific PCV) in
-    \code{"longitudinal"} mode; \code{NULL} otherwise. Both are computed on
-    the maximum-likelihood scale (REML \code{lmer} fits are ML-refitted for
-    the comparison; see \code{\link{calculate_pcv}})}
+    \code{"longitudinal"} mode; \code{NULL} otherwise. Both use the
+    variance-estimation basis set by \code{estimation}: the default
+    \code{"fitted"} keeps each Gaussian \code{lmer} fit's own REML variance
+    (matching the single-model summaries), while \code{"ML"} refits the REML
+    fits with maximum likelihood, which overstates the PCV when strata are few
+    (see \code{\link{calculate_pcv}}). In \code{"longitudinal"} mode both PCVs,
+    the slope's first, are understated on average when the strata differ little
+    after adjustment next to the precision of one stratum's own estimate. For
+    \code{engine = "brms"} in
+    \code{"longitudinal"} mode the variances compared are posterior medians of
+    the per-draw between-stratum variance -- at the baseline, of the slope, and at
+    each reporting time -- and, like the two-model \code{brms} PCV, the result is
+    understated on average when strata are few}
   \item{decomposition}{the additive/interaction partition (additive and interaction
-    variances and shares, per-dimension variances; \code{"crossed-dimensions"} mode
-    only, \code{NULL} otherwise)}
+    variances and shares, per-dimension variances and, for a \code{brms} fit, each
+    dimension's number of levels in \code{dim_levels} and the realised strata in
+    \code{realised}, described in the section Realised strata;
+    \code{"crossed-dimensions"} mode only, \code{NULL} otherwise)}
   \item{groups}{a \code{maihda_group_comparison} when \code{group} is supplied,
     otherwise \code{NULL}}
   \item{interactions}{the \code{maihda_interactions} diagnostic (per-stratum
@@ -219,9 +297,12 @@ VPC as well. These are read from \code{summary(x)} and the attached
 
 This is a convenience wrapper around \code{\link{fit_maihda}},
 \code{\link{calculate_pcv}}, \code{\link{summary.maihda_model}} and
-\code{\link{compare_maihda_groups}}. It is \emph{intrinsically} a two-model
-decomposition and has no single-model mode -- for a single fit (e.g. just the
-null-model VPC / discriminatory accuracy), call \code{\link{fit_maihda}} directly.
+\code{\link{compare_maihda_groups}}. It \emph{always} runs a decomposition,
+never a single plain fit: by default the two-model null/adjusted pair, or --
+with \code{decomposition = "crossed-dimensions"} -- one crossed model whose
+additive dimension random effects carry the additive share. For a single
+undecomposed fit (e.g. just the null-model VPC / discriminatory accuracy),
+call \code{\link{fit_maihda}} directly.
 
 \strong{The dimensions' additive main effects.} You may write them in the formula --
 the fully-specified, lme4-native adjusted model
@@ -262,6 +343,95 @@ case (for three or more distinct values -- a binary numeric dimension is exempt,
 with two levels a linear term and a factor are equivalent): wrap category codes in
 \code{factor()} before fitting, or, for a genuinely continuous variable, use it as a
 covariate rather than a stratum dimension.
+}
+
+\section{Realised strata}{
+
+For a \code{brms} crossed-dimensions fit, \code{decomposition$realised} and the
+"Realised strata" block of \code{print()} summarise, over the posterior draws, the
+effects of the \eqn{J}{J} strata in the data. In each draw stratum \eqn{j}{j} has
+the effect \eqn{\zeta_j}{zeta_j}, the sum of its dimensions' level effects and its
+own (interaction) effect. These are finite-population summaries (Gelman 2005): they
+describe the strata and levels in the data, where the variance components describe
+the distributions those were drawn from. A dimension with two levels says a lot
+about the former and little about the latter, so the realised values depend little
+on the prior on the standard deviations when each stratum has enough data to pin
+down its own effect. With few observations per stratum each draw also carries the
+uncertainty about every stratum's effect: the realised variances then come out too
+high and move with the prior. Compare the intervals of the stratum estimates with
+the spread between the strata. Per draw:
+\describe{
+  \item{\code{between_var}}{\eqn{\sum_j (\zeta_j - \bar\zeta)^2 / (J - 1)}{sum_j
+    (zeta_j - mean(zeta))^2 / (J - 1)}, half the mean squared difference between
+    two distinct strata.}
+  \item{\code{vpc}}{\code{between_var} over itself plus the within-stratum
+    variance: \eqn{\pi^2/3}{pi^2/3} for a logit link, 1 for a probit link,
+    \eqn{\pi^2/6}{pi^2/6} for a cloglog link, the residual variance of a Gaussian
+    fit. Not given for a Poisson or
+    negative-binomial fit, whose within-stratum variance is computed from the
+    variance components. With a \code{context}, the realised variance of the
+    context effects is added to the denominator (see the section Realised strata
+    and contexts).}
+  \item{\code{interaction_var}}{the residual sum of squares of the least-squares
+    fit of the \eqn{\zeta_j}{zeta_j} on an intercept and the dimensions' levels,
+    divided by its residual degrees of freedom, \code{df_interaction}. Strata
+    missing from the grid of dimension levels are allowed.}
+  \item{\code{additive_share}}{1 minus \code{interaction_var / between_var}, and
+    \code{interaction_share} the rest: a mean-square split, like a PCV computed
+    from REML variances. It is near zero when the dimensions explain none of the
+    differences between the strata, and can then fall below zero.}
+  \item{\code{per_dim}}{the variance of each dimension's level effects, with its
+    number of levels minus one as divisor.}
+  \item{\code{mor}}{for a logit link, the median odds ratio between two distinct
+    strata of the data: the exponential of the median of
+    \eqn{|\zeta_j - \zeta_{j'}|}{|zeta_j - zeta_j'|} over the pairs. With many
+    strata it is computed from an evenly spaced subset of at least 1000 draws.}
+}
+Each is the posterior median, with the equal-tailed credible interval at
+\code{conf_level} in the matching \code{*_ci} element. Every stratum counts once,
+whatever its size. \code{n_strata} is \eqn{J}{J}. An \code{lme4}
+crossed-dimensions fit reports its variance components only.
+}
+
+\section{Realised strata and contexts}{
+
+For a \code{brms} fit with a \code{context}, \code{summary()$context$realised} and
+the "Realised strata and contexts" block of \code{print()} give the realised
+partition: over the posterior draws, the finite-population variances (Gelman 2005)
+of the effects of the strata and of each context's levels in the data. A context's
+variance component describes the distribution its levels were drawn from, and with
+few levels it follows the prior on its standard deviation; the variance of the
+effects of the levels in the data describes those levels, which the data pin down
+when each level has enough observations. With two contexts it is half the squared
+difference between their effects. Per draw, for a grouping factor with \eqn{C}{C}
+levels in the data and effects \eqn{u_k}{u_k}:
+\describe{
+  \item{\code{var_stratum}}{the realised variance of the strata: of the stratum
+    intercepts, or of the \eqn{\zeta_j}{zeta_j} of a crossed-dimensions fit (its
+    \code{between_var}).}
+  \item{\code{per_context}}{each context's
+    \eqn{\sum_k (u_k - \bar u)^2 / (C - 1)}{sum_k (u_k - mean(u))^2 / (C - 1)}, and
+    \code{context_var_total} their sum.}
+  \item{\code{other_var}}{the same, summed over any other random effect in the
+    formula; given only when there is one.}
+  \item{\code{vpc_stratum}}{\code{var_stratum} over the sum of the realised
+    variances and the within-stratum variance (see \code{vpc} in Realised strata),
+    and \code{vpc_context} and \code{vpc_context_total} each context's and all
+    contexts' share of that sum. Given for a Gaussian identity fit and for a
+    binomial, Bernoulli or cumulative fit on its latent scale, not for a Poisson or
+    negative-binomial fit. For a crossed-dimensions fit \code{vpc_stratum} is
+    \code{decomposition$realised$vpc}.}
+}
+Each is the posterior median, with the equal-tailed credible interval at
+\code{conf_level} in the matching \code{*_ci} element; for \code{per_context} and
+\code{vpc_context} a matrix with a row per context. Every level counts once,
+whatever its size. \code{n_strata} is the number of strata, and the partition's
+\code{context_levels} the number of each context's levels. \code{print()} of a
+two-model analysis shows the realised VPC and context share of the null model.
+These values depend little on the prior on the standard deviations when each
+context and stratum has enough data. With few observations per context each draw
+also carries the uncertainty about every context's effect, and they then move with
+the prior. An \code{lme4} fit reports its variance components only.
 }
 
 \examples{
@@ -313,6 +483,10 @@ a3$summary$context$vpc_context_total  # the country (general contextual) share
 plot(a3, type = "context_vpc")
 }
 
+}
+\references{
+Gelman, A. (2005). Analysis of variance -- why it is more important than ever.
+\emph{The Annals of Statistics}, 33(1), 1-53. \doi{10.1214/009053604000001048}
 }
 \seealso{
 \code{\link{fit_maihda}} for the single-model fitter,

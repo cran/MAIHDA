@@ -12,7 +12,7 @@
 
 <meta name="author" content="Hamid Bulut" />
 
-<meta name="date" content="2026-07-09" />
+<meta name="date" content="2026-10-28" />
 
 <title>Reporting MAIHDA results: tidy output and publication tables</title>
 
@@ -342,7 +342,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 <h1 class="title toc-ignore">Reporting MAIHDA results: tidy output and
 publication tables</h1>
 <h4 class="author">Hamid Bulut</h4>
-<h4 class="date">2026-07-09</h4>
+<h4 class="date">2026-10-28</h4>
 
 
 
@@ -376,7 +376,7 @@ bookkeeping (<code>n_strata</code>, <code>nobs</code>,
 <span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a><span class="co">#&gt; # A tibble: 1 × 16</span></span>
 <span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a><span class="co">#&gt;      vpc vpc.conf.low vpc.conf.high   pcv pcv.conf.low pcv.conf.high</span></span>
 <span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a><span class="co">#&gt;    &lt;dbl&gt;        &lt;dbl&gt;         &lt;dbl&gt; &lt;dbl&gt;        &lt;dbl&gt;         &lt;dbl&gt;</span></span>
-<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a><span class="co">#&gt; 1 0.0627           NA            NA 0.766           NA            NA</span></span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a><span class="co">#&gt; 1 0.0627           NA            NA 0.596           NA            NA</span></span>
 <span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a><span class="co">#&gt; # ℹ 10 more variables: additive.share &lt;dbl&gt;, interaction.share &lt;dbl&gt;,</span></span>
 <span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a><span class="co">#&gt; #   auc &lt;dbl&gt;, auc.adjusted &lt;dbl&gt;, mor &lt;dbl&gt;, n_strata &lt;int&gt;, nobs &lt;int&gt;,</span></span>
 <span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a><span class="co">#&gt; #   engine &lt;chr&gt;, family &lt;chr&gt;, mode &lt;chr&gt;</span></span></code></pre></div>
@@ -385,7 +385,7 @@ bookkeeping (<code>n_strata</code>, <code>nobs</code>,
 <code>maihda()</code> analysis holds. It is ideal for
 <code>rbind()</code>-ing many analyses into a comparison table, or for
 pulling a single number into inline text – e.g. the VPC is 6.3% and the
-additive share (PCV) is 76.6%.</p>
+additive share (PCV) is 59.6%.</p>
 <p><code>tidy()</code> and <code>glance()</code> come from the
 lightweight <strong><code>generics</code></strong> package – the same
 generics <code>broom</code>/<code>broom.mixed</code> re-export – so they
@@ -426,20 +426,25 @@ intersection, with the human-readable label:</p>
 <code>which = &quot;adjusted&quot;</code> reads the adjusted model instead of the
 default null:</p>
 <div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">tidy</span>(a, <span class="at">component =</span> <span class="st">&quot;fixed&quot;</span>, <span class="at">which =</span> <span class="st">&quot;adjusted&quot;</span>)</span>
-<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a><span class="co">#&gt; # A tibble: 11 × 5</span></span>
-<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a><span class="co">#&gt;    term                    estimate std.error conf.low conf.high</span></span>
-<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a><span class="co">#&gt;    &lt;chr&gt;                      &lt;dbl&gt;     &lt;dbl&gt;    &lt;dbl&gt;     &lt;dbl&gt;</span></span>
-<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a><span class="co">#&gt;  1 (Intercept)              30.1           NA       NA        NA</span></span>
-<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a><span class="co">#&gt;  2 Age                       0.0148        NA       NA        NA</span></span>
-<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a><span class="co">#&gt;  3 Gendermale               -0.431         NA       NA        NA</span></span>
-<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a><span class="co">#&gt;  4 RaceHispanic             -1.62          NA       NA        NA</span></span>
-<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a><span class="co">#&gt;  5 RaceMexican              -1.06          NA       NA        NA</span></span>
-<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a><span class="co">#&gt;  6 RaceWhite                -1.67          NA       NA        NA</span></span>
-<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a><span class="co">#&gt;  7 RaceOther                -3.92          NA       NA        NA</span></span>
-<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a><span class="co">#&gt;  8 Education9 - 11th Grade   0.129         NA       NA        NA</span></span>
-<span id="cb5-13"><a href="#cb5-13" tabindex="-1"></a><span class="co">#&gt;  9 EducationHigh School      1.08          NA       NA        NA</span></span>
-<span id="cb5-14"><a href="#cb5-14" tabindex="-1"></a><span class="co">#&gt; 10 EducationSome College    -0.177         NA       NA        NA</span></span>
-<span id="cb5-15"><a href="#cb5-15" tabindex="-1"></a><span class="co">#&gt; 11 EducationCollege Grad    -0.960         NA       NA        NA</span></span></code></pre></div>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a><span class="co">#&gt; # A tibble: 11 × 8</span></span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a><span class="co">#&gt;    term           estimate std.error statistic    df  p.value conf.low conf.high</span></span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a><span class="co">#&gt;    &lt;chr&gt;             &lt;dbl&gt;     &lt;dbl&gt;     &lt;dbl&gt; &lt;dbl&gt;    &lt;dbl&gt;    &lt;dbl&gt;     &lt;dbl&gt;</span></span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a><span class="co">#&gt;  1 (Intercept)     30.1      0.977      30.7      40 1.89e-29  2.81e+1   32.0   </span></span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a><span class="co">#&gt;  2 Age              0.0148   0.00745     1.99   2949 4.69e- 2  2.04e-4    0.0294</span></span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a><span class="co">#&gt;  3 Gendermale      -0.431    0.463      -0.933    40 3.57e- 1 -1.37e+0    0.504 </span></span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a><span class="co">#&gt;  4 RaceHispanic    -1.62     0.820      -1.98     40 5.51e- 2 -3.28e+0    0.0371</span></span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a><span class="co">#&gt;  5 RaceMexican     -1.06     0.790      -1.34     40 1.87e- 1 -2.66e+0    0.535 </span></span>
+<span id="cb5-10"><a href="#cb5-10" tabindex="-1"></a><span class="co">#&gt;  6 RaceWhite       -1.67     0.658      -2.53     40 1.53e- 2 -3.00e+0   -0.337 </span></span>
+<span id="cb5-11"><a href="#cb5-11" tabindex="-1"></a><span class="co">#&gt;  7 RaceOther       -3.92     0.797      -4.92     40 1.52e- 5 -5.53e+0   -2.31  </span></span>
+<span id="cb5-12"><a href="#cb5-12" tabindex="-1"></a><span class="co">#&gt;  8 Education9 - …   0.129    0.834       0.154    40 8.78e- 1 -1.56e+0    1.81  </span></span>
+<span id="cb5-13"><a href="#cb5-13" tabindex="-1"></a><span class="co">#&gt;  9 EducationHigh…   1.08     0.813       1.32     40 1.93e- 1 -5.67e-1    2.72  </span></span>
+<span id="cb5-14"><a href="#cb5-14" tabindex="-1"></a><span class="co">#&gt; 10 EducationSome…  -0.177    0.795      -0.222    40 8.25e- 1 -1.78e+0    1.43  </span></span>
+<span id="cb5-15"><a href="#cb5-15" tabindex="-1"></a><span class="co">#&gt; 11 EducationColl…  -0.960    0.825      -1.16     40 2.52e- 1 -2.63e+0    0.708</span></span></code></pre></div>
+<p>The <code>df</code> column holds containment (between-within) degrees
+of freedom: a term constant within a stratum is tested against the
+strata (here 40, the 50 strata minus the 10 columns constant within
+one), a covariate varying within against <em>n</em> (<code>Age</code>
+above). See <code>?summary.maihda_model</code>.</p>
 <p>Because the output is a plain tibble, you can build your <em>own</em>
 figure instead of using the built-in <code>plot()</code> – here a
 caterpillar of the stratum estimates, ordered by size. The default
@@ -478,64 +483,64 @@ shows both in the familiar “estimate [low, high]” layout:</p>
 <span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a><span class="co">#&gt; Observations: 3000 | Strata: 50</span></span>
 <span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a><span class="co">#&gt; </span></span>
 <span id="cb7-9"><a href="#cb7-9" tabindex="-1"></a><span class="co">#&gt; Model results:</span></span>
-<span id="cb7-10"><a href="#cb7-10" tabindex="-1"></a><span class="co">#&gt;                 Statistic Null (Model 1) Adjusted (Model 2)</span></span>
-<span id="cb7-11"><a href="#cb7-11" tabindex="-1"></a><span class="co">#&gt;                 Intercept         28.208             30.050</span></span>
-<span id="cb7-12"><a href="#cb7-12" tabindex="-1"></a><span class="co">#&gt;  Between-stratum variance          2.900              1.172</span></span>
-<span id="cb7-13"><a href="#cb7-13" tabindex="-1"></a><span class="co">#&gt;        Between-stratum SD          1.703              1.083</span></span>
-<span id="cb7-14"><a href="#cb7-14" tabindex="-1"></a><span class="co">#&gt;                   VPC/ICC          0.063              0.026</span></span>
-<span id="cb7-15"><a href="#cb7-15" tabindex="-1"></a><span class="co">#&gt;    PCV (null -&gt; adjusted)                             0.766</span></span>
+<span id="cb7-10"><a href="#cb7-10" tabindex="-1"></a><span class="co">#&gt;                 Statistic          Null (Model 1)      Adjusted (Model 2)</span></span>
+<span id="cb7-11"><a href="#cb7-11" tabindex="-1"></a><span class="co">#&gt;                 Intercept 28.208 [27.298, 29.118] 30.050 [28.075, 32.026]</span></span>
+<span id="cb7-12"><a href="#cb7-12" tabindex="-1"></a><span class="co">#&gt;  Between-stratum variance                   2.900                   1.172</span></span>
+<span id="cb7-13"><a href="#cb7-13" tabindex="-1"></a><span class="co">#&gt;        Between-stratum SD                   1.703                   1.083</span></span>
+<span id="cb7-14"><a href="#cb7-14" tabindex="-1"></a><span class="co">#&gt;                   VPC/ICC                   0.063                   0.026</span></span>
+<span id="cb7-15"><a href="#cb7-15" tabindex="-1"></a><span class="co">#&gt;    PCV (null -&gt; adjusted)                                           0.596</span></span>
 <span id="cb7-16"><a href="#cb7-16" tabindex="-1"></a><span class="co">#&gt; </span></span>
-<span id="cb7-17"><a href="#cb7-17" tabindex="-1"></a><span class="co">#&gt; Note: The PCV is computed from maximum-likelihood-refitted between-stratum variances (required for a valid cross-model comparison; see ?calculate_pcv), while the Between-stratum variance/SD and VPC/ICC rows are each model&#39;s own REML estimate. The PCV therefore need not equal the variance reduction implied by the displayed variance rows.</span></span>
-<span id="cb7-18"><a href="#cb7-18" tabindex="-1"></a><span class="co">#&gt; </span></span>
-<span id="cb7-19"><a href="#cb7-19" tabindex="-1"></a><span class="co">#&gt; Strata ranked by predicted value (null model):</span></span>
-<span id="cb7-20"><a href="#cb7-20" tabindex="-1"></a><span class="co">#&gt;  Rank                          Stratum   N               Predicted</span></span>
-<span id="cb7-21"><a href="#cb7-21" tabindex="-1"></a><span class="co">#&gt;     1     female × Black × High School  46 33.274 [31.621, 34.927]</span></span>
-<span id="cb7-22"><a href="#cb7-22" tabindex="-1"></a><span class="co">#&gt;     2    female × Black × Some College  76 31.413 [30.060, 32.766]</span></span>
-<span id="cb7-23"><a href="#cb7-23" tabindex="-1"></a><span class="co">#&gt;     3  female × Black × 9 - 11th Grade  29 31.124 [29.177, 33.071]</span></span>
-<span id="cb7-24"><a href="#cb7-24" tabindex="-1"></a><span class="co">#&gt;     4     female × Mexican × 8th Grade  33 30.759 [28.895, 32.623]</span></span>
-<span id="cb7-25"><a href="#cb7-25" tabindex="-1"></a><span class="co">#&gt;     5  male × Mexican × 9 - 11th Grade  34 30.206 [28.361, 32.051]</span></span>
-<span id="cb7-26"><a href="#cb7-26" tabindex="-1"></a><span class="co">#&gt;     6     female × Other × High School   9 30.099 [27.462, 32.736]</span></span>
-<span id="cb7-27"><a href="#cb7-27" tabindex="-1"></a><span class="co">#&gt;     7    female × Black × College Grad  30 30.044 [28.119, 31.969]</span></span>
-<span id="cb7-28"><a href="#cb7-28" tabindex="-1"></a><span class="co">#&gt;     8    male × Mexican × College Grad  11 30.036 [27.503, 32.570]</span></span>
-<span id="cb7-29"><a href="#cb7-29" tabindex="-1"></a><span class="co">#&gt;     9   female × Mexican × High School  20 30.007 [27.824, 32.190]</span></span>
-<span id="cb7-30"><a href="#cb7-30" tabindex="-1"></a><span class="co">#&gt;    10      male × Hispanic × 8th Grade  10 29.929 [27.345, 32.513]</span></span>
-<span id="cb7-31"><a href="#cb7-31" tabindex="-1"></a><span class="co">#&gt;   ...                              ... ...                     ...</span></span>
-<span id="cb7-32"><a href="#cb7-32" tabindex="-1"></a><span class="co">#&gt;    41 female × Hispanic × Some College  26 27.762 [25.745, 29.779]</span></span>
-<span id="cb7-33"><a href="#cb7-33" tabindex="-1"></a><span class="co">#&gt;    42       female × Other × 8th Grade  12 27.741 [25.255, 30.227]</span></span>
-<span id="cb7-34"><a href="#cb7-34" tabindex="-1"></a><span class="co">#&gt;    43  female × Mexican × Some College  25 27.739 [25.697, 29.781]</span></span>
-<span id="cb7-35"><a href="#cb7-35" tabindex="-1"></a><span class="co">#&gt;    44  female × Other × 9 - 11th Grade   7 27.610 [24.855, 30.365]</span></span>
-<span id="cb7-36"><a href="#cb7-36" tabindex="-1"></a><span class="co">#&gt;    45         male × Other × 8th Grade  11 27.304 [24.771, 29.838]</span></span>
-<span id="cb7-37"><a href="#cb7-37" tabindex="-1"></a><span class="co">#&gt;    46    female × White × College Grad 335 27.073 [26.383, 27.763]</span></span>
-<span id="cb7-38"><a href="#cb7-38" tabindex="-1"></a><span class="co">#&gt;    47    female × Other × Some College  37 26.795 [25.004, 28.585]</span></span>
-<span id="cb7-39"><a href="#cb7-39" tabindex="-1"></a><span class="co">#&gt;    48    male × Other × 9 - 11th Grade  14 26.758 [24.359, 29.157]</span></span>
-<span id="cb7-40"><a href="#cb7-40" tabindex="-1"></a><span class="co">#&gt;    49      male × Other × College Grad  44 26.669 [24.988, 28.351]</span></span>
-<span id="cb7-41"><a href="#cb7-41" tabindex="-1"></a><span class="co">#&gt;    50    female × Other × College Grad  46 25.913 [24.259, 27.566]</span></span>
-<span id="cb7-42"><a href="#cb7-42" tabindex="-1"></a><span class="co">#&gt;               Stratum RE</span></span>
-<span id="cb7-43"><a href="#cb7-43" tabindex="-1"></a><span class="co">#&gt;     4.367 [2.714, 6.020]</span></span>
-<span id="cb7-44"><a href="#cb7-44" tabindex="-1"></a><span class="co">#&gt;     2.594 [1.241, 3.947]</span></span>
-<span id="cb7-45"><a href="#cb7-45" tabindex="-1"></a><span class="co">#&gt;     2.174 [0.227, 4.121]</span></span>
-<span id="cb7-46"><a href="#cb7-46" tabindex="-1"></a><span class="co">#&gt;    1.823 [-0.041, 3.687]</span></span>
-<span id="cb7-47"><a href="#cb7-47" tabindex="-1"></a><span class="co">#&gt;    1.370 [-0.475, 3.215]</span></span>
-<span id="cb7-48"><a href="#cb7-48" tabindex="-1"></a><span class="co">#&gt;    1.101 [-1.537, 3.738]</span></span>
-<span id="cb7-49"><a href="#cb7-49" tabindex="-1"></a><span class="co">#&gt;    1.115 [-0.810, 3.040]</span></span>
-<span id="cb7-50"><a href="#cb7-50" tabindex="-1"></a><span class="co">#&gt;    1.279 [-1.254, 3.813]</span></span>
-<span id="cb7-51"><a href="#cb7-51" tabindex="-1"></a><span class="co">#&gt;    1.195 [-0.989, 3.378]</span></span>
-<span id="cb7-52"><a href="#cb7-52" tabindex="-1"></a><span class="co">#&gt;    0.921 [-1.663, 3.505]</span></span>
-<span id="cb7-53"><a href="#cb7-53" tabindex="-1"></a><span class="co">#&gt;                      ...</span></span>
-<span id="cb7-54"><a href="#cb7-54" tabindex="-1"></a><span class="co">#&gt;   -0.957 [-2.974, 1.060]</span></span>
-<span id="cb7-55"><a href="#cb7-55" tabindex="-1"></a><span class="co">#&gt;   -1.231 [-3.717, 1.255]</span></span>
-<span id="cb7-56"><a href="#cb7-56" tabindex="-1"></a><span class="co">#&gt;   -0.935 [-2.977, 1.107]</span></span>
-<span id="cb7-57"><a href="#cb7-57" tabindex="-1"></a><span class="co">#&gt;   -1.240 [-3.995, 1.515]</span></span>
-<span id="cb7-58"><a href="#cb7-58" tabindex="-1"></a><span class="co">#&gt;   -1.695 [-4.229, 0.839]</span></span>
-<span id="cb7-59"><a href="#cb7-59" tabindex="-1"></a><span class="co">#&gt;  -1.820 [-2.510, -1.130]</span></span>
-<span id="cb7-60"><a href="#cb7-60" tabindex="-1"></a><span class="co">#&gt;  -2.066 [-3.857, -0.275]</span></span>
-<span id="cb7-61"><a href="#cb7-61" tabindex="-1"></a><span class="co">#&gt;   -2.125 [-4.524, 0.273]</span></span>
-<span id="cb7-62"><a href="#cb7-62" tabindex="-1"></a><span class="co">#&gt;  -2.145 [-3.826, -0.464]</span></span>
-<span id="cb7-63"><a href="#cb7-63" tabindex="-1"></a><span class="co">#&gt;  -2.865 [-4.518, -1.212]</span></span>
-<span id="cb7-64"><a href="#cb7-64" tabindex="-1"></a><span class="co">#&gt;   (30 strata between ranks 11 and 40 not shown; see $strata)</span></span>
-<span id="cb7-65"><a href="#cb7-65" tabindex="-1"></a><span class="co">#&gt;   Predicted intervals are conditional (random-effect) only; Stratum RE is the stratum BLUP.</span></span>
-<span id="cb7-66"><a href="#cb7-66" tabindex="-1"></a><span class="co">#&gt; </span></span>
-<span id="cb7-67"><a href="#cb7-67" tabindex="-1"></a><span class="co">#&gt; Estimates are point values unless a [low, high] interval is shown (VPC/PCV).</span></span></code></pre></div>
+<span id="cb7-17"><a href="#cb7-17" tabindex="-1"></a><span class="co">#&gt; Strata ranked by predicted value (null model):</span></span>
+<span id="cb7-18"><a href="#cb7-18" tabindex="-1"></a><span class="co">#&gt;  Rank                          Stratum   N               Predicted</span></span>
+<span id="cb7-19"><a href="#cb7-19" tabindex="-1"></a><span class="co">#&gt;     1     female × Black × High School  46 33.274 [31.621, 34.927]</span></span>
+<span id="cb7-20"><a href="#cb7-20" tabindex="-1"></a><span class="co">#&gt;     2    female × Black × Some College  76 31.413 [30.060, 32.766]</span></span>
+<span id="cb7-21"><a href="#cb7-21" tabindex="-1"></a><span class="co">#&gt;     3  female × Black × 9 - 11th Grade  29 31.124 [29.177, 33.071]</span></span>
+<span id="cb7-22"><a href="#cb7-22" tabindex="-1"></a><span class="co">#&gt;     4     female × Mexican × 8th Grade  33 30.759 [28.895, 32.623]</span></span>
+<span id="cb7-23"><a href="#cb7-23" tabindex="-1"></a><span class="co">#&gt;     5  male × Mexican × 9 - 11th Grade  34 30.206 [28.361, 32.051]</span></span>
+<span id="cb7-24"><a href="#cb7-24" tabindex="-1"></a><span class="co">#&gt;     6     female × Other × High School   9 30.099 [27.462, 32.736]</span></span>
+<span id="cb7-25"><a href="#cb7-25" tabindex="-1"></a><span class="co">#&gt;     7    female × Black × College Grad  30 30.044 [28.119, 31.969]</span></span>
+<span id="cb7-26"><a href="#cb7-26" tabindex="-1"></a><span class="co">#&gt;     8    male × Mexican × College Grad  11 30.036 [27.503, 32.570]</span></span>
+<span id="cb7-27"><a href="#cb7-27" tabindex="-1"></a><span class="co">#&gt;     9   female × Mexican × High School  20 30.007 [27.824, 32.190]</span></span>
+<span id="cb7-28"><a href="#cb7-28" tabindex="-1"></a><span class="co">#&gt;    10      male × Hispanic × 8th Grade  10 29.929 [27.345, 32.513]</span></span>
+<span id="cb7-29"><a href="#cb7-29" tabindex="-1"></a><span class="co">#&gt;   ...                              ... ...                     ...</span></span>
+<span id="cb7-30"><a href="#cb7-30" tabindex="-1"></a><span class="co">#&gt;    41 female × Hispanic × Some College  26 27.762 [25.745, 29.779]</span></span>
+<span id="cb7-31"><a href="#cb7-31" tabindex="-1"></a><span class="co">#&gt;    42       female × Other × 8th Grade  12 27.741 [25.255, 30.227]</span></span>
+<span id="cb7-32"><a href="#cb7-32" tabindex="-1"></a><span class="co">#&gt;    43  female × Mexican × Some College  25 27.739 [25.697, 29.781]</span></span>
+<span id="cb7-33"><a href="#cb7-33" tabindex="-1"></a><span class="co">#&gt;    44  female × Other × 9 - 11th Grade   7 27.610 [24.855, 30.365]</span></span>
+<span id="cb7-34"><a href="#cb7-34" tabindex="-1"></a><span class="co">#&gt;    45         male × Other × 8th Grade  11 27.304 [24.771, 29.838]</span></span>
+<span id="cb7-35"><a href="#cb7-35" tabindex="-1"></a><span class="co">#&gt;    46    female × White × College Grad 335 27.073 [26.383, 27.763]</span></span>
+<span id="cb7-36"><a href="#cb7-36" tabindex="-1"></a><span class="co">#&gt;    47    female × Other × Some College  37 26.795 [25.004, 28.585]</span></span>
+<span id="cb7-37"><a href="#cb7-37" tabindex="-1"></a><span class="co">#&gt;    48    male × Other × 9 - 11th Grade  14 26.758 [24.359, 29.157]</span></span>
+<span id="cb7-38"><a href="#cb7-38" tabindex="-1"></a><span class="co">#&gt;    49      male × Other × College Grad  44 26.669 [24.988, 28.351]</span></span>
+<span id="cb7-39"><a href="#cb7-39" tabindex="-1"></a><span class="co">#&gt;    50    female × Other × College Grad  46 25.913 [24.259, 27.566]</span></span>
+<span id="cb7-40"><a href="#cb7-40" tabindex="-1"></a><span class="co">#&gt;               Stratum RE</span></span>
+<span id="cb7-41"><a href="#cb7-41" tabindex="-1"></a><span class="co">#&gt;     4.367 [2.714, 6.020]</span></span>
+<span id="cb7-42"><a href="#cb7-42" tabindex="-1"></a><span class="co">#&gt;     2.594 [1.241, 3.947]</span></span>
+<span id="cb7-43"><a href="#cb7-43" tabindex="-1"></a><span class="co">#&gt;     2.174 [0.227, 4.121]</span></span>
+<span id="cb7-44"><a href="#cb7-44" tabindex="-1"></a><span class="co">#&gt;    1.823 [-0.041, 3.687]</span></span>
+<span id="cb7-45"><a href="#cb7-45" tabindex="-1"></a><span class="co">#&gt;    1.370 [-0.475, 3.215]</span></span>
+<span id="cb7-46"><a href="#cb7-46" tabindex="-1"></a><span class="co">#&gt;    1.101 [-1.537, 3.738]</span></span>
+<span id="cb7-47"><a href="#cb7-47" tabindex="-1"></a><span class="co">#&gt;    1.115 [-0.810, 3.040]</span></span>
+<span id="cb7-48"><a href="#cb7-48" tabindex="-1"></a><span class="co">#&gt;    1.279 [-1.254, 3.813]</span></span>
+<span id="cb7-49"><a href="#cb7-49" tabindex="-1"></a><span class="co">#&gt;    1.195 [-0.989, 3.378]</span></span>
+<span id="cb7-50"><a href="#cb7-50" tabindex="-1"></a><span class="co">#&gt;    0.921 [-1.663, 3.505]</span></span>
+<span id="cb7-51"><a href="#cb7-51" tabindex="-1"></a><span class="co">#&gt;                      ...</span></span>
+<span id="cb7-52"><a href="#cb7-52" tabindex="-1"></a><span class="co">#&gt;   -0.957 [-2.974, 1.060]</span></span>
+<span id="cb7-53"><a href="#cb7-53" tabindex="-1"></a><span class="co">#&gt;   -1.231 [-3.717, 1.255]</span></span>
+<span id="cb7-54"><a href="#cb7-54" tabindex="-1"></a><span class="co">#&gt;   -0.935 [-2.977, 1.107]</span></span>
+<span id="cb7-55"><a href="#cb7-55" tabindex="-1"></a><span class="co">#&gt;   -1.240 [-3.995, 1.515]</span></span>
+<span id="cb7-56"><a href="#cb7-56" tabindex="-1"></a><span class="co">#&gt;   -1.695 [-4.229, 0.839]</span></span>
+<span id="cb7-57"><a href="#cb7-57" tabindex="-1"></a><span class="co">#&gt;  -1.820 [-2.510, -1.130]</span></span>
+<span id="cb7-58"><a href="#cb7-58" tabindex="-1"></a><span class="co">#&gt;  -2.066 [-3.857, -0.275]</span></span>
+<span id="cb7-59"><a href="#cb7-59" tabindex="-1"></a><span class="co">#&gt;   -2.125 [-4.524, 0.273]</span></span>
+<span id="cb7-60"><a href="#cb7-60" tabindex="-1"></a><span class="co">#&gt;  -2.145 [-3.826, -0.464]</span></span>
+<span id="cb7-61"><a href="#cb7-61" tabindex="-1"></a><span class="co">#&gt;  -2.865 [-4.518, -1.212]</span></span>
+<span id="cb7-62"><a href="#cb7-62" tabindex="-1"></a><span class="co">#&gt;   (30 strata between ranks 11 and 40 not shown; see $strata)</span></span>
+<span id="cb7-63"><a href="#cb7-63" tabindex="-1"></a><span class="co">#&gt;   Predicted intervals are conditional (random-effect) only; Stratum RE is the stratum BLUP.</span></span>
+<span id="cb7-64"><a href="#cb7-64" tabindex="-1"></a><span class="co">#&gt; </span></span>
+<span id="cb7-65"><a href="#cb7-65" tabindex="-1"></a><span class="co">#&gt; Estimates are point values unless a [low, high] interval is shown. The</span></span>
+<span id="cb7-66"><a href="#cb7-66" tabindex="-1"></a><span class="co">#&gt; intercept interval is the Wald one summary() reports; the variance and SD</span></span>
+<span id="cb7-67"><a href="#cb7-67" tabindex="-1"></a><span class="co">#&gt; rows carry no interval.</span></span></code></pre></div>
 <p>The <code>$models</code> element is a <strong>numeric,
 export-ready</strong> data frame (statistics in rows, a column per model
 with <code>*_lower</code>/<code>*_upper</code> interval columns), so it
@@ -569,11 +574,11 @@ drops straight into <code>knitr::kable()</code> or
 <tr class="odd">
 <td align="left">Intercept</td>
 <td align="right">28.208</td>
-<td align="right">NA</td>
-<td align="right">NA</td>
+<td align="right">27.298</td>
+<td align="right">29.118</td>
 <td align="right">30.050</td>
-<td align="right">NA</td>
-<td align="right">NA</td>
+<td align="right">28.075</td>
+<td align="right">32.026</td>
 </tr>
 <tr class="even">
 <td align="left">Between-stratum variance</td>
@@ -607,7 +612,7 @@ drops straight into <code>knitr::kable()</code> or
 <td align="right">NA</td>
 <td align="right">NA</td>
 <td align="right">NA</td>
-<td align="right">0.766</td>
+<td align="right">0.596</td>
 <td align="right">NA</td>
 <td align="right">NA</td>
 </tr>
@@ -655,7 +660,8 @@ column (gap from the best model):</p>
 <span id="cb12-8"><a href="#cb12-8" tabindex="-1"></a><span class="co">#&gt; </span></span>
 <span id="cb12-9"><a href="#cb12-9" tabindex="-1"></a><span class="co">#&gt; delta = difference from the best model on AIC (lower is better).</span></span>
 <span id="cb12-10"><a href="#cb12-10" tabindex="-1"></a><span class="co">#&gt; REML lmer fit(s) were refitted with ML so AIC/BIC are comparable across different fixed effects.</span></span>
-<span id="cb12-11"><a href="#cb12-11" tabindex="-1"></a><span class="co">#&gt; Information criteria are only comparable across models fitted to the same analytic sample (and, for AIC/BIC, the same family).</span></span></code></pre></div>
+<span id="cb12-11"><a href="#cb12-11" tabindex="-1"></a><span class="co">#&gt; Information criteria are only comparable across models fitted to the same analytic sample with the same weights,</span></span>
+<span id="cb12-12"><a href="#cb12-12" tabindex="-1"></a><span class="co">#&gt; and the same family and link unless all are count (Poisson / negative binomial), all binomial or all cumulative fits.</span></span></code></pre></div>
 </div>
 <div id="see-also" class="section level2">
 <h2>See also</h2>

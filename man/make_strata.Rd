@@ -4,7 +4,14 @@
 \alias{make_strata}
 \title{Create Strata from Multiple Variables}
 \usage{
-make_strata(data, vars, sep = " × ", min_n = 1, autobin = TRUE)
+make_strata(
+  data,
+  vars,
+  sep = " × ",
+  min_n = 1,
+  autobin = TRUE,
+  bin_rows = NULL
+)
 }
 \arguments{
 \item{data}{A data frame containing the variables to create strata from.}
@@ -24,13 +31,25 @@ resulting strata are data-dependent (tertile cut-points depend on the sample)
 and a continuous variable placed in the grouping term is usually unintended.
 Set \code{autobin = FALSE} to disable, or bin the variable yourself for
 explicit, reproducible cut-points.}
+
+\item{bin_rows}{Optional logical vector, one element per row of \code{data},
+selecting the rows used to compute the auto-bin cut-points (every row is still
+assigned a stratum). Mainly for internal use by \code{\link{fit_maihda}}, which
+passes the \code{subset} rows so that \code{fit_maihda(..., subset = keep)}
+bins on the same sample as fitting \code{data[keep, ]}. Default \code{NULL}
+uses all rows.}
 }
 \value{
-A list with two elements:
+An object of class \code{maihda_strata}: a list with elements
   \item{data}{The original data frame with an added 'stratum' column. The
     strata_info is also attached as an attribute for use by fit_maihda()}
   \item{strata_info}{A data frame with information about each stratum including
     counts and the combination of variable values}
+  \item{vars}{The stratum-defining variable names, as supplied.}
+  \item{sep}{The label separator used.}
+  \item{min_n}{The minimum stratum size applied.}
+  \item{autobin_info}{A named list with the \code{breaks} and \code{labels}
+    of each auto-binned numeric variable (empty when nothing was binned).}
 }
 \description{
 This function creates strata (intersectional categories) from multiple

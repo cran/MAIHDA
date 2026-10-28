@@ -25,10 +25,14 @@ original data from model fitting.}
   \item "strata": Stratum-level predictions (random effects only). For a
     longitudinal (growth-curve) fit a stratum is a \emph{trajectory}, so this
     returns the per-stratum trajectory parameters (baseline deviation, random
-    intercept and random slope(s)) rather than a single random effect.
+    intercept and random slope(s)) rather than a single random effect. A
+    \emph{non-longitudinal} fit whose stratum random effects include random
+    slopes (a hand-written \code{(1 + x | stratum)}) is an error here, as in
+    \code{summary()}: the single value this would return is the intercept
+    alone -- the stratum effect only where the slope variables are zero.
 }
-For backward compatibility, "link" or "response" may also be passed here
-and will be interpreted as individual-level predictions on that scale.}
+"link" or "response" is also accepted and gives individual-level
+predictions on that scale.}
 
 \item{scale}{Character string specifying the prediction scale for
 individual-level predictions: "response" (default) or "link". For a
@@ -39,21 +43,19 @@ For an aggregated-binomial fit (an lme4 \code{cbind(success, failure)} or a
 brms \code{success | trials(n)}) the "response" scale is the per-trial
 \emph{probability} on both engines (not the expected success count).}
 
-\item{allow_new_levels}{Logical. By default (\code{FALSE}) a stratum in
-\code{newdata} that the model never saw -- whether supplied directly as a
-\code{stratum} column or rebuilt from the grouping variables -- is an error,
-for every engine, matching \pkg{lme4}'s default. Set \code{TRUE} to instead
-predict unseen strata with the stratum random effect dropped (treated as
-zero), while keeping any \emph{other} random effect the row participates in
-(e.g. a contextual \code{(1 | school)} intercept from
-\code{fit_maihda(context = )}, or a longitudinal growth term) -- the same
-behaviour as \pkg{lme4}'s \code{allow.new.levels}, which zeroes only the unseen
-level's effect and keeps seen ones. For the usual single-stratum model the
-stratum is the only random effect, so this is the \emph{population-average}
-(fixed-effects-only) prediction. This affects \code{type = "individual"} only:
-a stratum-level prediction (\code{type = "strata"}) has no random effect to
-report for an unseen stratum, so unseen strata remain an error there
-regardless.}
+\item{allow_new_levels}{Logical. \code{FALSE} (default): a stratum in
+\code{newdata} that the model never saw is an error, as in \pkg{lme4}.
+\code{TRUE}: an unseen stratum is predicted \emph{at a zero random effect}
+for that stratum; any other random effect the row has (a \code{context}
+intercept, a longitudinal growth term) is kept. That is the prediction for a
+stratum whose effect is zero,
+\strong{not} a response-scale population average: the two agree on the link
+scale and under an identity link, but under a log link with stratum variance
+\eqn{\tau^2} the population mean is larger by a factor \eqn{\exp(\tau^2/2)},
+and under a logit link the population probability lies closer to 0.5. The
+response-scale value returned is the median, not the mean, of the
+stratum-specific means. Applies to \code{type = "individual"} only; with
+\code{type = "strata"} an unseen stratum is always an error.}
 
 \item{...}{Additional arguments passed to predict method of underlying model.}
 }
@@ -61,7 +63,12 @@ regardless.}
 Depending on type:
   \itemize{
     \item For "individual": A numeric vector of predicted values on the
-      requested scale
+      requested scale, one per row of \code{newdata} -- or, when
+      \code{newdata} is \code{NULL}, one per ANALYTIC row, matching
+      \code{nrow(object$data)}. A model fitted with
+      \code{na.action = na.exclude} is \emph{not} padded back out to the
+      original input rows the way \code{predict()} on the underlying fit is,
+      so the result can always be bound to \code{object$data}.
     \item For "strata": A data frame with stratum ID and predicted random
       effect. When \code{newdata} is supplied, the result is restricted to the
       strata present in \code{newdata} (and a stratum the model never saw is an

@@ -208,17 +208,21 @@ test_that("poisson summaries evaluate the level-1 variance at the marginal mean"
   ]
   # Stryhn/Nakagawa level-1 variance at the MARGINAL expected count
   # lambda_i = exp(x_i'beta + v/2), with v the (constant, intercept-only)
-  # between-stratum variance -- the lognormal mean correction -- averaged over
-  # the sample. NOT the conditional fitted mean exp(x'beta + u_hat).
+  # between-stratum variance -- the lognormal mean correction. The per-row counts
+  # are averaged over the sample BEFORE the log1p transform: lambda is the single
+  # global mean count the cited estimator is defined at. NOT the conditional fitted
+  # mean exp(x'beta + u_hat), and NOT the average of the per-row transforms (which
+  # is convex, hence biased upward -- see test-audit-2026-07-30.R).
   eta <- as.numeric(stats::predict(model$model, re.form = NA, type = "link"))
   v <- as.numeric(lme4::VarCorr(model$model)$stratum[1, 1])
   lambda <- pmax(exp(eta + v / 2), .Machine$double.eps)
-  expected <- mean(log1p(1 / lambda))
+  expected <- log1p(1 / mean(lambda))
   expect_equal(observed, expected, tolerance = 1e-8)
   expect_false(isTRUE(all.equal(observed, 1)))
+  expect_false(isTRUE(all.equal(observed, mean(log1p(1 / lambda)), tolerance = 1e-6)))
 
   # ... and it genuinely differs from the conditional-fitted version it replaces.
-  cond <- mean(log1p(1 / pmax(stats::fitted(model$model), .Machine$double.eps)))
+  cond <- log1p(1 / mean(pmax(stats::fitted(model$model), .Machine$double.eps)))
   expect_false(isTRUE(all.equal(observed, cond, tolerance = 1e-6)))
 
   # In the null model every row's lambda is exactly Nakagawa et al.'s single
@@ -326,16 +330,17 @@ test_that("stepwise_pcv uses one complete analytic sample across steps", {
 
   out <- stepwise_pcv(d, "y", c("x", "z"))
   complete_d <- d[stats::complete.cases(d[, c("y", "stratum", "x", "z")]), ]
-  # stepwise_pcv refits REML lmer fits with ML before the cross-step variance
-  # comparison (see calculate_pcv()), so the reference models must be refit likewise.
-  ml <- function(m) MAIHDA:::extract_between_variance(MAIHDA:::maihda_pcv_refit_ml(m))
+  # stepwise_pcv() differences each fit's own fitted (REML) between-stratum variance
+  # by default (estimation = "fitted"; see calculate_pcv()), so the reference models
+  # are read WITHOUT an ML refit.
+  bv <- function(m) MAIHDA:::extract_between_variance(m)
   null_model <- fit_maihda(y ~ 1 + (1 | stratum), complete_d)
   x_model <- fit_maihda(y ~ x + (1 | stratum), complete_d)
   z_model <- fit_maihda(y ~ x + z + (1 | stratum), complete_d)
 
-  expect_equal(out$Variance[1], ml(null_model), tolerance = 1e-8)
-  expect_equal(out$Variance[2], ml(x_model), tolerance = 1e-8)
-  expect_equal(out$Variance[3], ml(z_model), tolerance = 1e-8)
+  expect_equal(out$Variance[1], bv(null_model), tolerance = 1e-8)
+  expect_equal(out$Variance[2], bv(x_model), tolerance = 1e-8)
+  expect_equal(out$Variance[3], bv(z_model), tolerance = 1e-8)
 })
 
 test_that("stepwise_pcv errors when no complete analytic sample remains", {
@@ -361,7 +366,13 @@ test_that("stepwise_pcv auto-detects a binary outcome when family is the default
   )
   strata <- make_strata(base, vars = c("g", "r"))
   d <- strata$data
-  d$y <- rbinom(240, 1, plogis(-0.2 + 0.3 * d$age))
+  # Genuine between-stratum signal so the null model is not singular -- otherwise
+  # the PCV boundary guard rejects the degenerate denominator before the binary
+  # family auto-detection under test is reached (an exactly-zero null variance is
+  # platform-dependent for a binary glmer fit with no stratum effect).
+  sf <- factor(d$stratum)
+  u <- stats::rnorm(nlevels(sf), sd = 1.5)
+  d$y <- rbinom(240, 1, plogis(-0.2 + u[sf] + 0.3 * d$age))
 
   # Default family must not silently fit a Gaussian PCV on a binary outcome.
   expect_warning(
@@ -582,9 +593,15 @@ test_that("calculate_pcv refits with ML when a non-stratum RE is on the boundary
   # The two genuinely differ here, so the comparison below is meaningful.
   expect_false(isTRUE(all.equal(reml_pcv, ml_pcv)))
 
-  pcv <- calculate_pcv(m1, m2)$pcv
-  expect_equal(pcv, ml_pcv, tolerance = 1e-8)               # uses the ML refit
-  expect_false(isTRUE(all.equal(pcv, reml_pcv)))            # not the REML estimate
+  # estimation = "ML" refits with ML even though the GLOBAL fit is singular via the
+  # site boundary (the guard reads the stratum component, not global isSingular()).
+  pcv_ml <- calculate_pcv(m1, m2, estimation = "ML")$pcv
+  expect_equal(pcv_ml, ml_pcv, tolerance = 1e-8)            # uses the ML refit
+  expect_false(isTRUE(all.equal(pcv_ml, reml_pcv)))         # not the REML estimate
+
+  # The default (estimation = "fitted") returns the REML estimate unchanged.
+  pcv_fit <- calculate_pcv(m1, m2)$pcv
+  expect_equal(pcv_fit, reml_pcv, tolerance = 1e-8)
 })
 
 test_that("maihda_pcv_refit_ml skips the refit when the stratum is at the boundary", {
@@ -1028,7 +1045,7 @@ test_that("maihda_brms_unseen_re_formula drops only the stratum term (Stan-free)
   }
 
   # Single-stratum model: stratum is the only random effect, so the excluding
-  # re_formula is NA (drop all group terms -> fixed-effects-only population average).
+  # re_formula is NA (drop all group terms -> fixed-effects-only prediction).
   expect_true(is.na(MAIHDA:::maihda_brms_unseen_re_formula(
     mk(y ~ x + (1 | stratum)))))
 
@@ -1297,4 +1314,71 @@ test_that("brms fitted() category arrays collapse to scores for a single row (St
   f1 <- make_f(probs[1, , drop = FALSE])
   expect_equal(MAIHDA:::maihda_brms_fitted_array_scores(f1), want[1],
                tolerance = 1e-12)
+})
+
+test_that("maihda_nobars preserves brms addition-term responses", {
+  # reformulas::nobars() descends into the LHS, so `y | trials(n)` is stripped
+  # like a random-effect bar and the predictor is promoted to the response
+  # (y | trials(n) ~ x + (1 | a:b) became x ~ 1). maihda_nobars() strips the
+  # RHS only.
+  nb <- MAIHDA:::maihda_nobars(y | trials(n) ~ x + (1 | a:b))
+  expect_equal(deparse(nb), "y | trials(n) ~ x")
+
+  # Bars-only RHS keeps the response with an intercept-only fixed part.
+  nb2 <- MAIHDA:::maihda_nobars(y | trials(n) ~ (1 | a:b))
+  expect_equal(deparse(nb2), "y | trials(n) ~ 1")
+
+  # Other addition terms and call-valued responses survive too.
+  expect_equal(deparse(MAIHDA:::maihda_nobars(y | weights(w) ~ x + z + (1 | g))),
+               "y | weights(w) ~ x + z")
+  expect_equal(deparse(MAIHDA:::maihda_nobars(cbind(succ, fail) ~ (1 | a:b))),
+               "cbind(succ, fail) ~ 1")
+
+  # Plain formulas are unchanged relative to nobars().
+  expect_equal(deparse(MAIHDA:::maihda_nobars(y ~ x + (1 | g))),
+               deparse(reformulas::nobars(y ~ x + (1 | g))))
+})
+
+test_that("automatic strata creation preserves a trials() response", {
+  set.seed(1101)
+  d <- data.frame(
+    a = sample(c("F", "M"), 60, replace = TRUE),
+    b = sample(c("lo", "hi"), 60, replace = TRUE),
+    x = rnorm(60),
+    n = rep(10L, 60)
+  )
+  d$y <- rbinom(60, size = d$n, prob = 0.4)
+
+  res <- MAIHDA:::maihda_resolve_strata_formula(y | trials(n) ~ x + (1 | a:b), d)
+  # The rewritten formula must keep the aggregated-binomial response, not
+  # silently model x (the corruption produced x ~ (1 | stratum)).
+  expect_equal(deparse(res$formula), "y | trials(n) ~ x + (1 | stratum)")
+  expect_true("stratum" %in% names(res$data))
+  expect_equal(res$strata_vars, c("a", "b"))
+})
+
+test_that("crossed-dimensions formula builder preserves a trials() response", {
+  set.seed(1102)
+  d <- data.frame(
+    a = factor(sample(c("F", "M"), 60, replace = TRUE)),
+    b = factor(sample(c("lo", "hi"), 60, replace = TRUE)),
+    x = rnorm(60),
+    n = rep(10L, 60)
+  )
+  d$stratum <- interaction(d$a, d$b, sep = "_")
+  d$y <- rbinom(60, size = d$n, prob = 0.4)
+
+  cc <- MAIHDA:::maihda_cross_classified_formula(
+    y | trials(n) ~ x + (1 | stratum), strata_vars = c("a", "b"),
+    autobin_info = NULL, data = d)
+  expect_equal(deparse(cc$formula),
+               "y | trials(n) ~ x + (1 | a) + (1 | b) + (1 | stratum)")
+})
+
+test_that("longitudinal growth formula builder preserves a trials() response", {
+  gf <- MAIHDA:::maihda_longitudinal_formula(
+    y | trials(n) ~ x + (1 | stratum), id = "id", time = "time",
+    time_degree = 1)
+  expect_equal(deparse(gf),
+               "y | trials(n) ~ x + time + (time | id) + (time | stratum)")
 })

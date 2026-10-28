@@ -15,18 +15,61 @@
 #'   for the brms, wemix, and ordinal engines the PCV is reported as a point
 #'   estimate and \code{bootstrap = TRUE} is an error (see Details).
 #' @param n_boot Number of bootstrap samples if bootstrap = TRUE. Default is 1000.
+#'   A value below about 200 warns that the interval's tail endpoints are unstable
+#'   (the hard minimum is 10).
 #' @param conf_level Confidence level for bootstrap intervals. Default is 0.95.
+#' @param estimation Which between-stratum variances are compared: \code{"fitted"}
+#'   (default), \code{"ML"} or \code{"REML"}. \code{"fitted"} uses each model's own
+#'   estimate (REML for a Gaussian \code{lmer} fit, maximum likelihood for a
+#'   \code{glmer} fit). \code{"ML"} refits REML \code{lmer} fits by maximum likelihood
+#'   first, which overstates the PCV when strata are few. \code{"REML"} compares
+#'   REML-type variances for binomial and Poisson \code{glmer} fits, whose
+#'   maximum-likelihood PCV is overstated in the same way. See Details.
 #'
 #' @return A list containing:
 #'   \item{pcv}{The estimated proportional change in variance}
-#'   \item{pvc}{Deprecated duplicate of \code{pcv}, kept so code written against
-#'     the historical \code{calculate_pvc()} spelling keeps working; it will be
+#'   \item{pvc}{Deprecated duplicate of \code{pcv}; reading it warns, and it will be
 #'     removed in a future release}
 #'   \item{var_model1}{Between-stratum variance from model1}
 #'   \item{var_model2}{Between-stratum variance from model2}
+#'   \item{estimation}{The variance-estimation basis requested (\code{"fitted"},
+#'     \code{"ML"} or \code{"REML"})}
+#'   \item{estimation_used}{The basis actually used: \code{"fitted"}, \code{"ML"},
+#'     \code{"mixed"}, \code{"REML"} or \code{"posterior"}. \code{"mixed"} arises under
+#'     \code{estimation = "ML"} when a model keeps its REML fit -- its between-stratum
+#'     variance is on the boundary so the ML refit is skipped, or \code{\link[lme4]{refitML}}
+#'     failed -- so the comparison is partly REML rather than the pure ML one
+#'     requested. \code{"REML"} is reported when the REML-type variances of a
+#'     \code{glmer} fit were compared; \code{estimation = "REML"} on REML \code{lmer}
+#'     fits uses them as fitted and reports \code{"fitted"}. \code{"posterior"} is
+#'     reported for a \code{brms} comparison (a Bayesian posterior, on which
+#'     \code{"ML"} and \code{"REML"} are no-ops). \code{print()} states the basis}
+#'   \item{ml_variances}{Logical; \code{TRUE} when the compared variances are
+#'     maximum-likelihood estimates (a \code{glmer}, wemix or ordinal fit, or an
+#'     \code{lmer} fit made or refitted by maximum likelihood). \code{print()} notes it
+#'     under the default \code{estimation}}
+#'   \item{reml_available}{Logical; \code{TRUE} when \code{estimation = "REML"} would
+#'     compare REML-type variances for these two models (binomial or Poisson
+#'     \code{glmer} fits it accepts)}
+#'   \item{pcv_fitted, var_model1_fitted, var_model2_fitted}{Present when
+#'     \code{estimation_used} is \code{"REML"}: the PCV and the two variances as fitted
+#'     by maximum likelihood, the values \code{estimation = "fitted"} returns}
+#'   \item{adjusted_at_boundary}{Logical; \code{TRUE} when model2's between-stratum
+#'     variance is on the singularity boundary, so the PCV is pinned near 1 (100\%) and
+#'     its interval/SE are unreliable -- consistent with genuinely additive strata as
+#'     well as a degenerate fit (\code{print()} states this)}
+#'   \item{ml_refit_failed}{Logical; \code{TRUE} when \code{estimation = "ML"} was
+#'     requested but \code{\link[lme4]{refitML}} failed for a model, so its REML fit was
+#'     used instead (the comparison is then not on a pure ML basis)}
 #'   \item{ci_lower}{Lower bound of confidence interval (if bootstrap = TRUE)}
 #'   \item{ci_upper}{Upper bound of confidence interval (if bootstrap = TRUE)}
 #'   \item{bootstrap}{Logical indicating if bootstrap was used}
+#'   \item{n_boot_nonconverged}{Number of contributing bootstrap draws whose refit
+#'     optimiser did not converge (\code{optinfo$conv$opt != 0}); these are retained
+#'     in the interval and counted, so \code{n_boot_ok} does not imply convergence}
+#'   \item{interval_reliable}{Logical (bootstrap only); \code{FALSE} when more than
+#'     half the contributing draws did not converge, in which case the interval is
+#'     still returned but flagged unreliable (see Details)}
 #'
 #' @details
 #' The PCV is the proportional change in between-stratum variance when moving from
@@ -38,18 +81,66 @@
 #' non-nested models the PCV is simply a model-dependent difference in variance,
 #' not an explained proportion.
 #'
-#' \strong{REML vs ML.} \code{lmer} fits Gaussian models by REML, whose
-#' between-stratum variance estimate is \emph{not} comparable across models with
-#' different fixed effects -- exactly the canonical null-vs-adjusted PCV, where the
-#' adjusted model adds the dimensions' main effects. \code{calculate_pcv()} therefore
-#' refits any REML \code{lmer} model with maximum likelihood
-#' (\code{\link[lme4]{refitML}}) before reading the variances (and before the
-#' parametric bootstrap, so the interval matches), matching \code{\link{maihda_ic}}
-#' and \code{anova()} on \code{lme4} models. Using REML estimates here biases the PCV
-#' (it overstates the residual between-stratum variance of the adjusted model). GLMM
-#' fits (\code{glmer}) and the brms/wemix/ordinal engines are already on the
-#' maximum-likelihood scale and are unaffected; single-model VPC/ICC summaries keep
-#' their REML fit, since that comparison-free quantity is not subject to the pitfall.
+#' \strong{REML vs ML (the \code{estimation} argument).} \code{estimation} sets which
+#' between-stratum variances are compared:
+#' \describe{
+#'   \item{\code{"fitted"} (default)}{each model's own estimate -- the REML estimate
+#'     for a Gaussian \code{lmer} fit, the variance
+#'     \code{\link{summary.maihda_model}} reports.}
+#'   \item{\code{"ML"}}{REML \code{lmer} fits are refitted by maximum likelihood
+#'     (\code{\link[lme4]{refitML}}) first, and the bootstrap interval is computed on
+#'     the same basis. Use it to match an analysis fitted by maximum likelihood.}
+#'   \item{\code{"REML"}}{REML-type variances. REML \code{lmer} fits are used as
+#'     fitted. For a binomial or Poisson \code{glmer} fit whose only random effect is
+#'     the stratum intercept, the between-stratum variance is re-estimated with the
+#'     fixed effects integrated out, as REML does for a Gaussian model (see below).}
+#' }
+#' The PCV is a ratio of two variance estimates and uses no likelihood value, so it
+#' does not need maximum-likelihood fits (likelihood-ratio tests and information
+#' criteria do; see \code{\link{maihda_ic}}). REML estimates each model's
+#' between-stratum variance with little bias. Maximum likelihood makes no allowance for
+#' the degrees of freedom spent on the fixed effects, so it underestimates that
+#' variance, and by more in the adjusted model than in the null model: the PCV is
+#' \emph{overstated}, most of all with few strata. In a balanced design whose fixed
+#' effects are constant within strata, ML multiplies REML's estimate of the variance of
+#' the stratum means, \eqn{\sigma^2_u + \sigma^2_e / n}, by \eqn{(J - p) / J} (\eqn{J}
+#' strata, \eqn{p} fixed-effect coefficients, neither estimate at zero): 23/24 for the
+#' null model of a 2 x 3 x 4 design but 17/24 for the adjusted one. The bootstrap
+#' interval inherits the bias, because it simulates from and refits on the same basis.
+#'
+#' \code{"fitted"} and \code{"ML"} differ for Gaussian \code{lmer} fits only.
+#' \code{glmer} and the wemix and ordinal engines estimate variances by maximum
+#' likelihood, so under either setting their PCV is overstated in the same way: most
+#' with few strata, and more when strata are small or uneven in size, because the
+#' shortfall applies to the between-stratum variance plus the sampling variance of a
+#' stratum's own estimate. \code{print()} notes when the compared variances are
+#' maximum-likelihood estimates.
+#'
+#' \code{estimation = "REML"} corrects that shortfall for binomial and Poisson
+#' \code{glmer} fits. Each variance minimises the Laplace-approximated deviance
+#' evaluated at the joint mode of the fixed and random effects (lme4's
+#' \code{nAGQ = 0} deviance) plus the log-determinant of the fixed-effect information,
+#' which integrates the fixed effects out; for the logit and log links this is the
+#' criterion \code{glmmTMB(REML = TRUE)} minimises. The models are not refitted, and
+#' the as-fitted values are returned alongside (\code{pcv_fitted},
+#' \code{var_model1_fitted}, \code{var_model2_fitted}).
+#'
+#' Use it when strata are few but each holds enough observations for its own estimate
+#' to be precise: the PCV then has little bias, though with very few strata it stays
+#' imprecise. When the strata are small as well, neither basis is dependable. A
+#' variance estimate cannot fall below zero, so with that much noise the REML-type
+#' estimate averages too high, most in the adjusted model: the PCV then varies widely
+#' from sample to sample and can come out far too low, even negative, where the
+#' maximum-likelihood PCV stays too high.
+#'
+#' \code{estimation = "REML"} is an error for the wemix and ordinal engines, for other
+#' \code{glmer} families, for a fit with a further random effect such as a
+#' \code{context}, for an \code{lmer} fit made by maximum likelihood, and with
+#' \code{bootstrap = TRUE} on a \code{glmer} fit.
+#'
+#' A \code{brms} fit is a Bayesian posterior: \code{"ML"} and \code{"REML"} perform no
+#' refit and \code{estimation_used} is \code{"posterior"}. Single-model VPC/ICC
+#' summaries always use the model as fitted.
 #'
 #' \strong{Latent-scale families and rescaling.} For families whose level-1
 #' variance is a fixed latent-scale constant -- binomial/Bernoulli
@@ -76,12 +167,37 @@
 #' dispersion parameter theta fixed at its original estimate, so the interval is
 #' conditional on the estimated theta.
 #'
+#' A bootstrap draw whose \emph{null-model} between-stratum variance lands on
+#' the zero boundary has no defined PCV (the denominator is zero); such draws
+#' are excluded, so the percentile interval is \emph{conditional on estimating
+#' a positive null variance}. Whenever any draws hit the boundary the function
+#' warns, reports the count as \code{n_boot_boundary} on the result, and
+#' \code{print()} repeats the caveat -- a sizeable boundary share signals weak
+#' between-stratum variation, and the PCV itself is then fragile.
+#'
+#' Bootstrap draws whose refit optimiser reports non-convergence are kept in the
+#' interval (they still have a defined PCV) and counted in
+#' \code{n_boot_nonconverged}, which \code{print()} shows. When more than half the
+#' contributing draws did not converge the interval is still returned, but with a
+#' warning and \code{interval_reliable = FALSE}; treat it as indicative only and
+#' check for singular or failing fits.
+#'
 #' The bootstrap is available for the \code{lme4} engine only. For the other
 #' engines the PCV is a \emph{point estimate}: a brms fit's posterior credible
 #' interval (reported by \code{\link{summary.maihda_model}}) covers a single
 #' fit's VPC/ICC, not the PCV, which compares two separately fitted models -- no
 #' posterior interval for the PCV itself is computed -- and a design-based
 #' (wemix) interval would require replicate weights.
+#'
+#' \strong{brms fits.} For two \code{brms} fits the variances compared are the
+#' posterior medians of each model's between-stratum variance, the values the
+#' variance-components table of \code{\link{summary.maihda_model}} shows. The
+#' posterior of a between-stratum variance is
+#' right-skewed when strata are few, and more so in the adjusted model, which spends
+#' degrees of freedom on the main effects. The PCV is therefore \emph{understated}
+#' with few strata -- the opposite direction to maximum likelihood -- and with very
+#' few strata it can be negative where the true value is positive. The understatement
+#' shrinks as strata are added.
 #'
 #' @examples
 #' \donttest{
@@ -114,7 +230,9 @@
 #' @export
 #' @importFrom lme4 lmer glmer VarCorr
 calculate_pcv <- function(model1, model2, bootstrap = FALSE,
-                         n_boot = 1000, conf_level = 0.95) {
+                         n_boot = 1000, conf_level = 0.95,
+                         estimation = c("fitted", "ML", "REML")) {
+  estimation <- match.arg(estimation)
   # Input validation
   if (!inherits(model1, "maihda_model")) {
     stop("'model1' must be a maihda_model object from fit_maihda()")
@@ -139,42 +257,123 @@ calculate_pcv <- function(model1, model2, bootstrap = FALSE,
 
   validate_pcv_models(model1, model2)
 
-  # REML vs ML: lmer fits Gaussian models by REML, whose between-stratum variance is
-  # NOT comparable across models with different fixed effects -- exactly the canonical
-  # null-vs-adjusted PCV. Refit any REML lmer fit with ML before the comparison (and
-  # before the parametric bootstrap below, which reuses these fits, so the interval
-  # matches the point estimate), mirroring maihda_ic() and anova.merMod. GLMM fits
-  # (glmer) and the brms/wemix/ordinal engines are already ML / unaffected.
-  model1 <- maihda_pcv_refit_ml(model1)
-  model2 <- maihda_pcv_refit_ml(model2)
+  # REML vs ML basis for the cross-model variance comparison (see Details and the
+  # `estimation` argument). "fitted" (default) keeps each lmer fit's own REML
+  # between-stratum variance -- matching summary() and avoiding ML's finite-sample
+  # downward bias. "ML" refits any REML lmer fit with ML first (and before the
+  # parametric bootstrap below, which reuses these fits, so the interval is on the
+  # same basis as the point estimate). A no-op for glmer / the brms/wemix/ordinal
+  # engines, already on ML.
+  model1 <- maihda_pcv_apply_estimation(model1, estimation)
+  model2 <- maihda_pcv_apply_estimation(model2, estimation)
+  # maihda_pcv_refit_ml() flags (and warns about) a model whose intended ML refit
+  # FAILED -- it then keeps the REML fit -- so the result does not read as a clean ML
+  # comparison when it is not one.
+  ml_refit_failed <- isTRUE(model1$ml_refit_failed) || isTRUE(model2$ml_refit_failed)
+  # Under estimation = "ML", a model whose between-stratum variance is on the boundary
+  # keeps its REML fit (maihda_pcv_refit_ml() skips the destabilising refit there), so
+  # the comparison is then partly REML. Record the basis ACTUALLY used ("mixed") so the
+  # result does not claim a pure ML refit when one model stayed REML.
+  # A FAILED refitML() (ml_refit_failed) likewise leaves a model on REML, so it is
+  # "mixed" too -- not the pure ML the label would otherwise assert. The engine also
+  # matters: a brms comparison is a posterior, never an ML-refit (handled downstream).
+  ml_refit_skipped <- isTRUE(model1$ml_refit_skipped_boundary) ||
+    isTRUE(model2$ml_refit_skipped_boundary)
+  estimation_used <- maihda_pcv_estimation_used(
+    estimation, ml_refit_skipped || ml_refit_failed, engine = model1$engine)
 
   # Extract between-stratum variance from both models
-  var1 <- extract_between_variance(model1)
-  var2 <- extract_between_variance(model2)
+  var1 <- maihda_pcv_between_variance(model1)
+  var2 <- maihda_pcv_between_variance(model2)
 
   # Validate variances
   if (is.na(var1) || is.na(var2)) {
     stop("Unable to extract variance components from one or both models")
   }
 
+  # estimation = "REML". A REML lmer pair already holds REML variances and a brms pair
+  # is a posterior, so both are compared as fitted; a binomial or Poisson glmer pair
+  # has its maximum-likelihood variances replaced by REML-type ones (`restricted`), and
+  # everything else is refused by maihda_pcv_reml_check(). This sits after the
+  # variances are read so that the refusals made there (a longitudinal or
+  # crossed-dimensions fit, a random slope) keep their directed messages.
+  restricted <- FALSE
+  var1_fitted <- var1
+  var2_fitted <- var2
+  if (identical(estimation, "REML")) {
+    maihda_pcv_reml_check(model1, bootstrap = bootstrap)
+    maihda_pcv_reml_check(model2, bootstrap = bootstrap)
+    restricted <- maihda_pcv_is_glmer(model1) && maihda_pcv_is_glmer(model2)
+    if (restricted) {
+      var1 <- maihda_restricted_variance_lme4(model1$model)
+      var2 <- maihda_restricted_variance_lme4(model2$model)
+      estimation_used <- "REML"
+    }
+  }
+
   if (var1 <= 0) {
     stop("Between-stratum variance in model1 is zero or negative. PCV cannot be calculated. ",
          "This may indicate a singular fit or no between-stratum variation.")
   }
+  # A strictly positive but boundary-level variance (an effectively singular
+  # fit, e.g. 1e-9 after the ML refit) passes the check above yet makes the
+  # ratio explode -- PCVs in the thousands with no warning. Apply the same
+  # relative singularity tolerance lme4 uses to flag the stratum term (shared
+  # with stepwise_pcv() and pcv_importance()). Under the REML-type basis the test is
+  # made on the variance actually compared, not on the fitted one.
+  at_boundary <- function(model, variance) {
+    if (!restricted) return(maihda_pcv_null_at_boundary(model))
+    maihda_variance_at_boundary(variance, stats::sigma(model$model)^2)
+  }
+  if (at_boundary(model1, var1)) {
+    maihda_pcv_degenerate_null_stop("model1")
+  }
+
+  # A singular ADJUSTED fit -- model2's between-stratum variance on the boundary --
+  # pins the PCV at ~1 (100%). Crucially this is NOT distinguishable from genuine
+  # additivity: an interaction variance that is truly ~0 (no intersectional effect
+  # beyond the additive main effects) gives an identical boundary fit, and for MAIHDA
+  # that additive result is a common, legitimate finding. So we do NOT warn (a warning
+  # would fire on the normal additive case and wrongly imply the 100% is spurious);
+  # instead the status is recorded on the result (adjusted_at_boundary) and
+  # print.pcv_result() surfaces it with the honest caveat that boundary inference (the
+  # CI/SE) is unreliable and that additivity and a degenerate fit cannot be told apart.
+  # (This replaced an estimation = "ML"-only warning that left the default basis with no
+  # flag at all.) model1 at the boundary is a hard stop above (a zero PCV denominator is
+  # undefined); model2 at the boundary still yields a numerically valid ratio. (Despite
+  # its name maihda_pcv_null_at_boundary() is a general stratum-boundary test.)
+  adjusted_at_boundary <- at_boundary(model2, var2)
 
   # Calculate PCV
   pcv <- (var1 - var2) / var1
 
-  # Create result object. The 'pvc' element and the trailing "pvc_result" class
-  # duplicate 'pcv'/"pcv_result" for code written against the historical
-  # calculate_pvc() spelling.
+  # Create result object. The deprecated 'pvc' element (reading it warns: see
+  # `$.pcv_result`) and the trailing "pvc_result" class duplicate 'pcv'/"pcv_result".
   result <- list(
     pcv = pcv,
     pvc = pcv,
     var_model1 = var1,
     var_model2 = var2,
+    estimation = estimation,
+    estimation_used = estimation_used,
+    adjusted_at_boundary = adjusted_at_boundary,
+    ml_refit_failed = ml_refit_failed,
+    ml_variances = !restricted && maihda_pcv_ml_variances(model1, model2),
+    reml_available = maihda_pcv_reml_available(model1, model2),
     bootstrap = FALSE
   )
+  # Under the REML-type basis the maximum-likelihood values stay on the result, so the
+  # two bases can be read side by side.
+  if (restricted) {
+    result$var_model1_fitted <- var1_fitted
+    result$var_model2_fitted <- var2_fitted
+    result$pcv_fitted <- if (is.finite(var1_fitted) && var1_fitted > 0 &&
+                             !maihda_pcv_null_at_boundary(model1)) {
+      (var1_fitted - var2_fitted) / var1_fitted
+    } else {
+      NA_real_
+    }
+  }
 
   # Bootstrap confidence intervals if requested
   if (bootstrap) {
@@ -185,36 +384,349 @@ calculate_pcv <- function(model1, model2, bootstrap = FALSE,
     result$conf_level <- conf_level
     result$n_boot_ok <- attr(pcv_ci, "n_ok")
     result$mc_se <- attr(pcv_ci, "mc_se")
+    result$n_boot_boundary <- attr(pcv_ci, "n_boundary")
+    result$n_boot_nonconverged <- attr(pcv_ci, "n_nonconverged")
+    result$interval_reliable <- attr(pcv_ci, "interval_reliable")
   }
 
   class(result) <- c("pcv_result", "pvc_result")
   return(result)
 }
 
-#' Deprecated: use calculate_pcv()
+#' Read an element of a PCV result
 #'
-#' \code{calculate_pvc()} is the former name of \code{\link{calculate_pcv}}: the
-#' statistic is the PCV (proportional change in variance), but the historical
-#' function name transposed the acronym. \code{calculate_pvc()} now forwards to
-#' \code{calculate_pcv()} with a deprecation warning and will be removed in a
-#' future release.
+#' \code{$} and \code{[[} read a \code{\link{calculate_pcv}} result as a list.
+#' Reading its deprecated \code{pvc} element, a copy of \code{pcv}, warns; read
+#' \code{pcv} instead.
 #'
-#' @inheritParams calculate_pcv
-#' @return See \code{\link{calculate_pcv}}.
+#' @param x A \code{pcv_result} object from \code{\link{calculate_pcv}}.
+#' @param name,i The element's name (or, for \code{[[}, its position).
+#' @param ... Passed on to the list method.
+#' @return The element.
+#' @keywords internal
 #' @export
-calculate_pvc <- function(model1, model2, bootstrap = FALSE,
-                          n_boot = 1000, conf_level = 0.95) {
-  .Deprecated("calculate_pcv")
-  calculate_pcv(model1, model2, bootstrap = bootstrap,
-                n_boot = n_boot, conf_level = conf_level)
+`$.pcv_result` <- function(x, name) {
+  if (identical(name, "pvc")) maihda_pvc_read_warning()
+  NextMethod()
 }
 
-# REML lmer between-stratum variance estimates are not comparable across models with
-# different fixed effects (the canonical null-vs-adjusted PCV), because the REML
-# criterion conditions on the fixed-effects design. Refit a REML lmer fit with ML
-# (lme4::refitML) before any cross-model variance comparison, matching maihda_ic() and
-# anova.merMod. Non-REML fits (glmer / the GLMM families) and the brms/wemix/ordinal
-# engines are returned unchanged. Longitudinal fits are returned unchanged TOO, but
+#' @rdname cash-.pcv_result
+#' @export
+`[[.pcv_result` <- function(x, i, ...) {
+  if (identical(i, "pvc")) maihda_pvc_read_warning()
+  NextMethod()
+}
+
+# Classed like .Deprecated()'s warning, so a caller can catch or muffle it by class.
+maihda_pvc_read_warning <- function() {
+  warning(warningCondition(
+    paste0("The 'pvc' element of a calculate_pcv() result is deprecated and will be ",
+           "removed; read 'pcv' instead."),
+    class = "deprecatedWarning", call = NULL))
+}
+
+# Apply the requested variance-estimation basis before a cross-model PCV comparison.
+# "fitted" keeps each model's own fit (the REML estimate for a Gaussian lmer fit);
+# "ML" refits a REML lmer fit with maximum likelihood via maihda_pcv_refit_ml(). Only
+# Gaussian lmer fits are affected -- glmer and the wemix/ordinal engines are already
+# maximum-likelihood, and a brms fit is a Bayesian posterior (not ML at all), so
+# maihda_pcv_refit_ml() returns them unchanged either way; the reported basis for brms
+# is "posterior" (maihda_pcv_estimation_used()), never an ML-refit. "REML" leaves the
+# fits alone too: calculate_pcv() computes its REML-type variances from the fits as
+# they stand (maihda_restricted_variance_lme4()).
+# `estimation` is validated (match.arg) by the exported callers before it reaches here.
+maihda_pcv_apply_estimation <- function(model, estimation) {
+  if (identical(estimation, "ML")) maihda_pcv_refit_ml(model) else model
+}
+
+# Resolve the variance-estimation basis a PCV comparison ACTUALLY used, from the
+# requested `estimation`, whether any model's ML refit was left on REML (`mixed` --
+# skipped at the boundary OR a failed refitML(); see maihda_pcv_refit_ml()), and the
+# `engine`. Under estimation = "ML" a model left on REML makes the comparison "mixed"
+# (partly REML), not a pure ML one; "fitted" is never mixed. brms fits are Bayesian
+# Stan POSTERIORS, not maximum likelihood -- estimation = "ML" is a no-op there (no
+# refit occurs), so the basis is always the as-fitted posterior scale, reported as
+# "posterior" and never an "ML-refit". Callers record the result and render it with
+# maihda_pcv_basis_label(). estimation = "REML" resolves to "fitted": fits that
+# already hold REML variances are compared as fitted, and calculate_pcv() records
+# "REML" itself when it compared the REML-type variances of a glmer pair instead.
+maihda_pcv_estimation_used <- function(estimation, mixed, engine = NULL) {
+  if (identical(engine, "brms")) return("posterior")
+  if (identical(estimation, "REML")) return("fitted")
+  if (identical(estimation, "ML") && isTRUE(mixed)) "mixed" else estimation
+}
+
+# Human-readable variance-basis label shared by every PCV print method
+# (calculate_pcv(), stepwise_pcv(), pcv_importance(), compare_maihda_groups()) so the
+# wording cannot drift. `basis` is the basis ACTUALLY used
+# (maihda_pcv_estimation_used()); an older serialized object may carry only the
+# requested "fitted"/"ML", which map to the same text.
+maihda_pcv_basis_label <- function(basis) {
+  if (is.null(basis)) basis <- "fitted"
+  switch(basis,
+    ML = "ML-refit (maximum-likelihood variances; see ?calculate_pcv)",
+    mixed = paste0("mixed -- ML requested, but a model kept its REML fit (a ",
+                   "between-stratum variance at the boundary, or a failed refit), so ",
+                   "not a pure ML comparison"),
+    posterior = "posterior medians (brms fits, not maximum likelihood)",
+    "as fitted (REML for Gaussian lmer, matching summary())"
+  )
+}
+
+# The basis line of a calculate_pcv() result, or of a series' basis record
+# (maihda_pcv_series_basis(), or a pcv_importance() result). Two bases are worded
+# here: the REML-type variances of a glmer pair (calculate_pcv() only), and as-fitted
+# variances that are maximum-likelihood estimates (glmer, wemix or ordinal fits).
+# Everything else is maihda_pcv_basis_label()'s.
+maihda_pcv_result_basis_label <- function(x) {
+  basis <- x$estimation_used
+  if (is.null(basis)) basis <- x$estimation
+  if (identical(basis, "REML")) {
+    return("REML-type (fixed effects integrated out; see ?calculate_pcv)")
+  }
+  if (identical(basis, "fitted") && isTRUE(x$ml_variances)) {
+    return("as fitted (maximum likelihood)")
+  }
+  maihda_pcv_basis_label(basis)
+}
+
+# The basis record that a stepwise_pcv() table or a compare_maihda_groups()
+# comparison keeps in its attributes, in the shape maihda_pcv_result_basis_label()
+# and maihda_pcv_show_ml_note() read. NULL when the object records no basis.
+maihda_pcv_series_basis <- function(x) {
+  estimation <- attr(x, "estimation")
+  estimation_used <- attr(x, "estimation_used")
+  if (is.null(estimation) && is.null(estimation_used)) return(NULL)
+  list(estimation = estimation, estimation_used = estimation_used,
+       ml_variances = attr(x, "ml_variances"))
+}
+
+# TRUE for a maihda_model holding a glmer fit (a generalised linear mixed model on the
+# lme4 engine).
+maihda_pcv_is_glmer <- function(model) {
+  identical(model$engine, "lme4") &&
+    isTRUE(tryCatch(lme4::isGLMM(model$model), error = function(e) FALSE))
+}
+
+# TRUE when the between-stratum variances of any of the models are maximum-likelihood
+# estimates: a glmer fit, an lmer fit made (or refitted) by maximum likelihood, or the
+# wemix / ordinal engines. A brms fit is a posterior.
+maihda_pcv_ml_variances <- function(...) {
+  one <- function(model) {
+    switch(model$engine,
+      lme4 = !isTRUE(tryCatch(lme4::isREML(model$model), error = function(e) FALSE)),
+      wemix = ,
+      ordinal = TRUE,
+      FALSE)
+  }
+  any(vapply(list(...), one, logical(1)))
+}
+
+# Refuse estimation = "REML" where no REML or REML-type between-stratum variance
+# exists for `model`. A brms fit passes (a posterior, on which the setting is a no-op,
+# as "ML" is) and so does a REML lmer fit (compared as fitted). A glmer fit passes
+# when maihda_restricted_variance_lme4() applies to it: a binomial or Poisson family
+# and the stratum intercept as its only random effect. `bootstrap` is refused for a
+# glmer fit because the parametric bootstrap refits by maximum likelihood.
+maihda_pcv_reml_check <- function(model, bootstrap = FALSE) {
+  engine <- model$engine
+  if (identical(engine, "brms")) return(invisible(TRUE))
+  if (!identical(engine, "lme4")) {
+    stop("estimation = \"REML\" is not available for engine = \"", engine, "\", which ",
+         "estimates variances by maximum likelihood only. Use estimation = ",
+         "\"fitted\".", call. = FALSE)
+  }
+  fit <- model$model
+  if (!maihda_pcv_is_glmer(model)) {
+    if (!isTRUE(tryCatch(lme4::isREML(fit), error = function(e) FALSE))) {
+      stop("estimation = \"REML\" needs REML fits, but this Gaussian model was fitted ",
+           "by maximum likelihood (REML = FALSE). Refit it by REML, or use ",
+           "estimation = \"fitted\".", call. = FALSE)
+    }
+    return(invisible(TRUE))
+  }
+  fam <- tryCatch(stats::family(fit)$family, error = function(e) NA_character_)
+  if (!isTRUE(fam %in% c("binomial", "poisson"))) {
+    stop("estimation = \"REML\" is available for binomial and Poisson glmer fits; ",
+         "this model's family is ", fam, ". Use estimation = \"fitted\".",
+         call. = FALSE)
+  }
+  n_theta <- length(lme4::getME(fit, "theta"))
+  if (n_theta != 1L) {
+    stop("estimation = \"REML\" needs a glmer fit whose only random effect is the ",
+         "stratum intercept; this model has ", n_theta, " variance parameters (a ",
+         "context or another grouping term). Use estimation = \"fitted\".",
+         call. = FALSE)
+  }
+  if (isTRUE(bootstrap)) {
+    stop("bootstrap = TRUE is not available with estimation = \"REML\" for a glmer ",
+         "fit. Use bootstrap = FALSE, or estimation = \"fitted\" for a bootstrap ",
+         "interval on the maximum-likelihood variances.", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+# TRUE when estimation = "REML" would replace the maximum-likelihood variances of this
+# pair by REML-type ones, i.e. both are glmer fits maihda_pcv_reml_check() accepts.
+# print() points to the option from its maximum-likelihood note only then.
+maihda_pcv_reml_available <- function(model1, model2) {
+  if (!maihda_pcv_is_glmer(model1) || !maihda_pcv_is_glmer(model2)) return(FALSE)
+  isTRUE(tryCatch({
+    maihda_pcv_reml_check(model1)
+    maihda_pcv_reml_check(model2)
+    TRUE
+  }, error = function(e) FALSE))
+}
+
+# maihda()'s up-front refusals of estimation = "REML", made before any model is
+# fitted from what the arguments alone decide. The crossed-dimensions decomposition
+# computes no PCV, so the setting has nothing to act on there and passes.
+maihda_reml_workflow_check <- function(engine, decomposition, group) {
+  if (identical(decomposition, "crossed-dimensions")) return(invisible(TRUE))
+  if (identical(decomposition, "longitudinal")) {
+    stop("estimation = \"REML\" is not available for a longitudinal MAIHDA. The ",
+         "default estimation = \"fitted\" compares the REML variances of Gaussian ",
+         "growth fits.", call. = FALSE)
+  }
+  if (!is.null(group)) {
+    stop("estimation = \"REML\" is not available with 'group': the per-group ",
+         "comparison takes estimation = \"fitted\" or \"ML\". Drop 'group', or run ",
+         "maihda() on each group's rows.", call. = FALSE)
+  }
+  if (isTRUE(engine %in% c("wemix", "ordinal"))) {
+    stop("estimation = \"REML\" is not available for engine = \"", engine, "\", which ",
+         "estimates variances by maximum likelihood only. Use estimation = ",
+         "\"fitted\".", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+# The random-effect terms object lme4's model builders take: reformulas::mkReTrms()
+# where the installed reformulas has it, lme4's own otherwise.
+maihda_mk_re_trms <- function(bars, fr) {
+  if ("mkReTrms" %in% getNamespaceExports("reformulas")) {
+    reformulas::mkReTrms(bars, fr)
+  } else {
+    lme4::mkReTrms(bars, fr)
+  }
+}
+
+# REML-type between-stratum variance of a binomial or Poisson glmer fit whose only
+# random effect is the stratum intercept.
+#
+# glmer estimates the variance by maximum likelihood: the Laplace approximation of the
+# likelihood with the random effects integrated out and the fixed effects held at
+# their estimates. REML integrates the fixed effects out as well. lme4's nAGQ = 0
+# deviance function evaluates the Laplace approximation at the JOINT mode of the fixed
+# and random effects, as a function of the relative standard deviation theta alone;
+# adding the log-determinant of the fixed-effect block of that joint system
+# (pp$ldRX2()) completes the Laplace approximation of the likelihood with both
+# integrated out. The variance returned minimises that criterion over theta >= 0. For
+# the logit and log links it is the criterion glmmTMB(REML = TRUE) minimises; for
+# other links lme4 weights by the expected information where TMB uses the observed.
+#
+# lme4's default inner tolerance (tolPwrss = 1e-7) leaves the criterion uneven at
+# about 1e-4, enough to move its minimiser in the fourth decimal; it is built with
+# 1e-10 instead, and with the default only if those tighter iterations fail somewhere
+# on the scan.
+maihda_restricted_variance_lme4 <- function(model) {
+  theta_ml <- as.numeric(lme4::getME(model, "theta"))[1]
+  upper <- if (is.finite(theta_ml)) max(2, 4 * theta_ml) else 2
+  for (tol in c(1e-10, 1e-7)) {
+    found <- maihda_minimise_nonneg(maihda_restricted_criterion_lme4(model, tol), upper)
+    if (found$n_failed == 0L) break
+  }
+  if (identical(found$status, "unevaluable")) {
+    stop("The REML-type criterion could not be evaluated for this fit.", call. = FALSE)
+  }
+  if (identical(found$status, "unbounded")) {
+    stop("The REML-type criterion has no minimum below a between-stratum standard ",
+         "deviation of ", format(found$upper, digits = 3), " on the latent scale, so ",
+         "no REML-type variance is reported for this fit.", call. = FALSE)
+  }
+  (found$theta * stats::sigma(model))^2
+}
+
+# The REML-type criterion of a glmer fit as a function of theta (see
+# maihda_restricted_variance_lme4()).
+#
+# The deviance function is rebuilt from the fit's own model frame, design matrix and
+# random-effect terms, so the rows, prior weights and offsets are the fit's, and it
+# works on fresh copies of lme4's reference objects: `model` itself is not touched.
+# lme4's deviance function finds lme4's own helpers (GHrule()) through the frame that
+# built it, so it is built from a frame enclosed by the lme4 namespace: lme4 is
+# imported here, not attached, and a frame of this package would not reach them. The
+# builder's arguments are passed as names bound in that frame.
+maihda_restricted_criterion_lme4 <- function(model, tol_pwrss = 1e-10) {
+  build <- new.env(parent = asNamespace("lme4"))
+  build$fr <- stats::model.frame(model)
+  build$X <- lme4::getME(model, "X")
+  build$reTrms <- maihda_mk_re_trms(reformulas::findbars(stats::formula(model)),
+                                    build$fr)
+  build$family <- stats::family(model)
+  build$control <- lme4::glmerControl(tolPwrss = tol_pwrss)
+  devfun <- suppressMessages(suppressWarnings(do.call(
+    lme4::mkGlmerDevfun,
+    list(fr = quote(fr), X = quote(X), reTrms = quote(reTrms),
+         family = quote(family), nAGQ = 0L, control = quote(control)),
+    envir = build)))
+  pp <- environment(devfun)$pp
+  function(theta) {
+    dev <- devfun(theta)
+    # ldRX2() reads the decomposition devfun() has just left at this theta.
+    dev + pp$ldRX2()
+  }
+}
+
+# The minimiser of a criterion of one non-negative parameter (here a random-effect
+# standard deviation) whose minimum is at zero or at one interior point.
+#
+# The scan is geometric -- zero, then `upper` halved fourteen times up to `upper`
+# itself -- so an interior minimum is bracketed by its two neighbours wherever it
+# lies. A scan in equal steps is not enough: such a criterion is flat next to zero,
+# and a minimum well inside the first step is then stepped over and zero returned.
+# optimize() refines inside the bracket. The interior point is kept only when it beats
+# zero by more than `gain`, which rounding in the criterion cannot produce. `upper` is
+# widened while the scan's minimum is its last point.
+#
+# Returns the minimiser `theta`, the `upper` reached, the number of evaluations that
+# failed or were not finite (`n_failed`; they count as +Inf), and `status`: "ok",
+# "unbounded" (still decreasing at the widest `upper`) or "unevaluable" (no finite
+# value on the scan).
+maihda_minimise_nonneg <- function(crit, upper = 2, gain = 1e-8, widen = 3L) {
+  n_failed <- 0L
+  value <- function(theta) {
+    v <- tryCatch(crit(theta), error = function(e) NA_real_)
+    if (length(v) == 1L && is.finite(v)) return(v)
+    n_failed <<- n_failed + 1L
+    Inf
+  }
+  result <- function(theta, status) {
+    list(theta = theta, upper = upper, n_failed = n_failed, status = status)
+  }
+  for (attempt in seq_len(widen + 1L)) {
+    grid <- c(0, upper * 2^(-14:0))
+    values <- vapply(grid, value, numeric(1))
+    if (!any(is.finite(values))) return(result(NA_real_, "unevaluable"))
+    best <- which.min(values)
+    if (best < length(grid)) break
+    if (attempt <= widen) upper <- upper * 4
+  }
+  if (best == length(grid)) return(result(NA_real_, "unbounded"))
+  # optimize() warns when handed a non-finite value; value() has already counted it.
+  opt <- suppressWarnings(stats::optimize(
+    value, c(grid[max(best - 1L, 1L)], grid[best + 1L]), tol = 1e-8))
+  theta <- if (opt$objective < values[best]) opt$minimum else grid[best]
+  if (isTRUE(values[1] - min(opt$objective, values[best]) <= gain)) theta <- 0
+  result(theta, "ok")
+}
+
+# Invoked only when the ML estimation basis is requested (estimation = "ML"; see
+# maihda_pcv_apply_estimation()), this refits a REML lmer fit with ML (lme4::refitML).
+# ML shrinks the adjusted model's variance by more than the null's and so overstates
+# the PCV with few strata (see ?calculate_pcv), which is why it is not the default.
+# Non-REML fits (glmer / the GLMM families) and the brms/wemix/ordinal engines are
+# returned unchanged. Longitudinal fits are returned unchanged TOO, but
 # only because their null-vs-adjusted comparison applies the same rule itself:
 # maihda_longitudinal_pcv() ML-refits its growth models via
 # maihda_longitudinal_refit_ml() (longitudinal.R), whose boundary guard reads the
@@ -233,38 +745,111 @@ maihda_pcv_refit_ml <- function(model) {
   # nudge an exact-zero variance off the boundary, masking the zero-variance guard in
   # calculate_pcv(). A fit can be globally singular because a NON-stratum random
   # effect (e.g. an extra grouping factor like (1 | site)) sits on the boundary while
-  # the stratum variance is comfortably nonzero -- testing global isSingular() here
-  # wrongly skipped those, leaving the REML-vs-ML discrepancy this corrects in place.
+  # the stratum variance is comfortably nonzero -- so the test is on the stratum
+  # variance, not on global isSingular(), which would skip the refit for those too.
   # If refitML() itself fails, the tryCatch below keeps the original (REML) fit.
-  if (maihda_stratum_at_boundary_lme4(model$model)) return(model)
+  if (maihda_stratum_at_boundary_lme4(model$model)) {
+    # ML refit deliberately skipped at the boundary (see above). Record it so the
+    # caller can report an HONEST basis: under estimation = "ML" a model kept on its
+    # REML fit here makes the cross-model comparison partly REML -- a "mixed" basis,
+    # not the pure ML comparison the "ML" label would otherwise
+    # claim. (Forcing the refit instead is worse: refitML() of a boundary fit emits a
+    # bobyqa non-convergence warning and still returns the same ~0 variance.)
+    model$ml_refit_skipped_boundary <- TRUE
+    return(model)
+  }
   refit <- tryCatch(lme4::refitML(model$model), error = function(e) NULL)
-  if (!is.null(refit)) model$model <- refit
+  if (!is.null(refit)) {
+    model$model <- refit
+  } else {
+    # The ML refit was warranted (a non-boundary REML fit) but failed. Returning the
+    # REML fit silently would let a downstream PCV / IC be labelled "ML" though no ML
+    # refit occurred, so flag it (the caller records this on the result) and warn --
+    # do not pretend the comparison is on a pure ML basis.
+    model$ml_refit_failed <- TRUE
+    warning("estimation = \"ML\" was requested, but lme4::refitML() failed for one ",
+            "model; its REML fit is used instead, so this is not a pure ML-basis ",
+            "comparison. Compare against estimation = \"fitted\".", call. = FALSE)
+  }
   model
 }
 
-# TRUE when the stratum random-intercept variance sits on the lower boundary
-# (effectively zero). Reproduces lme4::isSingular()'s relative tolerance for the
-# stratum component alone: its scaled SD parameter theta = sd_stratum / sigma_resid
-# is below `tol`, which is exactly how lme4 flags a single intercept term as singular.
-# Used by maihda_pcv_refit_ml() to decide whether an ML refit is worthwhile -- it is
-# not when the stratum is itself at zero, but it IS when only another grouping factor
-# is on the boundary. Returns TRUE (skip the refit) if the stratum variance cannot be
-# read at all; calculate_pcv()'s own zero-variance guard then surfaces the problem.
+# TRUE when a between-stratum variance is effectively zero RELATIVE to the
+# residual/latent scale -- lme4::isSingular()'s relative tolerance for a single
+# intercept term (its scaled SD parameter sd_stratum / sd_residual below `tol`),
+# applied uniformly across engines so the wemix and ordinal boundary tests use the
+# same rule as lme4. `residual_var` is the level-1 / latent residual VARIANCE on the
+# same scale as `stratum_var`: sigma^2 for a Gaussian fit, pi^2/3 on the logit latent
+# scale, 1 on the probit latent scale. With no usable residual scale, falls back to an
+# absolute near-zero test. A non-finite or non-positive stratum variance counts as the
+# boundary (calculate_pcv()'s own zero-variance guard then surfaces it).
+maihda_variance_at_boundary <- function(stratum_var, residual_var, tol = 1e-4) {
+  if (!is.finite(stratum_var) || stratum_var <= 0) return(TRUE)
+  if (!is.finite(residual_var) || residual_var <= 0) {
+    return(stratum_var <= .Machine$double.eps)
+  }
+  sqrt(stratum_var) / sqrt(residual_var) < tol
+}
+
+# TRUE when the stratum random-intercept variance of an lme4 fit sits on the lower
+# boundary (effectively zero), via the shared relative tolerance above with the
+# residual variance sigma^2. Used by maihda_pcv_refit_ml() to decide whether an ML
+# refit is worthwhile -- it is not when the stratum is itself at zero, but it IS when
+# only another grouping factor is on the boundary. Returns TRUE (skip the refit) if the
+# stratum variance cannot be read at all.
 maihda_stratum_at_boundary_lme4 <- function(model, tol = 1e-4) {
   stratum_var <- tryCatch(maihda_stratum_variance_lme4(model),
                           error = function(e) NA_real_)
-  if (is.na(stratum_var) || stratum_var <= 0) return(TRUE)
   sigma_resid <- tryCatch(stats::sigma(model), error = function(e) NA_real_)
-  if (is.na(sigma_resid) || sigma_resid <= 0) {
-    # No usable residual scale: fall back to an absolute near-zero test.
-    return(stratum_var <= .Machine$double.eps)
-  }
-  sqrt(stratum_var) / sigma_resid < tol
+  residual_var <- if (is.na(sigma_resid)) NA_real_ else sigma_resid^2
+  maihda_variance_at_boundary(stratum_var, residual_var, tol = tol)
+}
+
+# TRUE when a maihda_model's between-stratum (PCV denominator) variance sits on the
+# singularity boundary -- effectively zero relative to the residual/latent scale.
+# Every PCV entry point -- calculate_pcv(), stepwise_pcv() and pcv_importance() --
+# needs this before dividing by that variance, because a strictly positive but
+# boundary-level variance (e.g. 3e-9 from a clmm fit or 5e-24 from a WeMix fit) passes
+# a plain > 0 test yet makes the ratio explode or saturate. Dispatches per engine so
+# the wemix and ordinal optimizers -- which return a tiny POSITIVE value rather than
+# lme4's exact zero -- are covered too, each scaled against its own residual/latent
+# variance via maihda_variance_at_boundary(). brms is excluded by design: the
+# posterior median the PCV compares is essentially never at an exact boundary, and
+# flagging a small one as "degenerate" would misread genuine near-zero
+# between-stratum variation carrying honest posterior uncertainty.
+maihda_pcv_null_at_boundary <- function(model) {
+  isTRUE(tryCatch(
+    switch(model$engine,
+      lme4 = maihda_stratum_at_boundary_lme4(model$model),
+      wemix = {
+        v <- maihda_wemix_variances(model)
+        maihda_variance_at_boundary(v$stratum, v$residual)
+      },
+      ordinal = {
+        v <- maihda_clmm_variances(model)
+        maihda_variance_at_boundary(v$stratum, v$residual)
+      },
+      FALSE
+    ),
+    error = function(e) FALSE
+  ))
+}
+
+# Standard error for a degenerate (effectively singular) PCV denominator, shared
+# by every PCV entry point so the guidance is identical wherever the boundary is
+# hit. `subject` names the offending model in the message (e.g. "model1" for the
+# reference model of a two-model comparison, or "the null model").
+maihda_pcv_degenerate_null_stop <- function(subject) {
+  stop("Between-stratum variance in ", subject, " is at the zero boundary (an ",
+       "effectively singular fit), so the PCV denominator is degenerate and the ",
+       "ratio is not meaningful. This indicates no usable between-stratum ",
+       "variation.", call. = FALSE)
 }
 
 #' Extract Between-Stratum Variance
 #'
-#' Internal function to extract between-stratum variance from a MAIHDA model.
+#' Internal function to extract between-stratum variance from a MAIHDA model. For a
+#' \code{brms} fit it is the posterior median of the variance draws.
 #'
 #' @param model A maihda_model object
 #'
@@ -279,11 +864,45 @@ extract_between_variance <- function(model) {
   # stratum, so the between-stratum variance is a function of time -- there is no
   # single scalar to return. Route the user to the time-varying decomposition.
   if (!is.null(model$longitudinal_info)) {
+    if (isFALSE(model$longitudinal_info$stratum_slope)) {
+      # stratum_slope = FALSE: the between-stratum variance IS a single number. Still
+      # routed to the longitudinal tools -- the PCV machinery below is built around a
+      # cross-sectional REML/ML refit rule that deliberately skips growth fits -- but
+      # do not claim a time-varying variance that this model does not have.
+      stop("This is a longitudinal MAIHDA. Its stratum level was fit with a random ",
+           "intercept only (stratum_slope = FALSE), so the between-stratum variance ",
+           "is a single, time-constant number -- but it is read from a growth fit, ",
+           "whose null-vs-adjusted comparison needs the longitudinal PCV. Use ",
+           "maihda(decomposition = \"longitudinal\"): its PCV_intercept is exactly ",
+           "this quantity, and summary()$variance_components reports the variance ",
+           "itself.", call. = FALSE)
+    }
     stop("This is a longitudinal MAIHDA: the between-stratum variance is ",
          "time-varying (random intercept + slope), so a single PCV/VPC scalar is ",
          "undefined. Use maihda(decomposition = \"longitudinal\") for the ",
          "additive-vs-multiplicative PCV (baseline and slope), or summary() for ",
          "the time-varying VPC.", call. = FALSE)
+  }
+
+  # A crossed-dimensions fit ($cc_info) spreads the between-stratum variance across
+  # SEVERAL crossed random effects -- each dimension's additive main-effect intercept
+  # PLUS the intersection ("stratum") interaction -- whose variances SUM to the total
+  # between-stratum variance (maihda_cc_partition(): between = additive + interaction).
+  # This function returns only the single "stratum" (interaction) component, so using it
+  # as the PCV denominator for a crossed-dimensions model silently drops the additive
+  # part and can even reverse the PCV's sign. Reject it here rather than return a wrong
+  # scalar; the crossed-dimensions decomposition reports its own PCV analogue (the
+  # additive/interaction shares). The response-scale VPC (maihda_vpc_response()) and the
+  # MOR (maihda_mor_between_variance()) already SUM all crossed REs themselves and guard
+  # $cc_info before ever calling this function, so they are unaffected.
+  if (!is.null(model$cc_info)) {
+    stop("This is a crossed-dimensions MAIHDA: the between-stratum variance is the sum ",
+         "of the additive dimension effects and the intersection interaction, not the ",
+         "single intersection variance, so a two-model PCV would use the wrong ",
+         "denominator (and can reverse in sign). Use maihda(decomposition = ",
+         "\"crossed-dimensions\"), whose summary reports the additive and interaction ",
+         "shares -- the crossed-dimensions analogue of the PCV -- alongside the total ",
+         "between-stratum VPC.", call. = FALSE)
   }
 
   if (engine == "lme4") {
@@ -320,6 +939,15 @@ extract_between_variance <- function(model) {
   }
 }
 
+# The between-stratum variance a PCV compares: each model's own estimate
+# (extract_between_variance(); for a brms fit the posterior median of its variance
+# draws). Every PCV entry point -- calculate_pcv(), stepwise_pcv() and
+# pcv_importance() -- reads its variances here, and the MOR and summary()'s
+# variance-components table hold the same value for a model.
+maihda_pcv_between_variance <- function(model) {
+  extract_between_variance(model)
+}
+
 validate_pcv_models <- function(model1, model2) {
   response1 <- paste(deparse(model1$formula[[2]]), collapse = "")
   response2 <- paste(deparse(model2$formula[[2]]), collapse = "")
@@ -353,11 +981,18 @@ validate_pcv_models <- function(model1, model2) {
          call. = FALSE)
   }
 
+  # Match on the SET of row identifiers, not their order: two fits to the same rows
+  # in a different order describe the same analytic sample (variance components, and
+  # hence the PCV, are order-invariant), so requiring identical order rejected valid
+  # comparisons. A genuinely different sample of the same size -- disjoint or only
+  # partially overlapping rows -- still differs as a set and is caught here; and when
+  # the ids are default 1:n names shared across unrelated data, the response, stratum
+  # and weight fingerprints below (all row-order independent) disambiguate.
   rows1 <- maihda_wrapper_row_ids(model1)
   rows2 <- maihda_wrapper_row_ids(model2)
-  if (!is.null(rows1) && !is.null(rows2) && !identical(rows1, rows2)) {
-    stop("PCV requires both models to use the same analytic sample in the same row order.",
-         call. = FALSE)
+  if (!is.null(rows1) && !is.null(rows2) && !setequal(rows1, rows2)) {
+    stop("PCV requires both models to use the same analytic sample; the two models ",
+         "were fitted to different sets of observations.", call. = FALSE)
   }
 
   # Content fingerprint: catch unrelated datasets that share n and default 1:n
@@ -393,8 +1028,11 @@ validate_pcv_models <- function(model1, model2) {
     stop("PCV requires both models to include a 'stratum' column in their analytic data.",
          call. = FALSE)
   }
-  row_strata1 <- as.character(model1$data$stratum)
-  row_strata2 <- as.character(model2$data$stratum)
+  # Compare the PARTITION the stratum column induces over the analytic rows, not the
+  # arbitrary integer labels (fit_maihda numbers strata by order of appearance, so a
+  # different row order relabels the same cell) nor the incidental row order.
+  row_strata1 <- maihda_stratum_partition_key(model1$data$stratum, rownames(model1$data))
+  row_strata2 <- maihda_stratum_partition_key(model2$data$stratum, rownames(model2$data))
   if (!identical(row_strata1, row_strata2)) {
     stop("PCV requires both models to assign each analytic row to the same stratum.",
          call. = FALSE)
@@ -412,17 +1050,92 @@ validate_pcv_models <- function(model1, model2) {
   info1 <- model1$strata_info
   info2 <- model2$strata_info
   if (!is.null(info1) && !is.null(info2) &&
-      all(c("stratum", "label") %in% names(info1)) &&
-      all(c("stratum", "label") %in% names(info2))) {
-    labels1 <- info1$label[order(as.character(info1$stratum))]
-    labels2 <- info2$label[order(as.character(info2$stratum))]
+      "label" %in% names(info1) && "label" %in% names(info2)) {
+    # Compare the SET of intersectional cell labels the two models define, not the
+    # labels ordered by stratum id: the id -> label mapping is order-dependent (a
+    # different row order renumbers the cells), so an id-ordered comparison rejected
+    # identical strata that were merely relabelled.
+    labels1 <- sort(as.character(info1$label))
+    labels2 <- sort(as.character(info2$label))
     if (!identical(labels1, labels2)) {
       stop("PCV requires both models to use the same stratum labels.",
            call. = FALSE)
     }
   }
 
+  # Beyond the stratum, both models must share the SAME random-effects grouping
+  # structure. The checks above pin the outcome, family, sample, weights, and the
+  # stratum assignment, but a PCV is defined as the change in the between-stratum
+  # variance across a change in the FIXED part only. A model that also adds, drops,
+  # or reassigns another grouping -- (1 | stratum) vs (1 | stratum) + (1 | site) --
+  # changes the variance decomposition itself, so the reported PCV would fold that
+  # structural change into the covariate-attributable number.
+  re_groupings <- function(m) {
+    bars <- tryCatch(reformulas::findbars(m$formula), error = function(e) NULL)
+    if (is.null(bars)) return(character(0))
+    sort(vapply(bars, function(b) paste(deparse(b[[3]]), collapse = ""),
+                character(1)))
+  }
+  g1 <- re_groupings(model1)
+  g2 <- re_groupings(model2)
+  if (!identical(g1, g2)) {
+    stop("PCV requires both models to use the same random-effects grouping ",
+         "structure; a changed structure (an added, removed, or relabelled ",
+         "grouping such as (1 | site)) alters the variance decomposition and would ",
+         "confound the covariate-attributable change. Model 1 groups on {",
+         paste(g1, collapse = ", "), "} and Model 2 on {", paste(g2, collapse = ", "),
+         "}.", call. = FALSE)
+  }
+  # For each shared non-stratum grouping that is a single data column, the row-level
+  # assignments must match too (the stratum assignment is already checked above).
+  # These are user-supplied grouping columns (e.g. a 'site'), whose labels are stable
+  # -- unlike the auto-numbered stratum -- so aligning by row name (rather than the
+  # partition key used for the stratum) keeps the check exact while making it
+  # independent of row order.
+  for (g in setdiff(g1, "stratum")) {
+    if (g %in% names(model1$data) && g %in% names(model2$data) &&
+        !identical(
+          maihda_order_by_ids(as.character(model1$data[[g]]), rownames(model1$data)),
+          maihda_order_by_ids(as.character(model2$data[[g]]), rownames(model2$data)))) {
+      stop("PCV requires both models to assign each analytic row to the same '", g,
+           "' random-effect level; the '", g, "' assignments differ between the ",
+           "two models.", call. = FALSE)
+    }
+  }
+
   invisible(TRUE)
+}
+
+# Permutation mapping model2's model-frame row order onto model1's, keyed on the
+# persistent row names -- the same identifiers validate_pcv_models() aligns on when
+# it accepts two fits of the SAME observations supplied in a DIFFERENT row order.
+# The parametric bootstrap simulates responses in model2's order and refit()
+# replaces the response POSITIONALLY, so without this permutation a model2-ordered
+# draw fed into model1's refit would pair each simulated value with the WRONG row.
+# Returns NULL -- meaning "leave the draw as-is", the safe positional fallback --
+# when the two frames are already in the same order (the identity permutation, the
+# common case) or when the row ids are unusable (absent, NA, non-unique, or not the
+# same set), degrading to the previous order-sensitive behaviour.
+maihda_pcv_boot_align <- function(model1, model2) {
+  ids1 <- rownames(maihda_model_frame(model1))
+  ids2 <- rownames(maihda_model_frame(model2))
+  if (is.null(ids1) || is.null(ids2) || length(ids1) != length(ids2) ||
+      anyNA(ids1) || anyNA(ids2) ||
+      anyDuplicated(ids1) != 0L || anyDuplicated(ids2) != 0L ||
+      !setequal(ids1, ids2)) {
+    return(NULL)
+  }
+  perm <- match(ids1, ids2)
+  if (identical(perm, seq_along(perm))) NULL else perm
+}
+
+# Reorder a simulated response by `perm`. lme4::refit() replaces the response
+# positionally, so a response simulated in one fit's row order must be permuted
+# into another's before refitting there. Handles a plain vector (one value per row)
+# and an aggregated-binomial cbind(success, failure) n x 2 matrix (one row per
+# observation) alike.
+maihda_reorder_response <- function(resp, perm) {
+  if (is.matrix(resp)) resp[perm, , drop = FALSE] else resp[perm]
 }
 
 #' Bootstrap PCV
@@ -448,8 +1161,8 @@ bootstrap_pcv <- function(model1, model2, n_boot, conf_level) {
     # engine switch (the old message told brms users to "refit with brms").
     hint <- switch(engine,
       brms = paste0(
-        "For brms models the PCV is reported as a point estimate (the ratio of ",
-        "posterior-mean between-stratum variances of two separately fitted ",
+        "For brms models the PCV is reported as a point estimate (from the ",
+        "posterior-median between-stratum variances of two separately fitted ",
         "models); no posterior interval for the PCV itself is computed -- ",
         "summary()'s credible interval covers a single fit's VPC/ICC, not the ",
         "PCV. Call calculate_pcv() with bootstrap = FALSE."),
@@ -469,35 +1182,90 @@ bootstrap_pcv <- function(model1, model2, n_boot, conf_level) {
          call. = FALSE)
   }
 
-  # Initialise to NA so iterations whose refit() throws — and never reach the
-  # assignment inside the tryCatch body — stay NA rather than the numeric() default of 0.
+  # Initialise to NA so iterations whose refit() throws -- and never reach the
+  # assignment inside the tryCatch body -- stay NA rather than the numeric() default of 0.
   # The error handler runs in its own scope and cannot write back to this vector,
   # so the initial value is what survives a failure.
   pcv_boot <- rep(NA_real_, n_boot)
+  boundary <- rep(FALSE, n_boot)
+  # Count draws that contribute to the interval but whose refit optimiser did not
+  # converge, so the reported n_boot_ok does not silently imply convergence.
+  n_nonconv <- 0L
 
   # Parametric Bootstrap: Simulate new responses from the adjusted model (model2)
   # This mathematically preserves the hierarchical structure (random effects)
   # and the fixed-effects distributions, unlike naive row-resampling.
-  sim_data <- stats::simulate(model2$model, nsim = n_boot)
+  sim_data <- maihda_simulate_lme4(model2$model, nsim = n_boot)
+
+  # The draws are in model2's row order. model2's own refit takes them as-is, but
+  # model1 may have been fitted to the SAME observations in a different order (which
+  # validate_pcv_models() permits), so each draw is permuted into model1's row order
+  # before refitting model1. NULL means the frames are already aligned (or the ids
+  # are unusable): the draw is then used positionally, as before.
+  perm1 <- maihda_pcv_boot_align(model1$model, model2$model)
 
   for (i in 1:n_boot) {
     tryCatch({
-      # Fast parametric refitting with the newly simulated response vector
-      boot_model1 <- lme4::refit(model1$model, newresp = sim_data[[i]])
-      boot_model2 <- lme4::refit(model2$model, newresp = sim_data[[i]])
+      # Fast parametric refitting with the newly simulated response vector, aligned
+      # to each model's own row order.
+      resp2 <- sim_data[[i]]
+      resp1 <- if (is.null(perm1)) resp2 else maihda_reorder_response(resp2, perm1)
+      boot_model1 <- maihda_refit_draw(model1$model, resp1)
+      boot_model2 <- maihda_refit_draw(model2$model, resp2)
 
       # Extract variances
       var1 <- maihda_stratum_variance_lme4(boot_model1)
       var2 <- maihda_stratum_variance_lme4(boot_model2)
 
-      # Calculate PCV
-      pcv_boot[i] <- if (is.finite(var1) && var1 > 0) (var1 - var2) / var1 else NA_real_
+      # Calculate PCV; a draw whose NULL variance lands on the zero boundary
+      # has no defined PCV and is tracked separately from a refit failure. The
+      # boundary test uses lme4's relative singularity tolerance, not var1 > 0:
+      # an effectively singular refit reports a strictly positive variance like
+      # 1e-12, which would pass a strict-zero check and blow up the ratio (and
+      # with it the percentile interval).
+      if (is.finite(var1) && var1 > 0 &&
+          !isTRUE(maihda_stratum_at_boundary_lme4(boot_model1))) {
+        pcv_boot[i] <- (var1 - var2) / var1
+        if (maihda_lme4_optimizer_failed(boot_model1) ||
+            maihda_lme4_optimizer_failed(boot_model2)) {
+          n_nonconv <- n_nonconv + 1L
+        }
+      } else if (is.finite(var1)) {
+        boundary[i] <- TRUE
+      }
     }, error = function(e) NULL)
   }
 
+  # Boundary draws are excluded from the interval, which is therefore
+  # CONDITIONAL on the null model estimating a positive between-stratum
+  # variance. Near the boundary that conditioning can affect a sizeable share
+  # of draws without ever tripping maihda_bootstrap_ci()'s >50% failure
+  # warning, so any boundary mass is surfaced explicitly.
+  n_boundary <- sum(boundary)
+  if (n_boundary > 0) {
+    warning(sprintf(paste0(
+      "%d of %d PCV bootstrap draw(s) estimated a zero between-stratum ",
+      "variance in the null model; the PCV is undefined there, so these draws ",
+      "are excluded and the interval is conditional on a positive null ",
+      "variance. A sizeable boundary share signals weak between-stratum ",
+      "variation -- interpret the PCV and its interval cautiously."),
+      n_boundary, n_boot), call. = FALSE)
+  }
+
+  # Non-converged draws are retained (an lme4 relative-gradient flag is often a
+  # false positive), but the count is reported and, above a documented share of the
+  # contributing draws, the interval is flagged unreliable (interval_reliable).
+  reliable <- maihda_report_nonconvergence(n_nonconv, sum(is.finite(pcv_boot)), "PCV")
+
   # Reduce to an interval, requiring a minimum number of successful refits and
-  # warning on a high failure rate.
-  ci <- maihda_bootstrap_ci(pcv_boot, n_boot, conf_level, "PCV")
+  # warning on a high failure rate. Boundary draws are a legitimate exclusion (the
+  # PCV is undefined there), not a failure, so they are passed as n_excluded and do
+  # not count against the success-fraction gate.
+  ci <- maihda_bootstrap_ci(pcv_boot, n_boot, conf_level, "PCV",
+                            n_excluded = n_boundary)
+  attr(ci, "n_boundary") <- n_boundary
+  attr(ci, "n_nonconverged") <- n_nonconv
+  attr(ci, "interval_reliable") <- reliable
 
   return(ci)
 }
@@ -521,12 +1289,36 @@ print.pcv_result <- function(x, ...) {
                 pal$accent(sprintf("%.4f", pcv)), x$ci_lower, x$ci_upper))
     cat(pal$muted(sprintf("(Bootstrap %.0f%% CI)\n", conf_pct)))
     if (!is.null(x$mc_se) && is.finite(x$mc_se)) {
-      cat(pal$muted(sprintf("(%d successful bootstrap draws; Monte Carlo SE %.4f)\n",
-                  as.integer(x$n_boot_ok), x$mc_se)))
+      cat(pal$muted(sprintf(
+        "(%d successful bootstrap draws; Monte Carlo SE of the bootstrap mean %.4f)\n",
+        as.integer(x$n_boot_ok), x$mc_se)))
+    }
+    if (!is.null(x$n_boot_boundary) && is.finite(x$n_boot_boundary) &&
+        x$n_boot_boundary > 0) {
+      cat(pal$warn(sprintf(paste0(
+        "(%d draw(s) hit the zero null-variance boundary and were excluded;\n",
+        " the interval is conditional on a positive null variance.)\n"),
+        as.integer(x$n_boot_boundary))))
+    }
+    if (!is.null(x$n_boot_nonconverged) && is.finite(x$n_boot_nonconverged) &&
+        x$n_boot_nonconverged > 0) {
+      cat(pal$muted(sprintf(paste0(
+        "(%d contributing draw(s) had an optimiser that did not converge and were\n",
+        " retained; n_boot_ok counts them alongside converged refits.)\n"),
+        as.integer(x$n_boot_nonconverged))))
+    }
+    if (isFALSE(x$interval_reliable)) {
+      cat(pal$warn(paste0(
+        "(Interval flagged UNRELIABLE: more than half the contributing draws did not\n",
+        " converge. Treat it as indicative only and check for singular/failing fits.)\n")))
     }
     cat("\n")
   } else {
     cat(sprintf("PCV: %s\n\n", pal$accent(sprintf("%.4f", pcv))))
+  }
+
+  if (!is.null(x$estimation)) {
+    cat(pal$muted(sprintf("Variance basis: %s\n\n", maihda_pcv_result_basis_label(x))))
   }
 
   cat(pal$bold("Between-stratum variance:"), "\n", sep = "")
@@ -535,6 +1327,9 @@ print.pcv_result <- function(x, ...) {
   cat(sprintf("  Change:  %.6f (%.2f%%)\n",
               x$var_model1 - x$var_model2,
               pcv * 100))
+  if (!is.null(x$var_model1_fitted) && !is.null(x$var_model2_fitted)) {
+    cat(pal$muted(sprintf("  %s\n", maihda_pcv_fitted_line(x))))
+  }
 
   cat(pal$muted("\nInterpretation (PCV is the proportional change in between-stratum\nvariance between the models):\n"))
   if (pcv > 0) {
@@ -547,7 +1342,76 @@ print.pcv_result <- function(x, ...) {
     cat("  No change in between-stratum variance between models.\n")
   }
 
+  if (isTRUE(x$adjusted_at_boundary)) {
+    cat(pal$muted(maihda_pcv_boundary_note("Model 2")))
+  }
+  if (maihda_pcv_show_ml_note(x)) {
+    # estimation = "REML" gives no bootstrap interval for a glmer pair, so a result
+    # that carries one is not pointed to it.
+    cat(pal$muted(maihda_pcv_ml_note(isTRUE(x$reml_available) && !isTRUE(x$bootstrap))))
+  }
+
   invisible(x)
+}
+
+# The maximum-likelihood values kept on a REML-type PCV result, as one line. Shared by
+# print.pcv_result() and the two-model branch of print.maihda_analysis().
+maihda_pcv_fitted_line <- function(x) {
+  sprintf("As fitted (maximum likelihood): %.6f -> %.6f, PCV %s",
+          x$var_model1_fitted, x$var_model2_fitted,
+          if (is.null(x$pcv_fitted) || !is.finite(x$pcv_fitted)) {
+            "NA"
+          } else {
+            sprintf("%.4f", x$pcv_fitted)
+          })
+}
+
+# TRUE when a PCV result should carry the maximum-likelihood note: the default basis,
+# on fits whose variances are maximum-likelihood estimates. An explicit
+# estimation = "ML" is labelled as such on the basis line instead.
+maihda_pcv_show_ml_note <- function(x) {
+  isTRUE(x$ml_variances) && identical(x$estimation, "fitted")
+}
+
+# The maximum-likelihood caveat. Shared by print.pcv_result() and the two-model branch
+# of print.maihda_analysis(); it names estimation = "REML" only where that option
+# applies to the fits (`reml_available`).
+maihda_pcv_ml_note <- function(reml_available = FALSE, width = 84) {
+  # The argument is wrapped as one word, so a line never breaks inside it.
+  arg <- "estimation = \"REML\""
+  arg_word <- gsub(" ", "_", arg, fixed = TRUE)
+  txt <- paste0(
+    "Note: these are maximum-likelihood variances. With few or small strata they run ",
+    "low, and lower the more fixed effects a model has, so the PCV runs high",
+    if (isTRUE(reml_available)) {
+      paste0("; ", arg_word, " compares REML-type variances instead (see ",
+             "?calculate_pcv).")
+    } else {
+      " (see ?calculate_pcv)."
+    })
+  lines <- gsub(arg_word, arg, strwrap(txt, width = width), fixed = TRUE)
+  paste0("\n", paste(lines, collapse = "\n"), "\n")
+}
+
+# The "adjusted fit is at the singularity boundary" caveat. Shared by
+# print.pcv_result() and the two-model branch of print.maihda_analysis() so the two
+# cannot drift apart: the analysis print formats its PCV inline rather than calling
+# print(x$pcv), so before this helper existed the note reached a bare
+# calculate_pcv() result but NEVER the default maihda() output -- a "100% additive"
+# headline off a singular fit, with no caveat anywhere the reader looks.
+#
+# `subject` names the model in the caller's vocabulary ("Model 2" for a bare
+# calculate_pcv() result, "the adjusted model" inside an analysis). Wrapped with
+# strwrap() rather than hand-broken lines so both subjects, of different lengths,
+# come out evenly filled.
+maihda_pcv_boundary_note <- function(subject, width = 84) {
+  txt <- paste0(
+    "Note: ", subject, "'s between-stratum variance is at the singularity boundary, ",
+    "so the PCV is pinned near 100% and its interval/SE are unreliable. A ",
+    "near-complete PCV is consistent with genuinely additive strata (no interaction ",
+    "beyond the main effects) as well as a degenerate fit; the two cannot be told ",
+    "apart from this fit.")
+  paste0("\n", paste(strwrap(txt, width = width), collapse = "\n"), "\n")
 }
 
 # Objects saved by a pre-rename version of the package carry only the "pvc_result"
@@ -581,6 +1445,165 @@ maihda_stepwise_context_variance <- function(mod, context) {
   sum(v[present], na.rm = TRUE)
 }
 
+# Shared preamble for the model-series PCV attributions -- stepwise_pcv() and
+# pcv_importance() -- extracted verbatim from stepwise_pcv() so the two entry
+# points cannot drift on any of these semantics: input validation, the
+# engine/family handshakes (sampling weights -> wemix, binary/ordered-factor
+# auto-detection, ordinal -> clmm, the context x engine guard), the ONE shared
+# complete-case analytic sample across every fit, and the reconstruction of
+# auto-binned stratum dimensions so a dimension enters as its tertile factor
+# rather than a raw linear term.
+#
+# `engine_missing`/`family_missing` carry the caller's missing() state (the
+# auto-switch rules act only on unspecified arguments, and missing() cannot be
+# forwarded through an ordinary argument); `fn` prefixes the messages/errors
+# with the calling function's name and `what` names the statistic in the
+# family auto-detection warnings ("the stepwise PCV" / "the PCV attribution").
+#
+# Returns list(data, model_terms, engine, family, context, sampling_weights):
+# the filtered/augmented analytic data, the model terms aligned with `vars`
+# (identical except that an auto-binned dimension is replaced by its
+# reconstructed .maihda_dim_* factor), and the resolved engine/family/
+# context/weights to forward to every fit_maihda() call.
+maihda_pcv_attribution_setup <- function(data, outcome, vars, engine, family,
+                                         context, sampling_weights,
+                                         engine_missing, family_missing,
+                                         fn = "stepwise_pcv",
+                                         what = "the stepwise PCV") {
+  if (!"stratum" %in% names(data)) {
+    stop("Variable 'stratum' not found in data. Please run make_strata() first.")
+  }
+  # Validate the higher-level context column(s) up front, mirroring fit_maihda()
+  # (which each fit calls). The clash-with-stratum-dimension and
+  # clash-with-fixed-part checks fire per-fit inside fit_maihda(); here we only
+  # normalise and confirm existence so the context columns can join the shared
+  # complete-case filter below (and every fit then holds the (1 | context) effect).
+  context <- maihda_validate_context(context, data)
+  # Sampling weights select the design-weighted engine, mirroring fit_maihda();
+  # the weight column joins the complete-case filter below so all fits share one
+  # analytic sample.
+  if (!is.null(sampling_weights)) {
+    sampling_weights <- maihda_validate_sampling_weights(sampling_weights, data)
+    if (engine_missing) {
+      engine <- "wemix"
+      message(fn, "(): 'sampling_weights' supplied; using engine = \"wemix\" ",
+              "(design-weighted pseudo-maximum-likelihood via WeMix).")
+    } else if (identical(engine, "lme4")) {
+      stop("Sampling weights are not supported by engine = \"lme4\" (lme4's ",
+           "weights are precision weights, not sampling weights). Use ",
+           "engine = \"wemix\" or \"brms\".", call. = FALSE)
+    }
+  }
+  required_vars <- unique(c(outcome, "stratum", vars, context, sampling_weights))
+  missing_vars <- setdiff(required_vars, names(data))
+  if (length(missing_vars) > 0) {
+    stop("Variables not found in data: ", paste(missing_vars, collapse = ", "))
+  }
+
+  strata_info <- attr(data, "strata_info")
+  strata_vars <- attr(data, "strata_vars")
+  strata_sep <- attr(data, "strata_sep")
+  strata_autobin_info <- attr(data, "strata_autobin_info")
+
+  complete_idx <- stats::complete.cases(data[, required_vars, drop = FALSE])
+  # The design-weighted (wemix) engine drops rows whose sampling weight is
+  # non-finite or <= 0, not just NA (complete.cases only catches NA, so a 0, a
+  # negative, or an Inf weight slips through). Exclude those rows from the ONE
+  # shared analytic sample too, so family auto-detection and n_obs see exactly the
+  # rows every fit will use -- otherwise a single zero-weight row carrying an
+  # out-of-sample outcome value (e.g. a 2 in an otherwise binary column) flips the
+  # detected family to Gaussian, and n_obs is inflated by rows no fit uses.
+  if (!is.null(sampling_weights)) {
+    complete_idx <- complete_idx &
+      !is.na(maihda_sampling_weight_mask(data[[sampling_weights]]))
+  }
+  if (!any(complete_idx)) {
+    stop("No complete cases remain after filtering outcome, stratum, and stepwise variables.")
+  }
+  if (!all(complete_idx)) {
+    data <- data[complete_idx, , drop = FALSE]
+    attr(data, "strata_info") <- strata_info
+    attr(data, "strata_vars") <- strata_vars
+    attr(data, "strata_sep") <- strata_sep
+    attr(data, "strata_autobin_info") <- strata_autobin_info
+  }
+
+  # Reconstruct auto-binned stratum dimensions so each fit enters the SAME tertile
+  # factor that defines the strata (matching the adjusted model and core maihda()),
+  # rather than a raw linear term for an auto-binned numeric dimension. The displayed
+  # variable name stays the original; only the model term changes.
+  model_terms <- vars
+  if (length(vars) > 0 && !is.null(strata_autobin_info) &&
+      length(strata_autobin_info) > 0 && any(vars %in% names(strata_autobin_info))) {
+    adj <- maihda_adjusted_terms(vars, strata_autobin_info, data)
+    data <- adj$data
+    attr(data, "strata_info") <- strata_info
+    attr(data, "strata_vars") <- strata_vars
+    attr(data, "strata_sep") <- strata_sep
+    attr(data, "strata_autobin_info") <- strata_autobin_info
+    model_terms <- adj$terms
+  }
+
+  # Warn once, here in the shared preamble, if a numeric stratum dimension among
+  # the attributed 'vars' will enter the (subset/step) models as a raw linear term
+  # rather than categorical main effects -- the same guardrail maihda() emits at
+  # its single entry point (see maihda_warn_linear_strata_dims()). Without this,
+  # pcv_importance()/stepwise_pcv() built the same linear-term models silently,
+  # while maihda() warned. Restricted to intersect(strata_vars, vars): a numeric
+  # dimension that is not being attributed never enters a fixed term, and a numeric
+  # covariate that is not a stratum dimension is expected to be continuous. Auto-
+  # binned dimensions are excluded by the helper (they enter as the tertile factor).
+  maihda_warn_linear_strata_dims(intersect(strata_vars, vars), strata_autobin_info,
+                                 data, fn = fn)
+
+  # Auto-detect a binary outcome when family is left at the default, mirroring
+  # fit_maihda()/maihda(). Otherwise a binary outcome would silently be fit on the
+  # Gaussian (linear) scale for numeric 0/1, or error for a factor. An ordered
+  # factor likewise selects the cumulative (ordinal) model.
+  if (family_missing && maihda_is_binary_vector(data[[outcome]])) {
+    warning("The outcome variable appears to be binary. Using family = 'binomial' ",
+            "for ", what, ". Specify family = 'gaussian' explicitly for a ",
+            "linear probability model.", call. = FALSE)
+    family <- "binomial"
+  } else if (family_missing && is.ordered(data[[outcome]]) &&
+             nlevels(droplevels(data[[outcome]])) >= 3) {
+    warning("The outcome variable is an ordered factor. Using the cumulative ",
+            "(ordinal) model, family = 'ordinal', for ", what, ".",
+            call. = FALSE)
+    family <- "ordinal"
+  }
+
+  # Ordinal family <-> engine handshake, mirroring fit_maihda(): the per-fit
+  # calls receive 'engine' explicitly, so fit_maihda()'s own auto-switch could
+  # never fire through them.
+  if (maihda_family_is_ordinal(
+    if (is.function(family)) tryCatch(family(), error = function(e) NULL) else family
+  )) {
+    if (engine_missing && is.null(sampling_weights)) {
+      engine <- "ordinal"
+      message(fn, "(): ordinal (cumulative) family; using engine = ",
+              "\"ordinal\" (ordinal::clmm).")
+    } else if (identical(engine, "lme4")) {
+      stop("lme4 cannot fit a cumulative (ordinal) model. Use engine = ",
+           "\"ordinal\" (ordinal::clmm, the default for this family) or ",
+           "engine = \"brms\" (brms::cumulative).", call. = FALSE)
+    }
+  }
+
+  # Context is a crossed random effect, which the design-weighted (wemix) and
+  # cumulative (ordinal) engines cannot fit -- mirroring fit_maihda()'s guards
+  # (which each fit would otherwise hit at the null model). Checked on the RESOLVED
+  # engine, so a valid context + sampling_weights + engine = "brms" still passes.
+  if (!is.null(context) && engine %in% c("wemix", "ordinal")) {
+    stop(fn, "(): engine = \"", engine, "\" does not support 'context' ",
+         "(it fits no crossed random effects). Use engine = \"lme4\" or ",
+         "\"brms\" for a contextual cross-classified analysis.", call. = FALSE)
+  }
+
+  list(data = data, model_terms = model_terms, engine = engine, family = family,
+       context = context, sampling_weights = sampling_weights)
+}
+
 #' Stepwise Proportional Change in Variance (PCV)
 #'
 #' @description
@@ -591,8 +1614,8 @@ maihda_stepwise_context_variance <- function(mod, context) {
 #' sequential it is order-dependent: it reflects each variable's marginal,
 #' model-dependent change, not an order-invariant \dQuote{unique} contribution.
 #'
-#' @param data Data frame with observations. Ensure `make_strata()` was run first
-#'   so the `stratum` variable exists.
+#' @param data Data frame with observations. Ensure \code{\link{make_strata}} was
+#'   run first so the \code{stratum} variable exists.
 #' @param outcome Character string; the dependent variable.
 #' @param vars Character vector; predictors (strata groupings & covariates) to
 #'   add sequentially to the model.
@@ -620,6 +1643,9 @@ maihda_stepwise_context_variance <- function(mod, context) {
 #'   design-weighted stepwise fits; see \code{\link{fit_maihda}}. The weight
 #'   column joins the complete-case filter so every step uses the same analytic
 #'   sample.
+#' @param estimation Variance-estimation basis for the between-stratum variances
+#'   compared across steps, \code{"fitted"} (default) or \code{"ML"}; see
+#'   \code{\link{calculate_pcv}}. Affects Gaussian \code{lmer} fits only.
 #'
 #' @return A data.frame (class \code{maihda_stepwise}) showing the sequential
 #'   models, the between-stratum variance at each step, and both the step-specific
@@ -630,16 +1656,37 @@ maihda_stepwise_context_variance <- function(mod, context) {
 #'   delta-AUC, versus the previous step and versus the null), and \code{MOR} (the
 #'   Median Odds Ratio, logit link only). These columns are absent for non-binary
 #'   outcomes. When \code{context} is supplied, a \code{Context_Variance} column
-#'   reports the between-context variance held at each step, and the
-#'   discriminatory-accuracy trajectory is omitted even for a binary outcome -- the
-#'   AUC would include the context random effect and so mismatch the net-of-context
-#'   \code{Step_PCV} / \code{Total_PCV}, exactly as \code{\link{summary.maihda_model}}
-#'   drops it for a contextual fit.
+#'   reports the between-context variance held at each step (for a \code{brms} fit the
+#'   posterior median of each context's variance, summed over the contexts;
+#'   \code{Variance} is a posterior median too). For a binary
+#'   outcome the discriminatory-accuracy trajectory is still reported alongside it: the
+#'   \code{AUC} and \code{MOR} are the intersectional-scope (between-stratum)
+#'   quantities -- the concordance of the fixed effects plus the stratum interaction,
+#'   \emph{excluding} the context random effect -- so they carry the same
+#'   net-of-context scope as the \code{Step_PCV} / \code{Total_PCV} columns, exactly
+#'   as \code{\link{summary.maihda_model}} reports the intersectional-scope AUC for a
+#'   contextual fit.
+#'
+#'   The variance-estimation basis chosen by \code{estimation} is recorded as an
+#'   \code{"estimation"} attribute on the returned table; the basis actually used is
+#'   recorded as \code{"estimation_used"} (\code{"mixed"} when \code{estimation = "ML"}
+#'   but a step's ML refit was skipped at the boundary, leaving it on REML). Both are
+#'   shown by \code{print()}. An \code{"ml_variances"} attribute is \code{TRUE} when the
+#'   compared variances are maximum-likelihood estimates (\code{glmer}, wemix or
+#'   ordinal fits, or \code{lmer} fits refitted by maximum likelihood); \code{print()}
+#'   notes it under the default \code{estimation}, as \code{\link{calculate_pcv}} does.
+#'
+#'   \code{Step_PCV} is \code{NA} for any step whose \emph{preceding} model has a
+#'   between-stratum variance at the singularity boundary: that variance is the step's
+#'   denominator, and at the boundary it carries only optimizer noise, so the ratio is
+#'   undefined rather than small. Those steps are listed in an
+#'   \code{"undefined_step_pcv"} attribute and noted by \code{print()}. \code{Total_PCV}
+#'   is unaffected, since it divides by the null model's variance.
 #'
 #' @details
-#' All models are fit on the complete cases for `outcome`, `stratum`, and all
-#' variables in `vars` so that each sequential variance comparison uses the same
-#' analytic sample.
+#' All models are fit on the complete cases for \code{outcome}, \code{stratum},
+#' and all variables in \code{vars} so that each sequential variance comparison
+#' uses the same analytic sample.
 #'
 #' For a binary (or ordinal) outcome the sequential between-stratum variances
 #' live on the latent scale, whose level-1 variance is fixed by the link: a step
@@ -655,8 +1702,9 @@ maihda_stepwise_context_variance <- function(mod, context) {
 #' \code{Total_AUC} are its \emph{absolute} change (delta-AUC), in contrast to the
 #' \emph{proportional} \code{Step_PCV} / \code{Total_PCV}. The \code{MOR} is reported
 #' for the logit link (\code{NA} otherwise) and is a monotone transform of the
-#' between-stratum variance already in \code{Variance}. For a design-weighted fit
-#' (\code{sampling_weights}) the AUC is the design-weighted (population) C-statistic.
+#' between-stratum variance already in \code{Variance}. For a
+#' design-weighted fit (\code{sampling_weights}) the AUC is the design-weighted
+#' (population) C-statistic.
 #' Reuses \code{\link{maihda_discriminatory_accuracy}} on each step's fitted model, so
 #' no additional models are fit. Note that adding a \emph{stratum-defining} dimension
 #' (one already encoded by the strata) typically leaves the AUC essentially unchanged:
@@ -684,114 +1732,22 @@ maihda_stepwise_context_variance <- function(mod, context) {
 #'
 #' @export
 stepwise_pcv <- function(data, outcome, vars, engine = "lme4", family = "gaussian",
-                         context = NULL, sampling_weights = NULL) {
+                         context = NULL, sampling_weights = NULL,
+                         estimation = c("fitted", "ML")) {
+  estimation <- match.arg(estimation)
 
-  if (!"stratum" %in% names(data)) {
-    stop("Variable 'stratum' not found in data. Please run make_strata() first.")
-  }
-  # Validate the higher-level context column(s) up front, mirroring fit_maihda()
-  # (which each step calls). The clash-with-stratum-dimension and
-  # clash-with-fixed-part checks fire per-step inside fit_maihda(); here we only
-  # normalise and confirm existence so the context columns can join the shared
-  # complete-case filter below (and every step then holds the (1 | context) effect).
-  context <- maihda_validate_context(context, data)
-  # Sampling weights select the design-weighted engine, mirroring fit_maihda();
-  # the weight column joins the complete-case filter below so all steps share one
-  # analytic sample.
-  if (!is.null(sampling_weights)) {
-    sampling_weights <- maihda_validate_sampling_weights(sampling_weights, data)
-    if (missing(engine)) {
-      engine <- "wemix"
-      message("stepwise_pcv(): 'sampling_weights' supplied; using engine = \"wemix\" ",
-              "(design-weighted pseudo-maximum-likelihood via WeMix).")
-    } else if (identical(engine, "lme4")) {
-      stop("Sampling weights are not supported by engine = \"lme4\" (lme4's ",
-           "weights are precision weights, not sampling weights). Use ",
-           "engine = \"wemix\" or \"brms\".", call. = FALSE)
-    }
-  }
-  required_vars <- unique(c(outcome, "stratum", vars, context, sampling_weights))
-  missing_vars <- setdiff(required_vars, names(data))
-  if (length(missing_vars) > 0) {
-    stop("Variables not found in data: ", paste(missing_vars, collapse = ", "))
-  }
-
-  strata_info <- attr(data, "strata_info")
-  strata_vars <- attr(data, "strata_vars")
-  strata_sep <- attr(data, "strata_sep")
-  strata_autobin_info <- attr(data, "strata_autobin_info")
-
-  complete_idx <- stats::complete.cases(data[, required_vars, drop = FALSE])
-  if (!any(complete_idx)) {
-    stop("No complete cases remain after filtering outcome, stratum, and stepwise variables.")
-  }
-  if (!all(complete_idx)) {
-    data <- data[complete_idx, , drop = FALSE]
-    attr(data, "strata_info") <- strata_info
-    attr(data, "strata_vars") <- strata_vars
-    attr(data, "strata_sep") <- strata_sep
-    attr(data, "strata_autobin_info") <- strata_autobin_info
-  }
-
-  # Reconstruct auto-binned stratum dimensions so each step enters the SAME tertile
-  # factor that defines the strata (matching the adjusted model and core maihda()),
-  # rather than a raw linear term for an auto-binned numeric dimension. The displayed
-  # "Added_Variable" keeps the original variable name; only the model term changes.
-  model_terms <- vars
-  if (length(vars) > 0 && !is.null(strata_autobin_info) &&
-      length(strata_autobin_info) > 0 && any(vars %in% names(strata_autobin_info))) {
-    adj <- maihda_adjusted_terms(vars, strata_autobin_info, data)
-    data <- adj$data
-    attr(data, "strata_info") <- strata_info
-    attr(data, "strata_vars") <- strata_vars
-    attr(data, "strata_sep") <- strata_sep
-    attr(data, "strata_autobin_info") <- strata_autobin_info
-    model_terms <- adj$terms
-  }
-
-  # Auto-detect a binary outcome when family is left at the default, mirroring
-  # fit_maihda()/maihda(). Otherwise a binary outcome would silently be fit on the
-  # Gaussian (linear) scale for numeric 0/1, or error for a factor. An ordered
-  # factor likewise selects the cumulative (ordinal) model.
-  if (missing(family) && maihda_is_binary_vector(data[[outcome]])) {
-    warning("The outcome variable appears to be binary. Using family = 'binomial' ",
-            "for the stepwise PCV. Specify family = 'gaussian' explicitly for a ",
-            "linear probability model.", call. = FALSE)
-    family <- "binomial"
-  } else if (missing(family) && is.ordered(data[[outcome]]) &&
-             nlevels(droplevels(data[[outcome]])) >= 3) {
-    warning("The outcome variable is an ordered factor. Using the cumulative ",
-            "(ordinal) model, family = 'ordinal', for the stepwise PCV.",
-            call. = FALSE)
-    family <- "ordinal"
-  }
-
-  # Ordinal family <-> engine handshake, mirroring fit_maihda(): the per-step
-  # fits receive 'engine' explicitly, so fit_maihda()'s own auto-switch could
-  # never fire through them.
-  if (maihda_family_is_ordinal(
-    if (is.function(family)) tryCatch(family(), error = function(e) NULL) else family
-  )) {
-    if (missing(engine) && is.null(sampling_weights)) {
-      engine <- "ordinal"
-      message("stepwise_pcv(): ordinal (cumulative) family; using engine = ",
-              "\"ordinal\" (ordinal::clmm).")
-    } else if (identical(engine, "lme4")) {
-      stop("lme4 cannot fit a cumulative (ordinal) model. Use engine = ",
-           "\"ordinal\" (ordinal::clmm, the default for this family) or ",
-           "engine = \"brms\" (brms::cumulative).", call. = FALSE)
-    }
-  }
-
-  # Context is a crossed random effect, which the design-weighted (wemix) and
-  # cumulative (ordinal) engines cannot fit -- mirroring fit_maihda()'s guards
-  # (which each step would otherwise hit at the null fit). Checked on the RESOLVED
-  # engine, so a valid context + sampling_weights + engine = "brms" still passes.
-  if (!is.null(context) && engine %in% c("wemix", "ordinal")) {
-    stop("stepwise_pcv(): engine = \"", engine, "\" does not support 'context' ",
-         "(it fits no crossed random effects). Use engine = \"lme4\" or ",
-         "\"brms\" for a contextual cross-classified stepwise PCV.", call. = FALSE)
-  }
+  setup <- maihda_pcv_attribution_setup(
+    data, outcome, vars, engine = engine, family = family, context = context,
+    sampling_weights = sampling_weights,
+    engine_missing = missing(engine), family_missing = missing(family),
+    fn = "stepwise_pcv", what = "the stepwise PCV"
+  )
+  data <- setup$data
+  model_terms <- setup$model_terms
+  engine <- setup$engine
+  family <- setup$family
+  context <- setup$context
+  sampling_weights <- setup$sampling_weights
 
   results <- data.frame(
     Step = integer(length(vars) + 1),
@@ -804,14 +1760,35 @@ stepwise_pcv <- function(data, outcome, vars, engine = "lme4", family = "gaussia
   )
 
   # Model 0: Null Model. Each step compares the stratum variance across models that
-  # differ in fixed effects, so refit any REML lmer fit with ML first (see
-  # calculate_pcv()); a no-op for glmer/wemix/ordinal binary fits used for the DA
-  # trajectory below.
+  # differ in fixed effects, so apply the requested variance-estimation basis first
+  # (estimation = "ML" refits a REML lmer fit with ML; "fitted", the default, keeps
+  # it -- see calculate_pcv()); a no-op for glmer/wemix/ordinal binary fits used for
+  # the DA trajectory below.
   null_fmla <- maihda_formula_with_stratum(outcome)
-  null_mod <- maihda_pcv_refit_ml(fit_maihda(null_fmla, data, engine = engine,
-                         family = family, context = context,
-                         sampling_weights = sampling_weights))
-  null_var <- extract_between_variance(null_mod)
+  null_mod <- maihda_pcv_apply_estimation(
+    fit_maihda(null_fmla, data, engine = engine,
+               family = family, context = context,
+               sampling_weights = sampling_weights), estimation)
+  null_var <- maihda_pcv_between_variance(null_mod)
+  # Track whether any model kept its REML fit because an ML refit was skipped at the
+  # boundary or FAILED (see maihda_pcv_refit_ml()); under estimation = "ML" either makes
+  # the series' basis "mixed", not pure ML. (A boundary NULL hard-stops just below, so in
+  # practice this is driven by the step models.)
+  ml_refit_skipped <- isTRUE(null_mod$ml_refit_skipped_boundary)
+  ml_refit_failed_any <- isTRUE(null_mod$ml_refit_failed)
+  # Whether the compared variances are maximum-likelihood estimates, as calculate_pcv()
+  # records it, so print() can say so.
+  ml_variances <- maihda_pcv_ml_variances(null_mod)
+
+  # Every Total_PCV divides by null_var and the first Step_PCV divides by it too,
+  # so a boundary-level (effectively singular) null variance -- a strictly
+  # positive value like 1.56e-17 that passes a plain > 0 test -- makes those
+  # ratios meaningless (e.g. a spurious 100% or a huge negative PCV). Reject it
+  # up front with the same lme4 singularity guard calculate_pcv() applies to its
+  # reference model, rather than tabulating a degenerate denominator.
+  if (maihda_pcv_null_at_boundary(null_mod)) {
+    maihda_pcv_degenerate_null_stop("the null model")
+  }
 
   # Discriminatory-accuracy trajectory (binary outcomes only): read the AUC and MOR
   # off each step's already-fitted model, so no extra fits are needed. Whether it
@@ -821,12 +1798,15 @@ stepwise_pcv <- function(data, outcome, vars, engine = "lme4", family = "gaussia
   # aggregated-binomial, design-weighted (wemix) AUC and the logit-only MOR gate, so a
   # design-weighted stepwise yields the design-weighted AUC here too.
   #
-  # Suppressed for a CONTEXTUAL fit (context = ), mirroring summary.maihda_model():
-  # the AUC is built from full predictions that INCLUDE the context random effect, so
-  # it would not match the net-of-context (stratum-only) Step_PCV/Total_PCV columns
-  # here. A contextual binary stepwise therefore reports the PCV trajectory only.
+  # Reported for a CONTEXTUAL fit (context = ) too, matching summary.maihda_model():
+  # maihda_discriminatory_accuracy()'s headline AUC is the intersectional-SCOPE
+  # concordance (fixed effects + the stratum interaction, EXCLUDING the context
+  # random effect), and the MOR is likewise the between-stratum quantity, so both
+  # share the scope of the net-of-context Step_PCV/Total_PCV columns here. (An
+  # earlier AUC implementation used the full, context-including predictions, which
+  # this branch was gated to suppress; that gate is now obsolete.)
   da_applies <- isTRUE(maihda_model_family_name(null_mod) %in%
-                       c("binomial", "bernoulli")) && is.null(context)
+                       c("binomial", "bernoulli"))
   auc_vec <- rep(NA_real_, length(vars) + 1)
   mor_vec <- rep(NA_real_, length(vars) + 1)
   read_da <- function(m) {
@@ -864,16 +1844,34 @@ stepwise_pcv <- function(data, outcome, vars, engine = "lme4", family = "gaussia
   # Sequentially add variables (using the reconstructed model term for any auto-binned
   # dimension, while reporting the original variable name in the table).
   current_terms <- character(0)
+  # Steps whose adjusted between-stratum variance sits on the singularity boundary:
+  # their Total_PCV saturates near 100% as an artefact of a singular fit, not genuine
+  # attenuation (the same status calculate_pcv() flags for its adjusted model2).
+  boundary_steps <- character(0)
+  # Steps whose Step_PCV is left NA because the PREVIOUS model -- their denominator --
+  # was itself at the boundary (see the gate below).
+  undefined_step_pcv <- character(0)
+  # The null model is hard-stopped at the boundary above, so the first step always
+  # divides by a healthy denominator; only a later step can inherit a degenerate one.
+  prev_at_boundary <- FALSE
 
   for (i in seq_along(vars)) {
     current_terms <- c(current_terms, model_terms[i])
 
     fmla <- maihda_formula_with_stratum(outcome, current_terms)
-    mod <- maihda_pcv_refit_ml(fit_maihda(fmla, data, engine = engine,
-                      family = family, context = context,
-                      sampling_weights = sampling_weights))
+    mod <- maihda_pcv_apply_estimation(
+      fit_maihda(fmla, data, engine = engine,
+                 family = family, context = context,
+                 sampling_weights = sampling_weights), estimation)
 
-    curr_var <- extract_between_variance(mod)
+    curr_var <- maihda_pcv_between_variance(mod)
+    if (isTRUE(mod$ml_refit_skipped_boundary)) ml_refit_skipped <- TRUE
+    if (isTRUE(mod$ml_refit_failed)) ml_refit_failed_any <- TRUE
+    if (maihda_pcv_ml_variances(mod)) ml_variances <- TRUE
+    curr_at_boundary <- maihda_pcv_null_at_boundary(mod)
+    if (curr_at_boundary) {
+      boundary_steps <- c(boundary_steps, vars[i])
+    }
 
     if (da_applies) {
       dai <- read_da(mod)
@@ -885,7 +1883,20 @@ stepwise_pcv <- function(data, outcome, vars, engine = "lme4", family = "gaussia
       ctx_var_vec[i + 1] <- maihda_stepwise_context_variance(mod, context)
     }
 
-    step_pcv <- if (prev_var > 0) (prev_var - curr_var) / prev_var else NA
+    # Step_PCV divides by the PREVIOUS step's variance, so once that model sits on the
+    # singularity boundary the ratio is built from two optimizer artefacts rather than
+    # from any attenuation. lme4 usually returns an exact zero there (which prev_var > 0
+    # already catches), but the wemix and ordinal optimizers return a tiny POSITIVE
+    # value that passes it -- a 1.4e-21 -> 4.0e-16 wemix pair reports a Step_PCV of
+    # -276564 (-27656406%) -- so the boundary flag, not the sign, has to gate this.
+    # Total_PCV is unaffected: its denominator is the null variance, kept healthy by
+    # the hard stop above, so it stays available for every step.
+    if (prev_at_boundary) undefined_step_pcv <- c(undefined_step_pcv, vars[i])
+    step_pcv <- if (!prev_at_boundary && prev_var > 0) {
+      (prev_var - curr_var) / prev_var
+    } else {
+      NA_real_
+    }
     total_pcv <- if (null_var > 0) (null_var - curr_var) / null_var else NA
 
     results[i + 1, ] <- list(
@@ -898,7 +1909,15 @@ stepwise_pcv <- function(data, outcome, vars, engine = "lme4", family = "gaussia
     )
 
     prev_var <- curr_var
+    prev_at_boundary <- curr_at_boundary
   }
+
+  # A singular (boundary) adjusted fit at some step makes that step's Total_PCV read as
+  # ~100% explained though it is a boundary artefact, not genuine attenuation. This is
+  # the COMMON case for additive strata (the full additive model leaves ~0 interaction
+  # variance), so it is recorded as a silent status attribute (boundary_steps, set at
+  # the end -- after the column edits below, which use `[` and would drop it) for
+  # programmatic inspection and the print method, NOT raised as a per-call warning.
 
   # Attach the discriminatory-accuracy trajectory as extra columns only for a binary
   # outcome (so the gaussian/poisson/ordinal table is unchanged). Step_AUC / Total_AUC
@@ -923,6 +1942,15 @@ stepwise_pcv <- function(data, outcome, vars, engine = "lme4", family = "gaussia
                               after = match("Variance", base_cols))]
   }
 
+  # Record the variance-estimation basis used for every step's PCV so a serialized
+  # table keeps this (statistically material) provenance, mirroring the
+  # $estimation element on a calculate_pcv() result.
+  attr(results, "estimation") <- estimation
+  attr(results, "estimation_used") <- maihda_pcv_estimation_used(
+    estimation, ml_refit_skipped || ml_refit_failed_any, engine = engine)
+  attr(results, "ml_variances") <- ml_variances
+  attr(results, "boundary_steps") <- boundary_steps
+  attr(results, "undefined_step_pcv") <- undefined_step_pcv
   class(results) <- c("maihda_stepwise", "data.frame")
   return(results)
 }
@@ -946,6 +1974,33 @@ print.maihda_stepwise <- function(x, ...) {
         "\nStep_PCV / Total_PCV are the between-stratum PCV NET OF the context random\n",
         "intercept held in every model; Context_Variance is that (summed)\n",
         "between-context variance at each step.\n")))
+  }
+  basis <- maihda_pcv_series_basis(x)
+  if (!is.null(basis)) {
+    cat(maihda_palette()$muted(sprintf("\nVariance basis: %s\n",
+      maihda_pcv_result_basis_label(basis))))
+    # stepwise_pcv() takes no estimation = "REML", so the note does not name it.
+    if (maihda_pcv_show_ml_note(basis)) {
+      cat(maihda_palette()$muted(maihda_pcv_ml_note()))
+    }
+  }
+  bstep <- attr(x, "boundary_steps")
+  if (length(bstep) > 0) {
+    cat(maihda_palette()$muted(sprintf(paste0(
+      "\nNote: the between-stratum variance is at the singularity boundary (a singular\n",
+      "fit) after adding: %s, so the corresponding Total_PCV is pinned near 100%%. This is\n",
+      "consistent with genuinely additive strata (no interaction beyond the main effects)\n",
+      "as well as a degenerate fit; the two cannot be told apart.\n"),
+      paste(bstep, collapse = ", "))))
+  }
+  ustep <- attr(x, "undefined_step_pcv")
+  if (length(ustep) > 0) {
+    cat(maihda_palette()$muted(sprintf(paste0(
+      "\nNote: Step_PCV is NA after adding: %s. Each of these steps is measured against\n",
+      "a preceding model whose between-stratum variance is at the singularity boundary,\n",
+      "so the denominator carries only optimizer noise and the step ratio is undefined.\n",
+      "Total_PCV is unaffected -- it divides by the null model's variance.\n"),
+      paste(ustep, collapse = ", "))))
   }
   invisible(x)
 }

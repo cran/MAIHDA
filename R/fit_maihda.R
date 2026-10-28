@@ -12,6 +12,57 @@
 #'   other than "stratum" are provided in the random effect, \code{\link{make_strata}}
 #'   will be called internally to compute the strata and the formula will be
 #'   updated.
+#'   A random slope, such as \code{(1 + x | stratum)}, is fitted, but
+#'   \code{summary()}, the VPC, the PCV and the other MAIHDA summaries need
+#'   intercept-only random effects outside a longitudinal model (see \code{id}).
+#'   Fitted by \code{glmer()} (\code{glmer.nb()} for \code{family = "negbinomial"})
+#'   with \code{nAGQ} of 1 or more, a model with a random slope is refitted once when
+#'   its fit stops with the variance of a block's first term, usually its intercept,
+#'   at zero (in a block of three or more terms, also what is left of a later term's
+#'   variance after the terms before it): glmer's first stage can leave it there,
+#'   where the likelihood can still rise as that variance and the term's covariances
+#'   with the later terms move off zero, and its second stage stops there too. The
+#'   refit starts from the other side of that bound: with one later term, the sign of
+#'   their covariance reversed; with two or more, along the direction in which the
+#'   likelihood rises fastest. It is made by glmer's second stage with the
+#'   \code{bobyqa} optimiser and replaces the fit when its -2 log-likelihood is lower
+#'   by more than 1e-4.
+#'   Such a model is then searched with each random-effect block's terms re-expressed
+#'   as described for \code{lmer()} below and the fixed effects as the coefficients of
+#'   centred and scaled columns, from lme4's starting values of the variance parameters
+#'   with the fit's fixed effects and from the fit's own estimates, and refitted from the
+#'   lower end by glmer's second stage with \code{bobyqa} when its -2 log-likelihood is
+#'   lower by more than 1e-4: with a slope covariate far from zero or in large units,
+#'   such as a birth or calendar year, glmer's own second stage cannot resolve the
+#'   slope's variance and can stop short of the maximum, often with what is left of that
+#'   variance at zero, where lme4 calls the fit singular. Fitting then takes about one
+#'   and a half times as long, and up to about four times.
+#'   A fit refitted either way is refitted once more from its estimates by glmer's
+#'   second stage with the optimiser your control names for that stage
+#'   (\code{Nelder_Mead} by default; where Nelder-Mead's own first steps fail, or it
+#'   stops without converging, its first steps are 0.1\% of each estimate, at least
+#'   1e-6). This adds up to about three quarters to the time of a \code{glmer()} fit so
+#'   refitted, and about doubles that of a \code{glmer.nb()} fit. Kept unless it ends
+#'   higher than the refit or its optimiser reports a failure, the fit then records
+#'   that optimiser, as glmer's own fits do; \code{lme4::refit()} of a fit without a
+#'   control runs the optimiser the fit records, at its package's defaults.
+#'   Fitted by \code{lmer()} outside a longitudinal model, a model with a random
+#'   slope is refitted from the other side of such a bound when lmer's fit stops at
+#'   one, and from a start carried back from the same model with each random-effect
+#'   block's terms, other than an intercept, centred at their means and divided by their
+#'   standard deviations in a block with an intercept, and divided by their root mean
+#'   squares in a block without one, such as \code{(0 + x | ctx)} or the slope of
+#'   \code{(1 + x || stratum)}. Besides stopping at the bound, lmer can stop short of
+#'   the optimum when a slope covariate is far from zero or in large units, such as age
+#'   in years or a calendar year, and where what is left of the variance of a block's
+#'   last term after the terms before it is zero while the criterion still falls as that
+#'   variance moves off zero; the fit kept and lmer's own fit are then refitted once
+#'   more from that variance moved to the lowest criterion along it. A refit replaces
+#'   lmer's fit when its REML criterion (deviance for a maximum-likelihood fit) is lower
+#'   by more than 1e-4, the lowest of them kept; this takes about four times as long as
+#'   one fit, and up to about nine times where lmer's own fit stops with a variance at
+#'   zero.
+#'   Pass \code{start} through \code{...} to fit from your own starting values only.
 #' @param data A data frame containing the variables in the formula.
 #' @param engine Character string specifying which engine to use: "lme4"
 #'   (default), "brms", "wemix" (design-weighted pseudo-maximum-likelihood via
@@ -30,7 +81,9 @@
 #'   only; not supported by the wemix engine). A fixed-theta
 #'   \code{MASS::negative.binomial(theta)} family object is also accepted with
 #'   \code{engine = "lme4"} and is fitted with \code{glmer()}, honouring the
-#'   supplied theta.
+#'   supplied theta. With lme4 an estimated theta needs \code{nAGQ} of 0 or 1:
+#'   \code{glmer.nb()} mis-estimates theta under adaptive quadrature, so
+#'   \code{nAGQ > 1} is an error there (a fixed theta is not affected).
 #'   \code{family = "ordinal"} (alias \code{"cumulative"}; or
 #'   \code{\link{maihda_cumulative}("probit")} / \code{brms::cumulative()} for a
 #'   non-logit link) fits a cumulative (proportional-odds) model for an
@@ -57,8 +110,9 @@
 #'   control which level is the event.
 #'   Although any valid family object is accepted for fitting, the MAIHDA variance
 #'   summaries (\code{\link{summary.maihda_model}}, VPC/ICC, PCV) are only defined
-#'   for \code{gaussian("identity")}, the binomial/Bernoulli families with a logit
-#'   or probit link, \code{poisson("log")}, and the negative binomial with a log
+#'   for \code{gaussian("identity")}, the binomial/Bernoulli families with a logit,
+#'   probit, or complementary log-log (\code{cloglog}) link (latent level-1 variance
+#'   \eqn{\pi^2/3}, 1, and \eqn{\pi^2/6} respectively), \code{poisson("log")}, and the negative binomial with a log
 #'   link (level-1 variance \code{log(1 + 1/lambda + 1/theta)} at the
 #'   \emph{marginal} expected count \code{lambda}; Nakagawa, Johnson & Schielzeth
 #'   2017 -- see \code{\link{summary.maihda_model}} for how \code{lambda} is
@@ -80,18 +134,42 @@
 #'   between-stratum share (now net of the context). A context variable may not be
 #'   a stratum dimension or \code{"stratum"} itself, and may not already appear as
 #'   a fixed-effect term (its variance would then be absorbed by the fixed part).
-#'   A context with few levels (say < 10) weakly identifies its variance and often
-#'   yields a singular lme4 fit; the \code{brms} engine handles this better.
+#'   A context with few levels (say < 10) identifies its variance weakly with
+#'   either engine: \code{lme4} estimates it imprecisely, at zero (a singular fit)
+#'   when the levels differ little, and with \code{engine = "brms"} its posterior
+#'   depends on the prior on its standard deviation (under the default prior it
+#'   comes out high when the context effects are smaller than that prior's scale,
+#'   most with two or three levels), and the context share and the VPC depend on
+#'   it. Prefer contexts with many levels; with few, report the context
+#'   share with its interval (a \code{brms} summary also gives the realised partition,
+#'   which depends little on that prior when each context and stratum has enough data;
+#'   see the section Realised strata and contexts of \code{\link{maihda}}), or enter
+#'   the context as a fixed effect instead
+#'   (\code{outcome ~ context + (1 | ...)}, without \code{context =}) when only
+#'   the strata net of it are wanted.
 #'   Writing the random effect directly in the formula (\code{... + (1 | school)})
 #'   fits the same model but is summarised generically as "Other random effects";
 #'   only \code{context =} activates the labelled contextual partition.
 #'   Not supported by the \code{wemix} engine.
 #' @param sampling_weights Optional single character string naming a numeric
 #'   column of \code{data} holding individual \emph{sampling} (survey/design)
-#'   weights, for a \strong{design-weighted MAIHDA} on complex-survey data
-#'   (e.g. NHANES, PISA). Sampling weights are not the same thing as lme4's
-#'   \code{weights=} (precision weights, which rescale the residual variance), so
-#'   combining \code{sampling_weights} with \code{engine = "lme4"} is an error.
+#'   weights, for a \strong{weighted MAIHDA} on survey data. Sampling weights are
+#'   not the same thing as lme4's \code{weights=} (precision weights, which
+#'   rescale the residual variance), so combining \code{sampling_weights} with
+#'   \code{engine = "lme4"} is an error.
+#'
+#'   \strong{What this does and does not buy you.} A single person-level weight
+#'   column is all this argument accepts: there is no representation of the
+#'   sampling hierarchy -- no primary sampling units, no sampling strata, no
+#'   higher-stage or conditional weights, no finite-population corrections, and no
+#'   replicate weights. Weighting the likelihood makes the point estimates target
+#'   the population-weighted estimand, which is the main reason to use it. The
+#'   standard errors, however, are \emph{not} general design-based standard errors
+#'   for a multistage or stratified sample, because none of the design features
+#'   that drive them are supplied. Treat the intervals as approximate unless your
+#'   design genuinely matches the assumptions below; for full design-based
+#'   inference on such data, use replicate weights with a survey-specific package.
+#'
 #'   Two engines support them:
 #'   \itemize{
 #'     \item \code{engine = "wemix"} (chosen automatically when \code{engine} is
@@ -99,12 +177,25 @@
 #'       \code{WeMix::mix()} (Rabe-Hesketh & Skrondal 2006), the estimator used
 #'       for NAEP/PISA analysis. The individual weights enter at level 1
 #'       unchanged and the level-2 (stratum) weights are 1, because
-#'       intersectional strata are exhaustive population cells included with
-#'       certainty. Supports \code{gaussian(identity)} and
-#'       \code{binomial(logit)} models with the canonical single
-#'       \code{(1 | stratum)} random intercept. Fixed-effect standard errors are
-#'       design-consistent (sandwich); the VPC/PCV are reported as point
-#'       estimates (no bootstrap -- see \code{\link{summary.maihda_model}}).
+#'       intersectional strata are treated as exhaustive population cells
+#'       included with certainty -- so this is a \emph{single-stage} weighted
+#'       model, and it is that assumption the inference rests on. Supports
+#'       \code{gaussian(identity)} and \code{binomial(logit)} models with the
+#'       canonical single \code{(1 | stratum)} random intercept and no
+#'       \code{offset()} term: \code{WeMix::mix()} leaves an offset out of the
+#'       model it fits, so a formula with one is an error. For a Gaussian outcome,
+#'       fit the response minus the offset instead (the same model) and add the
+#'       offset back to its predictions. A \code{binomial(logit)} model whose
+#'       between-stratum variance is estimated at zero is an error as well:
+#'       \code{WeMix::mix()} cannot return that fit. It is a common result for
+#'       the adjusted model when the strata are additive, and
+#'       \code{engine = "brms"} returns a fit there. Fixed-effect
+#'       standard errors are the sandwich (robust) errors WeMix reports, which
+#'       account for the weighting and for dependence within the model's own
+#'       grouping (the intersectional strata) -- but not for clustering or
+#'       stratification induced by the sample design, which the strata do not
+#'       represent. The VPC/PCV are reported as point estimates (no bootstrap --
+#'       see \code{\link{summary.maihda_model}}).
 #'     \item \code{engine = "brms"}: the weights enter the model as likelihood
 #'       weights (\code{y | weights(w)}), normalized to mean 1, giving a
 #'       \emph{pseudo-posterior}: point estimates target the population-weighted
@@ -121,7 +212,11 @@
 #'   \code{NULL} (unweighted).
 #' @param id Optional single character string naming a person/unit identifier
 #'   column for a \strong{longitudinal (growth-curve) MAIHDA} on long-format data
-#'   (one row per measurement occasion). Supplied together with \code{time}, it
+#'   (one row per measurement occasion). Id values must be \emph{globally}
+#'   unique to a person -- ids numbered within a site or group (person "1" in
+#'   every site) would merge different people's trajectories, and an id
+#'   appearing in more than one stratum is rejected with an error. Supplied
+#'   together with \code{time}, it
 #'   makes the model a 3-level growth curve -- occasions within individuals
 #'   (\code{id}) within intersectional strata -- with a random intercept and slope
 #'   on \code{time} at \emph{both} the individual and stratum levels. The growth
@@ -139,13 +234,74 @@
 #'   waves coded 10, 11, ...), the growth terms are fit on internally
 #'   \emph{centered} time (\code{time - min(time)}, with a message): the raw
 #'   polynomial basis over an offset range is ill-conditioned and can silently
-#'   converge to a wrong solution. All results (the time-varying VPC, the
-#'   PCV, plots, predictions) are reported on the original \code{time} scale;
-#'   the column name \code{.maihda_ctime} is reserved for the internal centered
-#'   variable. Default \code{NULL}.
+#'   converge to a wrong solution. With \code{engine = "lme4"} the model is also fit
+#'   on time divided by the power of ten that puts its span between 1 and 10 (days
+#'   over five years are divided by 1000; a span already between 1 and 10 is left as
+#'   it is), with a message: counted in fine units (days, or months for a quadratic
+#'   curve), lme4's optimisers stop far from the optimum, mostly without a convergence
+#'   warning. A model fitted by \code{glmer()} (\code{glmer.nb()} for
+#'   \code{family = "negbinomial"}) is refitted as well: glmer's first stage often
+#'   leaves a growth block's intercept variance at zero, where the likelihood still
+#'   rises with the sign of the intercept-slope covariance reversed, and its second
+#'   stage stops there. Linear growth with a stratum slope is refitted from two more
+#'   starts, which reset the person-level block and start the stratum block at half the
+#'   person-level intercept SD and 0.71 times its slope SD, with an intercept-slope
+#'   correlation of 0.71 or -0.71; a refit replaces the fit when its -2 log-likelihood
+#'   is lower by more than 1e-4. Then any glmer growth fit that still has a block's
+#'   intercept variance at zero is refitted from the other side of that bound by glmer's
+#'   second stage with the \code{bobyqa} optimiser and, when that refit is kept, once more:
+#'   across the bound again if it stops at one, otherwise from where it stops; each refit
+#'   is kept on the same terms. Every glmer growth fit is then searched as a glmer model
+#'   with a random slope is (see \code{formula}), with the penalised least squares inside
+#'   each likelihood evaluation run to a relative tolerance of 1e-10 (lme4's is 1e-7), and
+#'   refitted from the lower end when its -2 log-likelihood is lower by 0.001 or more:
+#'   glmer's own second stage stops quadratic growth fits short of the maximum, often near
+#'   a zero variance of the quadratic term, where lme4 calls the fit singular. This takes
+#'   about three times as long as one fit; the searches add about a fifth to that, and a
+#'   refit from them about as much again. A fit any of these refits replaced is then
+#'   refitted once more from its estimates by glmer's second stage with the optimiser your
+#'   control names for that stage, as described for \code{formula}, which adds about a
+#'   twentieth. \code{lme4::refit()} of a glmer growth fit on a simulated response
+#'   (\code{lme4::bootMer()} makes one for each draw) runs the optimiser the fit records
+#'   from the fit's estimates, and \code{Nelder_Mead}, the default, often stops short of
+#'   the response's maximum there; the bootstraps of \code{summary()} refit each draw as
+#'   \code{fit_maihda()} fits the model. Pass
+#'   \code{start} through \code{...} to fit from your own starting values only; they are
+#'   on the internal time when \code{time} is scaled. All results (the time-varying VPC,
+#'   the PCV, the fixed effects in \code{summary()}, plots,
+#'   predictions) are reported on the original \code{time} scale; the lme4 fit stored
+#'   in the result's \code{model} element is on the internal time. The column name
+#'   \code{.maihda_ctime} is reserved for the internal time variable. Default
+#'   \code{NULL}.
 #' @param time_degree Polynomial degree of the growth curve when \code{time} is
 #'   supplied: 1 (default) linear, 2 quadratic, etc. The brms engine supports
 #'   degree 1 only.
+#' @param stratum_slope Longitudinal only: keep the stratum-level random slope(s)
+#'   on \code{time}? \code{TRUE} (default) fits the canonical Bell et al. (2024)
+#'   structure, \code{(time | id) + (time | stratum)}, in which the between-stratum
+#'   variance is a function of time. \code{FALSE} fits \code{(time | id) +
+#'   (1 | stratum)}: the individual level keeps its growth block, but strata differ
+#'   in \emph{level} only, so the between-stratum variance -- and the numerator of
+#'   the VPC -- is constant over time and no \code{PCV_slope} is defined. It assumes
+#'   that the strata do not diverge over time. A \code{(time | stratum)} block that
+#'   collapses to a perfect intercept-slope correlation does not show that: few
+#'   strata, few occasions per stratum or irregular measurement times produce such
+#'   fits when the strata diverge too, and where they do, \code{FALSE} moves their
+#'   slope differences into the person-level slope variance. The VPC still varies
+#'   with time through the person-level slope
+#'   variance and the residual, so this is a time-constant between-stratum
+#'   \emph{variance}, not a time-constant VPC. A Gaussian growth model fitted by
+#'   \code{lmer()} with a stratum slope, or with quadratic or higher growth, is fitted
+#'   from lme4's starting values and again from more starts, and a refit replaces lmer's
+#'   fit when its REML criterion (deviance for a maximum-likelihood fit) is lower by more
+#'   than 1e-4: lme4's default optimiser can stop at a boundary of a random-effect block
+#'   away from the optimum. With linear growth the starts are scaled by the person-level
+#'   block, with a positive and a negative stratum intercept-slope correlation; with
+#'   quadratic or higher growth one start is lmer's fit of the same model on time
+#'   centred at the middle of its range, and, when that refit and lmer's fit differ by
+#'   more than 0.01, another has both covariance blocks diagonal. Pass \code{start}
+#'   through \code{...} to fit from your own starting values only; they are on the
+#'   internal time when \code{time} is scaled (see \code{time}).
 #' @param interactions Opt-in per-stratum interaction diagnostic
 #'   (\code{\link{maihda_interactions}}), attached as the \code{interactions} slot
 #'   and shown by \code{print()}. \code{FALSE} (default) skips it; \code{TRUE}
@@ -155,13 +311,72 @@
 #'   dimensions' main effects in the fixed part); on a null model
 #'   \code{maihda_interactions} warns. This is the single-fit parallel to the
 #'   default-on \code{interactions} of \code{\link{maihda}}.
+#' @param count_approximation Which latent-scale level-1 (observation) variance
+#'   approximation the VPC/ICC of a \emph{log-link count} model uses, from table 1
+#'   of Nakagawa, Johnson & Schielzeth (2017): \code{"lognormal"} (default,
+#'   \eqn{\ln(1 + 1/\lambda\ [+\ 1/\theta])}), \code{"delta"}
+#'   (\eqn{1/\lambda\ [+\ 1/\theta]}), or \code{"trigamma"}
+#'   (\eqn{\psi_1(\lambda)} for Poisson,
+#'   \eqn{\psi_1((1/\lambda + 1/\theta)^{-1})} for the negative binomial), with
+#'   \eqn{\lambda} the marginal expected count (see
+#'   \code{\link{summary.maihda_model}}). The three agree above about
+#'   \eqn{\lambda = 2} and diverge sharply below it, where the VPC depends heavily
+#'   on the choice; \code{summary()} reports the method and \eqn{\lambda}, and
+#'   warns below that threshold. Nakagawa et al. recommend the trigamma form; at low
+#'   counts it gives the smallest VPC of the three. The default is the approximation
+#'   \code{performance::icc()} uses, but evaluated at a different \eqn{\lambda} on
+#'   an adjusted model, so the two VPCs agree exactly only for a null model. Used
+#'   by \code{summary()}, the bootstrap intervals and the longitudinal VPC(t);
+#'   ignored for every other family. The count-scale VPC of Leckie et al. (2020),
+#'   from \code{\link{maihda_vpc_response}}, partitions the variance of the counts
+#'   themselves and does not depend on this choice.
 #' @param ... Additional arguments passed to \code{lmer}/\code{glmer} (lme4),
 #'   \code{brm} (brms), or \code{WeMix::mix()} (wemix; e.g. \code{nQuad},
-#'   \code{fast}). The lme4-style \code{weights}/\code{subset}/\code{offset}
-#'   arguments are not supported by the wemix engine.
+#'   \code{fast}). The wemix engine rejects \code{mix()}'s \code{center_grand} and
+#'   \code{center_group}, under any partial spelling: WeMix centres the covariates
+#'   internally without keeping the centring constants, so predictions could not
+#'   reproduce the fit. Centre covariates in \code{data} before fitting instead.
+#'   It likewise rejects an \code{offset()} term in the formula (see
+#'   \code{sampling_weights}).
+#'   The lme4-style \code{weights} (precision weights),
+#'   \code{subset}, and \code{offset} arguments are honoured only by the
+#'   \code{lme4} engine, which applies them directly. The \code{wemix},
+#'   \code{ordinal}, and \code{brms} engines reject them: none takes them as a
+#'   top-level fitting argument (brms in particular expects weighting/offset as
+#'   formula addition terms, \code{weights(.)} / \code{offset(.)}, and design
+#'   weights via \code{sampling_weights}). Prefilter \code{data} instead of using
+#'   \code{subset} on those engines.
+#'   On \code{engine = "brms"} the response may carry the \code{trials()} and
+#'   \code{weights()} addition terms (\code{y | trials(n)}, \code{y | weights(w)});
+#'   any other -- \code{se()}, \code{rate()}, \code{cens()}, \code{trunc()},
+#'   \code{mi()}, ... -- is refused, since the VPC, predictions and summaries do not
+#'   model it. Write an exposure as \code{+ offset(log(expo))} rather than
+#'   \code{rate(expo)}: for a Poisson model the same model, which they do (for a
+#'   negative binomial, brms's \code{rate()} also scales the shape by the exposure,
+#'   which the offset does not).
+#'   An \code{engine = "brms"} fit without a \code{seed} takes its sampler seed from
+#'   R's random-number stream, so \code{set.seed()} before the call reproduces it,
+#'   with the chains run in parallel (\code{cores > 1}) as well.
 #'
 #' @return A maihda_model object containing:
-#'   \item{model}{The fitted model object (lme4, brms, WeMix, or ordinal::clmm)}
+#'   \item{model}{The fitted model object (lme4, brms, WeMix, or ordinal::clmm). An
+#'     ordinal fit with a between-stratum variance of zero comes from
+#'     \code{clmm()}'s general routine, \code{clmm.control(useMatrix = TRUE)}, the
+#'     one that can return it. An ordinal model with fixed effects is fitted on its
+#'     design with the columns centred and scaled (scaled only under
+#'     \code{threshold = "symmetric2"}), since a covariate far from zero or on a large
+#'     or tiny scale can stall the optimiser, and is returned in the formula's own
+#'     terms with the gradient and Hessian of that fit, which give its standard
+#'     errors; a fit given a \code{start} is made as the formula stands. An lme4
+#'     fit's call gives its control as a call to \code{lme4::lmerControl()} or
+#'     \code{lme4::glmerControl()}, so \code{lme4::bootMer()} and
+#'     \code{confint(method = "boot")} refit it as they refit lme4's own fits. A
+#'     glmer fit that \code{fit_maihda()} last refitted by bobyqa, or by Nelder-Mead
+#'     with first steps of its own where Nelder-Mead's own fail, names that refit's
+#'     control instead, bound in the formula's environment, and both stop on it: a
+#'     draw refitted from the fit with those steps can stop short of its maximum. A
+#'     control whose optimiser is a function is named the same way, as
+#'     \code{lme4::refit()} does not take one}
 #'   \item{engine}{The engine used ("lme4", "brms", "wemix", or "ordinal")}
 #'   \item{sampling_weights}{The sampling-weight column name when supplied,
 #'     NULL otherwise}
@@ -176,8 +391,76 @@
 #'   \item{response_recoding}{For a recoded two-level outcome, a data frame mapping
 #'     each original level to its 0/1 value and role (reference/event); NULL when no
 #'     recoding occurred}
-#'   \item{diagnostics}{Fit-quality diagnostics (singular fit / convergence) for
-#'     lme4 models, surfaced by the print and summary methods}
+#'   \item{diagnostics}{Fit-quality diagnostics, surfaced by the print and
+#'     summary methods: singular fit / convergence for lme4, WeMix and ordinal
+#'     (clmm) fits, and MCMC convergence (maximum Rhat, divergent transitions)
+#'     for brms. lme4 checks a fit in the units of its covariates (a \code{glmer()}
+#'     fit in those of its fixed effects and random slopes, an \code{lmer()} fit in
+#'     those of its random slopes), so its checks can fire at the maximum when such a
+#'     covariate is far
+#'     from zero or in large units, as a calendar year or an income is. When they
+#'     fire and the optimiser reports success, the fit counts as converged if it lies
+#'     within a tenth of a standard error of a stationary point of its likelihood (the
+#'     restricted likelihood for an lmer fit by REML), measured with those covariates
+#'     centred and scaled (a slope in a \code{diag()} block only scaled); the distance is
+#'     \code{stationary_distance}, and lme4's
+#'     messages are kept in \code{lme4_overruled} when the fit converged by it.
+#'     lme4's singular-fit test, a diagonal entry of a random-effect block's relative
+#'     Cholesky factor below 1e-4, is taken in the same units and can fire on a block
+#'     with a slope on such a covariate that is not at the boundary: in an lmer fit, or a
+#'     glmer fit with \code{nAGQ} of 1 or more, outside a longitudinal model, a block with
+#'     a slope is at the boundary when a diagonal entry of its factor with the terms
+#'     centred and scaled (in a block without an intercept, divided by their root mean
+#'     square) is below 0.01, and lme4's own verdict is \code{lme4_singular} where the
+#'     two differ. A fit with a \code{diag()}, \code{cs()} or \code{ar1()} block keeps
+#'     lme4's test.
+#'     A glmer fit (\code{nAGQ}
+#'     of 1 or more), or an lmer fit outside a longitudinal model, with the variance
+#'     of a random-effect block's first term, usually
+#'     its intercept, at zero (or, in a block of three or more terms, what is left of
+#'     a later term's variance after the terms before it, such as a quadratic growth
+#'     block's slope perfectly correlated with its intercept), where the likelihood
+#'     still rises as the block's variances and covariances move, or as that variance
+#'     and the term's covariances with the later terms
+#'     move off zero, has stopped at a bound of lme4's parametrisation and counts as
+#'     not converged; those blocks are in \code{boundary_traps}. A slope's entry can lie
+#'     within lme4's 1e-4 of that bound at its natural size when its covariate is in
+#'     large units, as a covariate in thousands is; such a column is not at a bound
+#'     (\code{at_bound} is \code{FALSE}), and the fit counts as not converged when the
+#'     likelihood still rises as the block's variances and covariances move. An lmer fit
+#'     outside a
+#'     longitudinal model that lme4 calls singular, which lme4 does not check further,
+#'     or one with a random slope that lme4 does not check because of its size (by
+#'     default one of 10,000 rows or more, or with 10 or more variance parameters),
+#'     counts as not converged when a search of the same model, from lme4's starting
+#'     values with each random-effect block's terms centred and scaled and from a
+#'     variance at zero moved off it, reaches a REML criterion (deviance for a
+#'     maximum-likelihood fit) 0.01 or more below the fit's; that amount is
+#'     \code{search_gain}. A fit refitted as described under \code{formula} has been
+#'     through those searches already, so this concerns a fit made from your own
+#'     \code{start} or a singular one without a random slope. A glmer fit with \code{nAGQ} of 1 or
+#'     more and a random slope, outside a longitudinal model and with no \code{diag()},
+#'     \code{cs()} or \code{ar1()} block, that lme4 calls singular
+#'     is searched from the fit with its random-effect terms and fixed effects centred
+#'     and scaled, and counts as not converged when the search reaches a deviance 0.01
+#'     or more below the fit's (\code{search_gain}); such a fit refitted as described
+#'     under \code{formula} has been through such searches already and is not searched
+#'     again. A glmer fit with \code{nAGQ} of 1 or more and a random slope, outside a
+#'     longitudinal model, that lme4 does not check because of its size (by default one
+#'     of 10,000 rows or more, or with 20 or more parameters, fixed effects included)
+#'     and does not call singular is measured as one whose checks fired, and counts as
+#'     not converged, with \code{lme4_unchecked} TRUE, a tenth of a standard error or
+#'     more from a stationary point; where that cannot be measured it is searched in the
+#'     same way. An lme4 fit also
+#'     carries likelihood-adequacy caveats -- count overdispersion and zero
+#'     inflation, stratum random-effect non-normality and longitudinal residual
+#'     autocorrelation -- reported only when a conservative threshold is crossed,
+#'     since the VPC/PCV and interaction estimates are conditional on the
+#'     likelihood holding. Every one of those checks is lme4-only, so a cumulative
+#'     (clmm) fit raises no adequacy caveat at all: it stores a single descriptive
+#'     fixed-only proportional-odds proxy statistic, never flagged because it
+#'     cannot be separated from stratum heterogeneity; use
+#'     \code{\link{maihda_proportional_odds_test}} to test that assumption}
 #'
 #' @examples
 #' \donttest{
@@ -210,7 +493,9 @@
 fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
                        autobin = TRUE, context = NULL, sampling_weights = NULL,
                        id = NULL, time = NULL, time_degree = 1,
-                       interactions = FALSE, ...) {
+                       stratum_slope = TRUE, interactions = FALSE,
+                       count_approximation = c("lognormal", "delta", "trigamma"),
+                       ...) {
   # Input validation
   if (!inherits(formula, "formula")) {
     stop("'formula' must be a formula object")
@@ -219,6 +504,12 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
   if (!is.data.frame(data)) {
     stop("'data' must be a data frame")
   }
+
+  # Validated up front (not lazily at summary() time) so a typo fails at the fit
+  # rather than several minutes of MCMC later. Inert for every family whose
+  # level-1 variance is a distribution constant; only the log-link count branches
+  # read it.
+  count_approximation <- maihda_check_count_approximation(count_approximation)
 
   # Sampling (design) weights select the design-weighted engine. lme4 weights are
   # PRECISION weights -- feeding survey weights to lmer/glmer maximises the wrong
@@ -269,21 +560,71 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
   # and subset = y %in% c("no", "yes") all work at any nesting depth. Evaluating the
   # subset here, against the ORIGINAL response, also makes it immune to the 0/1
   # recoding below. The resulting values feed binary detection and the engine call.
-  dot_vals <- lapply(rlang::enquos(...), function(q) rlang::eval_tidy(q, data = data))
+  dot_quos <- rlang::enquos(...)
+  # Internal fast-path flag set only by maihda()'s crossed-dimensions preliminary
+  # pass, which needs the resolved strata/family metadata but discards the fit
+  # itself. Pull it out of the engine dots BEFORE they are evaluated, so it is
+  # neither eval'd against the data nor forwarded to lme4/brms; a full fit never
+  # sees it (default FALSE). It is intentionally not a formal argument -- it is an
+  # internal switch, not part of the public fit_maihda() interface.
+  metadata_only <- isTRUE(tryCatch(
+    rlang::eval_tidy(dot_quos[[".metadata_only"]]), error = function(e) FALSE))
+  dot_quos[[".metadata_only"]] <- NULL
+  dot_vals <- lapply(dot_quos, function(q) rlang::eval_tidy(q, data = data))
+  # A partial spelling (subs = keep, weig = w) reaches the engine as subset / weights;
+  # rename it before anything below reads or refuses those by exact name (see
+  # maihda_resolve_engine_dots()).
+  dot_vals <- maihda_resolve_engine_dots(dot_vals, engine, family)
   subset_value <- dot_vals[["subset"]]
-  weights_value <- dot_vals[["weights"]]
-
-  if (!is.null(sampling_weights) && "weights" %in% names(dot_vals)) {
-    stop("Supply either 'sampling_weights' (design weights) or 'weights' ",
-         "(precision weights), not both.", call. = FALSE)
+  # Resolve a character (row-name) subset to a positional logical mask against this
+  # data's own row names, up front, so the engine receives a logical vector rather
+  # than a raw character subset. base `[`'s character row-indexing partial-matches
+  # and inserts phantom NA rows, so a raw character subset can make the fitted sample
+  # diverge from the analytic sample family detection, 0/1 recoding and strata
+  # binning key off (all of which resolve names by exact %in% via maihda_row_mask).
+  # A no-op for logical/numeric subsets and when there is no `subset`.
+  if (is.character(subset_value)) {
+    subset_value <- rownames(data) %in% subset_value
+    dot_vals[["subset"]] <- subset_value
   }
-  if (identical(engine, "wemix")) {
-    unsupported_dots <- intersect(c("weights", "subset", "offset"), names(dot_vals))
-    if (length(unsupported_dots) > 0) {
-      stop("Argument(s) not supported by engine = \"wemix\": ",
-           paste(unsupported_dots, collapse = ", "),
-           ". Subset or transform the data before fitting.", call. = FALSE)
-    }
+  weights_value <- dot_vals[["weights"]]
+  # The external offset= (lme4's only NA-dropping fitting argument besides weights)
+  # is forwarded to the engine below, where lme4 puts it in its model frame and
+  # na.omit drops offset-NA rows. Extract it here so every analytic mask -- family
+  # detection, 0/1 recoding, strata auto-binning, longitudinal validation/centering
+  # -- is keyed off the SAME rows the engine fits: an offset-NA row carrying an
+  # out-of-sample outcome value would otherwise flip the auto-detected family, and an
+  # out-of-range occasion would mis-anchor the growth time-centering. Only the lme4
+  # engine accepts an offset (wemix/brms/ordinal reject it above/below), so this is
+  # NULL on every other path.
+  offset_value <- dot_vals[["offset"]]
+
+  maihda_check_weights_conflict(sampling_weights, dot_vals)
+
+  # Normalize invalid lme4 PRECISION weights (zero / negative / non-finite -> NA,
+  # the case lme4 actually drops) up front, so binary/ordinal detection, strata
+  # auto-binning, and the fit all use the same analytic sample. Shared with
+  # compare_maihda_groups() and maihda() via maihda_normalize_precision_weights()
+  # so the three cannot drift apart. A no-op on the wemix/brms paths (they reject
+  # precision weights below) and when no numeric `weights` was supplied.
+  if (is.numeric(weights_value)) {
+    weights_value <- maihda_normalize_precision_weights(
+      weights_value, nrow(data), engine, "fit_maihda()")
+    dot_vals[["weights"]] <- weights_value
+  }
+
+  # Neither engine takes lme4's data-masked fitting arguments: WeMix::mix() has no
+  # subset/offset, and brms expects weighting / offset information as formula
+  # ADDITION terms (weights(), offset()), absorbing a top-level one into `...`
+  # where it is ignored -- while family detection and strata auto-binning above DID
+  # honour it, so preprocessing would describe one analytic sample and the engine fit
+  # another. Reject them with guidance rather than fit the wrong model. (Design
+  # weights come through 'sampling_weights', which brms supports as likelihood
+  # weights.) compare_maihda_groups() refuses them the same way, once. The ordinal
+  # engine refuses them in its own block below, after the family handshake, so an
+  # explicit engine = "ordinal" keeps reporting a family contradiction first.
+  if (engine %in% c("wemix", "brms")) {
+    maihda_refuse_engine_dots(engine, dot_vals)
   }
 
   # The weighted engines drop rows whose sampling weight is non-finite or <= 0
@@ -309,14 +650,14 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
   if (missing(family)) {
     is_binary <- tryCatch(
       maihda_response_is_binary(formula, data, subset = subset_value,
-                                weights = detect_weights),
+                                weights = detect_weights, offset = offset_value),
       error = function(e) FALSE)
     if (isTRUE(is_binary)) {
       warning("The outcome variable appears to be binary. Automatically switching to family = 'binomial'. To fit a Linear Probability Model, explicitly specify family = 'gaussian'.", call. = FALSE)
       family <- "binomial"
     } else if (isTRUE(tryCatch(
       maihda_response_is_ordinal(formula, data, subset = subset_value,
-                                 weights = detect_weights),
+                                 weights = detect_weights, offset = offset_value),
       error = function(e) FALSE))) {
       warning("The outcome variable is an ordered factor. Automatically ",
               "switching to the cumulative (ordinal) model, family = 'ordinal'. ",
@@ -362,12 +703,15 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
            "\"brms\" for a contextual cross-classified cumulative model.",
            call. = FALSE)
     }
-    unsupported_dots <- intersect(c("weights", "subset", "offset"), names(dot_vals))
-    if (length(unsupported_dots) > 0) {
-      stop("Argument(s) not supported by engine = \"ordinal\": ",
-           paste(unsupported_dots, collapse = ", "),
-           ". Subset or transform the data before fitting.", call. = FALSE)
-    }
+    maihda_refuse_engine_dots(engine, dot_vals)
+  }
+  # A brms response addition term other than trials() / weights() -- se(), rate(),
+  # cens(), trunc(), mi(), ... -- changes the model in ways the VPC, predictions and
+  # summaries do not follow; refused here, before any data work (see
+  # maihda_brms_check_addition_terms()). The cumulative path refuses every addition
+  # term itself, below.
+  if (identical(engine, "brms") && !is_ordinal) {
+    maihda_brms_check_addition_terms(formula)
   }
 
   # Longitudinal (3-level growth) MAIHDA: when 'time' is supplied, validate the
@@ -380,77 +724,44 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
                                              engine = engine,
                                              sampling_weights = sampling_weights,
                                              context = context,
-                                             formula = formula)
+                                             formula = formula,
+                                             stratum_slope = stratum_slope,
+                                             family = family)
   }
 
-  # Parse formula to find grouping variables. Automatic strata creation is only
-  # safe for the documented shorthand: one intercept-only non-stratum grouping
-  # term such as (1 | gender:race). More complex random-effect structures should
-  # be specified explicitly after calling make_strata().
-  re_terms <- reformulas::findbars(formula)
-  strata_info <- attr(data, "strata_info")
-  strata_vars <- attr(data, "strata_vars")
-  if (is.null(strata_vars) || length(strata_vars) == 0) {
-    strata_vars <- maihda_infer_strata_vars(strata_info)
+  # Parse formula to find grouping variables and resolve the strata shorthand.
+  # Shared with maihda_describe(), so the pre-model description is built from
+  # exactly the same parsing/strata machinery as the fit.
+  # Auto-bin the strata cut-points on EXACTLY the rows the fit uses, so
+  # fit_maihda(data, subset = keep, ...) gives the same tertile boundaries -- and
+  # therefore the same stratum membership and VPC/PCV -- as fitting the already
+  # filtered analytic data. The analytic sample drops rows removed by `subset`, by a
+  # missing outcome or covariate (na.omit over the model frame), by a missing
+  # precision weight, OR by an invalid sampling weight (non-finite / <= 0, mapped to
+  # NA in `detect_weights` above). An earlier version masked on `subset` alone, on
+  # the assumption that the other exclusions are na.rm'd identically whether or not
+  # the data is pre-filtered -- they are NOT. A row dropped from the fit for one of
+  # those reasons can still carry an extreme but non-missing value of the binning
+  # variable, which then shifts the quantiles and silently redefines OTHER rows'
+  # strata. maihda_analytic_keep_mask() reproduces model.frame()'s row selection (so
+  # transformed terms such as log(x) are handled too); it returns NULL if the frame
+  # cannot be built, in which case fall back to the subset-only mask.
+  strata_bin_rows <- tryCatch(
+    maihda_analytic_keep_mask(formula, data, subset = subset_value,
+                              weights = detect_weights, offset = offset_value),
+    error = function(e) NULL)
+  if (is.null(strata_bin_rows) && (!is.null(subset_value) || !is.null(offset_value))) {
+    strata_bin_rows <- maihda_row_mask(data, subset = subset_value,
+                                       offset = offset_value)
   }
-  strata_sep <- attr(data, "strata_sep")
-  strata_autobin_info <- attr(data, "strata_autobin_info")
-
-  if (length(re_terms) > 0) {
-    grouping_vars_by_term <- lapply(re_terms, function(x) all.vars(x[[3]]))
-    grouping_vars <- unique(unlist(grouping_vars_by_term, use.names = FALSE))
-    has_stratum_group <- any(vapply(grouping_vars_by_term, function(vars) {
-      identical(vars, "stratum")
-    }, logical(1)))
-
-    if (!has_stratum_group) {
-      if (length(re_terms) != 1) {
-        stop("Automatic strata creation only supports a single intercept-only random effect, ",
-             "for example (1 | gender:race). For more complex random-effects structures, ",
-             "call make_strata() first and include (1 | stratum) explicitly.",
-             call. = FALSE)
-      }
-
-      random_lhs <- paste(deparse(re_terms[[1]][[2]]), collapse = " ")
-      if (random_lhs != "1") {
-        stop("Automatic strata creation only supports intercept-only random effects, ",
-             "for example (1 | gender:race).",
-             call. = FALSE)
-      }
-
-      if (!maihda_is_colon_interaction(re_terms[[1]][[3]])) {
-        stop("Automatic strata creation supports a single variable or a colon ",
-             "interaction such as (1 | gender:race). For other grouping expressions ",
-             "(e.g. interaction(), paste(), cut()), call make_strata() first and use ",
-             "(1 | stratum).", call. = FALSE)
-      }
-
-      strata_vars <- grouping_vars_by_term[[1]]
-      missing_grouping_vars <- setdiff(strata_vars, names(data))
-      if (length(missing_grouping_vars) > 0) {
-        stop("Grouping variables not found in data: ",
-             paste(missing_grouping_vars, collapse = ", "), call. = FALSE)
-      }
-      if ("stratum" %in% names(data)) {
-        stop("Automatic strata creation would overwrite an existing 'stratum' column. ",
-             "Use the existing (1 | stratum) model or rename/remove that column first.",
-             call. = FALSE)
-      }
-
-      strata_result <- make_strata(data, vars = strata_vars, autobin = autobin)
-      data$stratum <- strata_result$data$stratum
-      strata_info <- strata_result$strata_info
-      strata_sep <- strata_result$sep
-      strata_autobin_info <- strata_result$autobin_info
-      attr(data, "strata_info") <- strata_info
-      attr(data, "strata_vars") <- strata_vars
-      attr(data, "strata_sep") <- strata_sep
-      attr(data, "strata_autobin_info") <- strata_autobin_info
-
-      fixed_formula <- reformulas::nobars(formula)
-      formula <- stats::update(fixed_formula, . ~ . + (1 | stratum))
-    }
-  }
+  strata_res <- maihda_resolve_strata_formula(formula, data, autobin,
+                                              bin_rows = strata_bin_rows)
+  formula <- strata_res$formula
+  data <- strata_res$data
+  strata_info <- strata_res$strata_info
+  strata_vars <- strata_res$strata_vars
+  strata_sep <- strata_res$strata_sep
+  strata_autobin_info <- strata_res$autobin_info
 
   # Longitudinal growth structure: now that the stratum grouping is resolved,
   # replace the random part with the canonical 3-level growth blocks
@@ -467,44 +778,142 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
            "(1 | var1:var2) or include (1 | stratum); the id/time growth slopes are ",
            "added automatically (do not write them in the formula).", call. = FALSE)
     }
-    # Fit the growth terms on internally CENTERED time whenever the time axis
-    # does not start at 0 (age, calendar year, waves coded 10, 11, ...): the raw
-    # polynomial basis over an offset range is near-collinear, and lme4 can
-    # converge to a false optimum WITHOUT flagging a convergence failure,
-    # silently corrupting the time-varying VPC and the PCV. Centering makes the
-    # fit the same optimization problem as the equivalent 0-anchored coding.
-    # Every user-facing time (ref_time, reporting grids, plots) stays on the
-    # original scale, and prediction newdata rebuilds the derived column from the
-    # original time column (see maihda_prepare_prediction_data).
+    # The analytic sample -- exactly the rows the engine fits, after `subset`, a
+    # missing precision weight, and missing-value dropping over the resolved
+    # formula's variables plus id/time. Every ROW-SENSITIVE longitudinal check and
+    # the time-centering below key off THIS mask, not the full input: validating or
+    # centering on rows the fit drops is what let an excluded row (an out-of-subset
+    # occasion, a missing outcome/covariate, a zero/NA-weight row) spuriously fail
+    # the cross-stratum id check, slip past the repeated-measures gate, or mis-anchor
+    # the centering. Falls back to keeping every row if the mask cannot be built.
+    analytic_keep <- tryCatch({
+      # Transformation-aware: model.frame + na.omit over the resolved formula, so a
+      # row whose fixed-effect transformation is non-finite (e.g. log(x) of x <= 0)
+      # is dropped here exactly as lme4 will drop it. A raw complete.cases() over the
+      # source columns instead keeps such a row (the raw x is non-NA), leaving the
+      # longitudinal checks and the time-centering below keyed off rows the fit never
+      # sees -- mis-anchoring the centre and spuriously failing the cross-stratum id
+      # check on an excluded (id, stratum) pairing.
+      k <- maihda_analytic_keep_mask(formula, data, subset = subset_value,
+                                     weights = weights_value, offset = offset_value)
+      if (is.null(k)) {
+        # Model frame could not be built: fall back to the raw check over the
+        # formula's source variables (id/time are appended below either way).
+        k <- maihda_row_mask(data, subset = subset_value, weights = weights_value,
+                             offset = offset_value)
+        fvars <- intersect(all.vars(formula), names(data))
+        if (length(fvars) > 0) {
+          k <- k & stats::complete.cases(data[, fvars, drop = FALSE])
+        }
+      }
+      # id/time are not part of the (pre-growth) formula yet, so guard them
+      # explicitly. They are plain grouping/time columns with no transformation, for
+      # which a raw complete.cases is exact.
+      idtime <- intersect(c(lng_spec$id, lng_spec$time), names(data))
+      if (length(idtime) > 0) {
+        k <- k & stats::complete.cases(data[, idtime, drop = FALSE])
+      }
+      k
+    }, error = function(e) rep(TRUE, nrow(data)))
+    if (!any(analytic_keep)) analytic_keep <- rep(TRUE, nrow(data))
+    analytic_data <- data[analytic_keep, , drop = FALSE]
+
+    # Genuinely repeated measures, re-checked on the analytic sample: at least one id
+    # must recur among the FITTED rows, else the (time | id) person effects are
+    # unidentified and this is not a longitudinal design. maihda_validate_longitudinal()
+    # already applied this to the full input; repeating it here catches data whose only
+    # repeats sit on rows the fit drops (an out-of-subset/missing/zero-weight occasion).
+    lng_ids <- analytic_data[[lng_spec$id]]
+    if (!any(duplicated(lng_ids[!is.na(lng_ids)]))) {
+      stop("The data do not look longitudinal: every '", lng_spec$id, "' value is ",
+           "unique, so there are no repeated measurements to model. Supply ",
+           "long-format data (one row per measurement occasion).", call. = FALSE)
+    }
+    # Ids must identify people globally, not within a site/group: an id spanning more
+    # than one stratum would merge different people's trajectories in (time | id).
+    # Checked on the analytic sample so an excluded row cannot inject a spurious
+    # (id, stratum) pairing the fit never sees.
+    maihda_check_longitudinal_ids(analytic_data, lng_spec$id)
+    # Growth-term identifiability, re-checked on the analytic sample: the input
+    # passed maihda_validate_longitudinal(), but the rows dropped above can push
+    # the FITTED rows below the thresholds -- fewer than time_degree + 1 distinct
+    # times, or no person left with two distinct times -- leaving lme4 to return
+    # arbitrary slope variances with only a singularity note.
+    maihda_check_longitudinal_times(analytic_data, lng_spec$id, lng_spec$time,
+                                    lng_spec$time_degree)
+
+    # Fit the growth terms on internally CENTERED time whenever the time axis does
+    # not start at 0 (age, calendar year, waves coded 10, 11, ...): the raw
+    # polynomial basis over an offset range is near-collinear, and lme4 can converge
+    # to a false optimum WITHOUT flagging a convergence failure, silently corrupting
+    # the time-varying VPC and the PCV. Centering makes the fit the same optimization
+    # problem as the equivalent 0-anchored coding. Every user-facing time (ref_time,
+    # reporting grids, plots) stays on the original scale, and prediction newdata
+    # rebuilds the derived column from the original time column (see
+    # maihda_prepare_prediction_data). Center on the analytic rows (analytic_keep):
+    # deriving the centre from excluded early/late waves would leave the fitted times
+    # off-centre and defeat the stability protection.
+    #
+    # An lme4 fit (maihda_longitudinal_scales_time()) is also fit on time divided by the
+    # power of ten that puts its span in [1, 10) (maihda_longitudinal_scale(); 1, no
+    # scaling, for a span already there): counted in fine units such as days, the slope
+    # entries of lme4's covariance parameters are tiny next to the intercept's and lmer and
+    # glmer stop far from the optimum, in most fits recorded as converged. The stored fit
+    # stays on the internal time and every quantity in units of time is converted back
+    # where it is read (see the header of longitudinal.R). Scaled on the analytic rows,
+    # as centred.
     tv <- data[[lng_spec$time]]
-    center <- maihda_longitudinal_center(tv)
+    center <- maihda_longitudinal_center(tv[analytic_keep])
+    time_scale <- if (maihda_longitudinal_scales_time(engine, family)) {
+      maihda_longitudinal_scale(tv[analytic_keep])
+    } else {
+      1
+    }
     time_term <- lng_spec$time
-    if (center != 0) {
+    if (center != 0 || time_scale != 1) {
       # A formula already referencing the derived column is a package-derived
       # refit (maihda()'s null/adjusted pair re-entering with the first fit's
       # original_data): recomputing the column from the original time column is
       # idempotent and needs no repeat message. A fresh user column of the
       # reserved name was rejected by maihda_validate_longitudinal() above.
       derived_refit <- .maihda_ctime_col %in% all.vars(formula)
-      data[[.maihda_ctime_col]] <- tv - center
+      data[[.maihda_ctime_col]] <- if (time_scale == 1) {
+        tv - center
+      } else {
+        (tv - center) / time_scale
+      }
       time_term <- .maihda_ctime_col
       if (!derived_refit) {
-        message("fit_maihda(): the time axis '", lng_spec$time, "' starts at ",
-                center, ", not 0, so the growth terms are fit on internally ",
-                "centered time (", lng_spec$time, " - ", center, ") for ",
-                "numerical stability. All results are reported on the original '",
-                lng_spec$time, "' scale.")
+        span <- diff(range(tv[analytic_keep], na.rm = TRUE))
+        k <- format(time_scale, scientific = FALSE)
+        why <- c(if (center != 0) paste0("starts at ", center, ", not 0"),
+                 if (time_scale != 1) paste0("spans ", format(span), " time units"))
+        how <- if (time_scale == 1) {
+          paste0("internally centered time (", lng_spec$time, " - ", center, ")")
+        } else if (center == 0) {
+          paste0("internally scaled time (", lng_spec$time, " / ", k, ")")
+        } else {
+          paste0("internally centered and scaled time ((", lng_spec$time, " - ", center,
+                 ") / ", k, ")")
+        }
+        message("fit_maihda(): the time axis '", lng_spec$time, "' ",
+                paste(why, collapse = " and "), ", so the growth terms are fit on ",
+                how, " for numerical stability. All results are reported on the ",
+                "original '", lng_spec$time, "' scale.")
       }
     }
     formula <- maihda_longitudinal_formula(formula, lng_spec$id, time_term,
                                            lng_spec$time_degree,
-                                           orig_time = lng_spec$time)
+                                           orig_time = lng_spec$time,
+                                           stratum_slope = lng_spec$stratum_slope)
     # time_range/ref_time here are provisional (pre-fit): they are recomputed
     # from the fitted analytic frame after the engine drops rows (see below),
     # so a baseline wave lost to missing outcomes does not anchor the VPC/PCV.
     longitudinal_info <- list(id = lng_spec$id, time = lng_spec$time,
                               time_degree = lng_spec$time_degree,
+                              stratum_slope = lng_spec$stratum_slope,
                               time_term = time_term, time_center = center,
+                              time_scale = time_scale,
                               time_range = range(tv, na.rm = TRUE),
                               ref_time = min(tv, na.rm = TRUE))
   }
@@ -518,64 +927,13 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
   # appended again.
   context_info <- NULL
   if (!is.null(context)) {
-    re_terms_now <- reformulas::findbars(formula)
-    grouping_vars_now <- unique(unlist(
-      lapply(re_terms_now, function(x) all.vars(x[[3]])), use.names = FALSE))
-    if (!"stratum" %in% grouping_vars_now) {
-      stop("'context' adds a crossed contextual random effect alongside the ",
-           "intersectional stratum effect, but the formula has no stratum random ",
-           "effect. Use the shorthand (1 | var1:var2) or include (1 | stratum).",
-           call. = FALSE)
-    }
-    clash_dims <- intersect(context, strata_vars)
-    if (length(clash_dims) > 0) {
-      stop("Context variable(s) ", paste(clash_dims, collapse = ", "),
-           " also define the intersectional strata. A variable cannot be both a ",
-           "stratum dimension and a higher-level context; remove it from one of ",
-           "the two roles.", call. = FALSE)
-    }
-    clash_fixed <- intersect(context, all.vars(reformulas::nobars(formula)[[3]]))
-    if (length(clash_fixed) > 0) {
-      stop("Context variable(s) ", paste(clash_fixed, collapse = ", "),
-           " already appear in the fixed part of the formula, which would absorb ",
-           "the context variance the contextual partition is meant to estimate. ",
-           "Supply the context only via 'context', or only as a fixed effect, ",
-           "not both.", call. = FALSE)
-    }
-    context_to_add <- setdiff(context, grouping_vars_now)
-    if (length(context_to_add) > 0) {
-      re_add <- paste(
-        sprintf("(1 | %s)",
-                vapply(context_to_add, maihda_quote_name, character(1))),
-        collapse = " + ")
-      formula <- stats::update(formula,
-                               stats::as.formula(paste(". ~ . +", re_add)))
-    }
+    formula <- maihda_apply_context_formula(formula, context, strata_vars)
     context_info <- list(context_vars = context)
   }
 
-  # Convert family to family object if it's a string or constructor function.
-  # "negbinomial" (the brms spelling) resolves to a plain marker list rather
-  # than a stats family object: there is no theta-free negative-binomial family
-  # constructor in stats -- lme4 estimates theta itself via glmer.nb() and brms
-  # via its 'shape' parameter, so no theta is needed (or wanted) here.
-  if (is.character(family)) {
-    family <- switch(family,
-                     gaussian = gaussian(),
-                     binomial = binomial(),
-                     poisson = poisson(),
-                     negbinomial = list(family = "negbinomial", link = "log"),
-                     ordinal = ,
-                     cumulative = maihda_cumulative("logit"),
-                     stop("Unsupported family: ", family))
-  } else if (is.function(family)) {
-    family <- family()
-  }
-
-  if (!is.list(family) || is.null(family$family) || is.null(family$link)) {
-    stop("'family' must be a family name, family object, or family function.",
-         call. = FALSE)
-  }
+  # Convert family to family object if it's a string or constructor function
+  # (shared with maihda_describe(), so both resolve a family spec identically).
+  family <- maihda_resolve_family_spec(family)
 
   # Recompute on the RESOLVED family (the handshake above peeked at the raw
   # input) and validate the cumulative link: the latent-scale VPC is defined for
@@ -598,6 +956,21 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
          "(the latent-scale level-1 variance behind the VPC/ICC is defined for ",
          "it); this model uses link = '", family$link, "'.", call. = FALSE)
   }
+  # lme4::glmer.nb() chooses theta by maximising glmer's logLik(), which under adaptive
+  # quadrature (nAGQ > 1) leaves out the saturated log-likelihood -- a term that
+  # depends on theta. theta and the variance components then come out wrong without
+  # a warning: theta 0.087 against 1.62 at nAGQ = 1, and a stratum SD of 0, on a fit
+  # whose integrated log-likelihood was 480 lower. A fixed theta is not estimated.
+  nagq_value <- dot_vals[["nAGQ"]]
+  if (is_negbin && identical(engine, "lme4") && identical(family$family, "negbinomial") &&
+      is.numeric(nagq_value) && length(nagq_value) == 1L && isTRUE(nagq_value > 1)) {
+    stop("engine = \"lme4\" cannot estimate the negative-binomial theta with ",
+         "nAGQ > 1: lme4::glmer.nb() then chooses theta on a quadrature ",
+         "log-likelihood that leaves out a theta-dependent term, so theta and the ",
+         "variance components come out wrong. Use nAGQ = 1 (the Laplace ",
+         "approximation), or fix theta with family = MASS::negative.binomial(theta).",
+         call. = FALSE)
+  }
 
   # Recode a two-level (Bernoulli) response to 0/1 (glmer and brms bernoulli both
   # accept 0/1). Aggregated binomial responses -- cbind(success, failure) or
@@ -605,14 +978,91 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
   is_binomial_family <- family$family %in% c("binomial", "quasibinomial")
   response_is_binary <- is_binomial_family &&
     maihda_response_is_binary(formula, data, subset = subset_value,
-                              weights = detect_weights)
+                              weights = detect_weights, offset = offset_value)
   response_recoding <- NULL
   if (response_is_binary) {
     data <- maihda_prepare_binomial_response(data, formula, subset = subset_value,
-                                             weights = detect_weights)
+                                             weights = detect_weights,
+                                             offset = offset_value)
     # Mapping of original outcome levels to 0/1 (which level is the modeled event),
     # captured so it is inspectable on the returned model object.
     response_recoding <- attr(data, "response_recoding")
+
+    # That recoding rewrites data[[outcome]] BY NAME, so it reaches a bare column
+    # only; an EXPRESSION response arrives at the engine exactly as it evaluates. A
+    # logical, a 0/1 value or a two-level factor is fine, but a character or a
+    # non-0/1 numeric coding is not, and the engine's own complaint ("response must
+    # be numeric or factor", "y values must be 0 <= y <= 1") says nothing about the
+    # spelling being the cause. Name the cause and the remedy instead -- the same
+    # outcome stored as a column IS recoded and fits.
+    if (!is.symbol(formula[[2]])) {
+      resp_value <- maihda_analytic_response(formula, data, subset = subset_value,
+                                             weights = detect_weights,
+                                             offset = offset_value)
+      if (!maihda_binomial_expression_is_engine_ready(resp_value)) {
+        # Describe the offending value without assuming its type: the predicate
+        # refuses anything that is not logical / 0/1 / factor, so this has to cope
+        # with whatever else turned up rather than error inside an error.
+        resp_desc <- if (is.character(resp_value)) {
+          "character values"
+        } else {
+          vals <- tryCatch(
+            utils::head(sort(unique(as.character(resp_value[!is.na(resp_value)]))), 2),
+            error = function(e) character(0))
+          if (length(vals)) paste0("the values ", paste(vals, collapse = "/")) else
+            paste0("a ", paste(class(resp_value), collapse = "/"), " value")
+        }
+        stop("The response ", paste(deparse(formula[[2]]), collapse = " "),
+             " is a two-level outcome, but it is written as an expression and ",
+             "evaluates to ", resp_desc,
+             ". The 0/1 recoding applies to a bare outcome column only, so the ",
+             "engine would receive this as it stands and reject it. Store the ",
+             "outcome as a column of 'data' (which IS recoded), or write the ",
+             "expression so it yields a logical or 0/1 value.", call. = FALSE)
+      }
+    }
+  }
+
+  # The pre-fit descriptive frame stored as $original_data: the FULL data (after
+  # strata resolution and any 0/1 recoding) BEFORE the engine's analytic-sample drop,
+  # so maihda_describe() can report the original total, missingness, and
+  # excluded-weight counts against the analytic $data. Left NULL here and defaulted to
+  # the path's `data` just before the result is built; only the design-weighted brms
+  # path (which prunes `data` in place below) sets it explicitly to the pre-prune frame.
+  # The wemix/ordinal paths intentionally leave it NULL -> it defaults to their
+  # pre-built analytic sample, matching maihda_describe()'s documented contract
+  # (totals == analytic there).
+  original_data <- NULL
+
+  # Metadata-only fast path (maihda()'s crossed-dimensions preliminary pass). That
+  # decomposition builds and fits a SINGLE cross-classified model from the resolved
+  # strata/family metadata; the preliminary fit of the supplied formula was only
+  # ever read for that metadata and then discarded, so fitting it doubled the cost
+  # (worst for brms: an extra compile + MCMC). Return the metadata -- resolved above
+  # by the SAME strata / family / response-recoding machinery a full fit uses, so it
+  # cannot drift from the fitted path -- and skip the engine dispatch entirely.
+  # $original_data mirrors the default applied at the result-building tail (the full
+  # pre-fit frame, after strata resolution and any 0/1 recoding). No class of
+  # "maihda_model" so a stray summary()/predict() on it errors instead of silently
+  # treating an unfitted stub as a model.
+  if (isTRUE(metadata_only)) {
+    return(structure(
+      list(
+        formula = formula,
+        family = family,
+        count_approximation = count_approximation,
+        strata_info = strata_info,
+        strata_vars = strata_vars,
+        strata_sep = strata_sep,
+        strata_autobin_info = strata_autobin_info,
+        original_data = data,
+        context_vars = context,
+        context_info = context_info,
+        longitudinal_info = longitudinal_info,
+        metadata_only = TRUE
+      ),
+      class = "maihda_model_metadata"
+    ))
   }
 
   if (identical(engine, "wemix")) {
@@ -627,7 +1077,15 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
            "aggregated binomial responses (cbind(success, failure) or trials) ",
            "are not supported. Use engine = \"lme4\" or \"brms\".", call. = FALSE)
     }
+    # mix() leaves a formula offset() out of the fit (see maihda_wemix_check_offset()).
+    maihda_wemix_check_offset(formula)
   }
+
+  # The factor levels and contrast matrices of the fitted design, kept for the engines
+  # whose predictions rebuild that design by hand (wemix, ordinal; see
+  # maihda_engine_fixed_coding()). lme4's prediction path reads the same record off
+  # lme4's own design matrix, and brms predicts through its own machinery.
+  fixed_coding <- NULL
 
   # Build the engine call from the already-evaluated `...` values. Each value is
   # bound in a private environment and referenced by name so the model's stored
@@ -636,6 +1094,10 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
   # longer depends on the (now recoded) response. The formula's environment is
   # pointed at this env so that lme4/brms, which evaluate `weights`/`subset` against
   # the formula's environment, find the bound values (and the `data` symbol).
+  # TRUE once maihda_fit_lmer_slopes(), or maihda_fit_glmer_bound() for a model with a
+  # random slope, has made the fit from its searches, which maihda_fit_diagnostics()
+  # otherwise runs on such a fit when lme4 calls it singular.
+  searched <- FALSE
   if (engine == "wemix") {
     # Design-weighted pseudo-ML fit. The guard above bans data-masked engine
     # arguments (weights/subset/offset) for wemix, so the remaining dots are plain
@@ -647,6 +1109,7 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
     wemix_fit <- maihda_fit_wemix(formula, data, family, sampling_weights, dot_vals)
     model <- wemix_fit$model
     data <- wemix_fit$data
+    fixed_coding <- wemix_fit$coding
   } else if (engine == "ordinal") {
     # Cumulative link mixed model via ordinal::clmm(). Like the wemix branch,
     # the guard above bans data-masked engine arguments (weights/subset/offset),
@@ -659,6 +1122,7 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
     ord_fit <- maihda_fit_clmm(formula, data, family, dot_vals)
     model <- ord_fit$model
     data <- ord_fit$data
+    fixed_coding <- ord_fit$coding
   } else {
 
   fit_env <- new.env(parent = environment(formula))
@@ -714,17 +1178,23 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
     # missing/non-positive weights are dropped here so the stored data matches the
     # fitted rows.
     if (!is.null(sampling_weights)) {
-      n_pre_drop <- nrow(data)
+      # Keep the pre-prune frame as $original_data (the descriptive total). The drop
+      # below is the brms engine's analytic-sample selection -- the pseudo-likelihood
+      # counterpart of lme4's na.omit -- so the fitted $data reflects it, but
+      # $original_data must stay the full pre-fit frame (as on the lme4 path) or
+      # maihda_describe() cannot report the original total / missingness / excluded
+      # invalid-weight rows and would make total == analytic. A derived null/adjusted
+      # refit re-enters here and re-prunes this same frame, so the fitted models are
+      # unchanged; only the recorded provenance differs.
+      original_data <- data
       prep <- maihda_prepare_brms_sampling_weights(data, formula, sampling_weights)
       data <- prep$data
       formula <- prep$formula
       fit_env$data <- data
-      # The forwarded `...` were evaluated against the pre-drop data and bound into
-      # fit_env above; if rows were just dropped, re-slice any row-aligned argument
-      # (e.g. subset, offset) so it stays aligned with the `data` brms receives.
-      if (any(!prep$keep)) {
-        maihda_reslice_dot_args(dot_vals, prep$keep, n_pre_drop, fit_env)
-      }
+      # No row-aligned `...` need re-slicing after this drop: the brms engine
+      # rejects the lme4-style weights/subset/offset arguments (the only row-length
+      # forwarded values) up front, so every remaining dot is a scalar / non-row
+      # object brms takes as-is.
       message("fit_maihda(): sampling weights enter the brms model as likelihood ",
               "weights (normalized to mean 1), giving a pseudo-posterior: point ",
               "estimates target the population-weighted estimand, but credible ",
@@ -758,8 +1228,43 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
       # cumulative() needs an ordered factor, and the category order is
       # load-bearing either way.
       data <- maihda_ordinal_prepare_response(data, formula)
+      # Re-check the category count on the analytic sample the same way the clmm
+      # path does, but BEFORE the (expensive) Stan fit: a category present only on
+      # rows brms drops for missingness would otherwise silently reduce the model
+      # order. sampling_weights, if any, already pruned `data` above, so the model
+      # frame here reflects the rows brms will actually use.
+      resp_name <- all.vars(formula[[2]])[1]
+      ord_keep <- maihda_analytic_keep_mask(formula, data)
+      ord_y <- if (is.null(ord_keep)) data[[resp_name]] else data[[resp_name]][ord_keep]
+      maihda_ordinal_assert_min_levels(droplevels(ord_y), resp_name)
       fit_env$data <- data
-      family <- brms::cumulative(link = family$link)
+      family <- maihda_brms_cumulative_family(family)
+    }
+
+    # brms passes an unseeded fit's seed = NA to rstan, which draws the seed from R's
+    # random-number stream in the process that runs the chains. With parallel chains
+    # (cores > 1) each chain runs in a process of its own whose stream starts afresh,
+    # so set.seed() would not reproduce the fit; draw the seed here instead, from this
+    # session's stream, where a serial fit's seed comes from. Under future = TRUE brms
+    # runs the chains as futures seeded from this session, so nothing is drawn. The
+    # dots are read by the brm() formals they bind to, so a partial spelling (se = 7,
+    # cor = 2) counts, and a drawn seed takes the user's own spelling.
+    brm_names <- names(maihda_resolve_dot_names(dot_vals, brms::brm,
+                                                c("formula", "data", "family"),
+                                                watch = c("seed", "cores", "future")))
+    brm_dot <- function(arg, default) {
+      at <- which(brm_names == arg)
+      if (length(at) == 0L) default else dot_vals[[at[1L]]]
+    }
+    seed_value <- brm_dot("seed", NULL)
+    cores_value <- brm_dot("cores", getOption("mc.cores", 1L))
+    if ((is.null(seed_value) || (length(seed_value) == 1L && is.na(seed_value))) &&
+        isTRUE(suppressWarnings(as.numeric(cores_value)) > 1) &&
+        !isTRUE(brm_dot("future", getOption("future", FALSE)))) {
+      seed_name <- c(names(dot_vals)[brm_names == "seed"], "seed")[1L]
+      bind_name <- paste0(".maihda_arg_", seed_name)
+      assign(bind_name, sample.int(.Machine$integer.max, 1L), envir = fit_env)
+      dot_args[[seed_name]] <- as.name(bind_name)
     }
 
     fit_fun <- quote(brms::brm)
@@ -768,13 +1273,50 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
   }
 
   fit_call <- as.call(c(list(fit_fun), fit_args, dot_args))
-  model <- eval(fit_call, fit_env)
+  # A growth model with a linear stratum slope, or with a time polynomial of degree 2 or
+  # more, is refitted from more starting points and the fit with the lowest criterion is
+  # kept: lmer's default optimiser can stop at a boundary of a random-effect block away
+  # from the optimum (see maihda_fit_lmer_growth()).
+  model <- if (maihda_growth_restarts_apply(fit_fun, longitudinal_info, dot_vals)) {
+    maihda_fit_lmer_growth(fit_call, fit_env, longitudinal_info$id,
+                           time = maihda_lng_time_term(longitudinal_info),
+                           time_degree = longitudinal_info$time_degree)
+  } else {
+    # A glmer growth model is refitted from more starts and across a bound its first fit
+    # can stop at (see maihda_fit_glmer_growth()).
+    if (maihda_glmer_growth_applies(fit_fun, longitudinal_info, dot_vals)) {
+      maihda_fit_glmer_growth(fit_call, fit_env, longitudinal_info$id)
+    } else if (maihda_glmer_bound_applies(fit_fun, longitudinal_info, dot_vals)) {
+      # Any other glmer fit is refitted once from across such a bound, which only a
+      # random-effect block with a slope can stop at, and a fit with a slope from searches
+      # with its random effects and fixed effects re-expressed (see
+      # maihda_fit_glmer_bound()).
+      bound_fit <- maihda_fit_glmer_bound(fit_call, fit_env)
+      searched <- isTRUE(tryCatch(maihda_lme4_has_slope(bound_fit), error = function(e) FALSE))
+      bound_fit
+    } else if (maihda_lmer_slopes_apply(fit_fun, longitudinal_info, dot_vals, formula)) {
+      # An lmer fit with a random slope is refitted from across such a bound, from a start
+      # carried back from its random-effect blocks' terms centred and scaled, and from a
+      # variance at zero where the criterion falls off zero (see maihda_fit_lmer_slopes()).
+      searched <- TRUE
+      maihda_fit_lmer_slopes(fit_call, fit_env)
+    } else {
+      eval(fit_call, fit_env)
+    }
+  }
+  if (engine == "lme4") {
+    # The call names its control by a binding of `fit_env`, where lme4::bootMer() and
+    # confint(method = "boot") do not look (see maihda_lme4_call_control()).
+    model@call$control <- maihda_lme4_call_control(model@call$control, fit_env)
+  }
 
   }
 
-  # Capture fit-quality diagnostics (singular fit / non-convergence) so they can
-  # be reported by print()/summary(); lme4 surfaces these only once at fit time.
-  diagnostics <- maihda_fit_diagnostics(model)
+  # Capture fit-quality diagnostics (singular fit / non-convergence) and likelihood-
+  # adequacy caveats so they can be reported by print()/summary(); lme4 surfaces the
+  # convergence warnings only once at fit time. longitudinal_info (id / time) lets the
+  # adequacy pass compute within-unit residual autocorrelation.
+  diagnostics <- maihda_fit_diagnostics(model, longitudinal_info, searched = searched)
 
   # Store the actual analytic model frame so downstream calculations use the
   # same rows as lme4/brms after their NA handling. The wemix and ordinal paths
@@ -810,12 +1352,46 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
     if (!identical(tt, longitudinal_info$time) &&
         !longitudinal_info$time %in% names(model_data) &&
         tt %in% names(model_data)) {
-      model_data[[longitudinal_info$time]] <-
+      sc <- maihda_lng_time_scale(longitudinal_info)
+      model_data[[longitudinal_info$time]] <- if (sc == 1) {
         model_data[[tt]] + longitudinal_info$time_center
+      } else {
+        # A scaled time does not always give back the original when multiplied back
+        # (1001 / 1000 * 1000 is not 1001 in floating point), and the reporting grid is
+        # built from the distinct times, so each fitted row's own time is read from the
+        # data.
+        idx <- match(rownames(model_data), rownames(data))
+        if (anyNA(idx)) {
+          model_data[[tt]] * sc + longitudinal_info$time_center
+        } else {
+          data[[longitudinal_info$time]][idx]
+        }
+      }
     }
     tv_fit <- model_data[[longitudinal_info$time]]
     longitudinal_info$time_range <- range(tv_fit, na.rm = TRUE)
     longitudinal_info$ref_time <- min(tv_fit, na.rm = TRUE)
+  }
+
+  # Default the descriptive frame to this path's `data` unless the design-weighted
+  # brms path already captured the pre-prune frame above. For lme4 / unweighted brms
+  # this is the full pre-fit frame; for wemix / ordinal it is the pre-built analytic
+  # sample (totals == analytic, as documented).
+  if (is.null(original_data)) original_data <- data
+
+  # A MAIHDA reads the stratum random intercept's variance as between-stratum
+  # inequality, so a fixed part that cannot represent the outcome's mean hands that
+  # mean to the random intercept and the VPC/MOR/PCV stop describing the strata.
+  # Checked on the RESOLVED formula and the frames actually available, once per fit,
+  # so it also covers a null the caller supplied that way rather than derived.
+  #
+  # NOT for a cumulative model: its free THRESHOLDS are the intercepts, so the fixed
+  # design never carries an intercept column and `0 +` is a no-op there. Verified
+  # against clmm() directly -- ord ~ 0 + x + (1 | st) and ord ~ x + (1 | st) return
+  # the same logLik (-609.885347) and the same stratum variance (0.314094) -- so the
+  # warning would be a false alarm on every ordinal and brms-cumulative fit.
+  if (!isTRUE(is_ordinal)) {
+    maihda_warn_no_grand_mean(formula, list(original_data, model_data))
   }
 
   result <- structure(
@@ -824,8 +1400,9 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
       engine = engine,
       formula = formula,
       data = model_data,
-      original_data = data,
+      original_data = original_data,
       family = family,
+      count_approximation = count_approximation,
       strata_info = strata_info,
       strata_vars = strata_vars,
       strata_sep = strata_sep,
@@ -835,7 +1412,8 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
       sampling_weights = sampling_weights,
       longitudinal_info = longitudinal_info,
       response_recoding = response_recoding,
-      diagnostics = diagnostics
+      diagnostics = diagnostics,
+      fixed_coding = fixed_coding
     ),
     class = "maihda_model"
   )
@@ -850,32 +1428,322 @@ fit_maihda <- function(formula, data, engine = "lme4", family = "gaussian",
   return(result)
 }
 
-# Re-slice forwarded engine arguments after a pre-fit row drop. The `...` values
-# are evaluated once against the pre-drop `data` and bound into `fit_env` as
-# `.maihda_arg_*` names; when a downstream step drops rows (the brms
-# sampling-weight path removes rows with non-positive/missing weights), any
-# row-aligned argument (e.g. `subset`, `offset`) is left longer than the `data`
-# the engine receives -- brms then errors on the length mismatch, or could select
-# the wrong rows. Re-slice every value whose length (vector) or row count (matrix /
-# data frame) equals the pre-drop count `n_pre` to the surviving rows and rebind
-# it; scalars and non-row-aligned objects (chains=, control, priors) are left as
-# bound. `keep` is the logical mask over the pre-drop rows.
-maihda_reslice_dot_args <- function(dot_vals, keep, n_pre, fit_env) {
-  for (nm in names(dot_vals)) {
-    v <- dot_vals[[nm]]
-    d <- dim(v)
-    sliced <- if (!is.null(d) && length(d) == 2L) {
-      if (nrow(v) == n_pre) v[keep, , drop = FALSE] else NULL
-    } else if (is.null(d) && length(v) == n_pre) {
-      v[keep]
-    } else {
-      NULL
-    }
-    if (!is.null(sliced)) {
-      assign(paste0(".maihda_arg_", nm), sliced, envir = fit_env)
+# The control of an lme4 fit's call, `control`, which fit_maihda() gives as a name bound in `env`
+# (the formula's environment), written as lme4 writes a control given in the call: a call to
+# lmerControl() or glmerControl() with each setting that differs from that function's default.
+# lme4::bootMer(), which confint(method = "boot") calls, evaluates the call's control where it is
+# called, so a name bound in `env` stops it, and then refits each draw from the fit by
+# lme4::refit() with that control. Written so is a control with the user's own optimiser settings:
+# the user's (`.maihda_arg_control`), and that of the last pass of a glmer fit a refit replaced
+# (`.maihda_arg_finish_control`, maihda_glmer_finish()) when the pass took Nelder-Mead's own first
+# steps. Controls with first steps of the package's own keep their names, so bootMer() stops on
+# such a fit rather than refit its draws short: those of the refits by bobyqa
+# (`.maihda_arg_refit_control`, `.maihda_arg_search_control`; with the search's, 36 of 36 draws
+# of four Poisson fits with a slope on a birth year ended more than 0.01 short of their maximum
+# in -2 log-likelihood, 24 by more than 1), and that of a last pass with first steps of 0.1% of
+# each estimate (11 of 12 draws of two adjusted fits with a slope on a calendar or a birth year
+# ended more than 0.01 short, by up to 2.2, where Nelder-Mead's own first steps failed on all 12).
+# `control` is returned as it is when it is not such a name, when its optimiser is a function, or
+# when the call does not give back the bound control exactly.
+maihda_lme4_call_control <- function(control, env) {
+  name <- if (is.name(control)) as.character(control) else ""
+  if (!name %in% c(".maihda_arg_control", ".maihda_arg_finish_control")) {
+    return(control)
+  }
+  value <- get0(name, envir = env, inherits = FALSE)
+  glmm <- inherits(value, "glmerControl")
+  if (!glmm && !inherits(value, "lmerControl")) {
+    return(control)
+  }
+  default <- if (glmm) lme4::glmerControl() else lme4::lmerControl()
+  user <- get0(".maihda_arg_control", envir = env, inherits = FALSE)
+  if (is.null(user)) {
+    user <- default
+  }
+  own <- c("optimizer", "optCtrl")
+  if (!identical(unclass(value)[own], unclass(user)[own])) {
+    return(control)
+  }
+  # An optimiser given as a function would be written into the call as its source, and
+  # lme4::refit() does not take one.
+  optimizer <- value$optimizer
+  if (is.function(optimizer) ||
+      (is.list(optimizer) && any(vapply(optimizer, is.function, logical(1))))) {
+    return(control)
+  }
+  args <- list()
+  for (field in names(value)) {
+    # The checks are arguments of their own (check.rankX = , check.conv.grad = ).
+    nested <- field %in% c("checkControl", "checkConv")
+    settings <- if (nested) value[[field]] else value[field]
+    defaults <- if (nested) default[[field]] else default[field]
+    for (nm in names(settings)) {
+      if (!identical(settings[[nm]], if (nm %in% names(defaults)) defaults[[nm]])) {
+        args[nm] <- list(settings[[nm]])
+      }
     }
   }
-  invisible(NULL)
+  written <- as.call(c(list(if (glmm) quote(lme4::glmerControl) else quote(lme4::lmerControl)),
+                       args))
+  if (identical(tryCatch(eval(written, baseenv()), error = function(e) NULL), value)) {
+    written
+  } else {
+    control
+  }
+}
+
+# Resolve the intersectional-strata shorthand in a MAIHDA formula. Automatic
+# strata creation is only safe for the documented shorthand: one intercept-only
+# non-stratum grouping term such as (1 | gender:race); more complex
+# random-effect structures must be specified explicitly after calling
+# make_strata(). When the shorthand is present, make_strata() builds the strata,
+# `data` gains the stratum column (plus the strata_* attributes), and the
+# formula's grouping term is rewritten to (1 | stratum); a formula that already
+# groups on `stratum` passes through, picking up any strata_* attributes that
+# make_strata() attached to `data`. Shared by fit_maihda() and
+# maihda_describe() so the pre-model description and the fit build their strata
+# from the same machinery -- identical IDs, labels, counts, and validation.
+# TRUE when a random-effect term's left-hand side carries a random INTERCEPT --
+# whether written explicitly (`1`, `1 + x`, `0 + 1`) or implicitly (`x`, which lme4
+# expands to `1 + x`). This is TRUE for any term that CONTAINS an intercept (not only a
+# bare intercept), so it catches a compound intercept-plus-slope term. maihda_resolve_strata_formula()
+# uses it to reject more than one intercept-bearing term on 'stratum': (1 | stratum) +
+# (1 + x | stratum), and (1 | stratum) + (x | stratum), each put two intercepts on the
+# same grouping factor, which lme4 splits arbitrarily across 'stratum' and 'stratum.1'
+# (non-identifiable). A slope-only second term (0 + x | stratum) carries no intercept and
+# stays identifiable. Reads the formula's intercept attribute -- exactly how lme4 itself
+# decides whether a term has a random intercept -- so it needs no data and cannot disagree
+# with the fitted structure. Returns FALSE on any parse error (conservative: no over-reject).
+maihda_re_lhs_has_intercept <- function(lhs) {
+  fm <- tryCatch(stats::as.formula(paste("~", paste(deparse(lhs), collapse = " "))),
+                 error = function(e) NULL)
+  if (is.null(fm)) return(FALSE)
+  int <- tryCatch(attr(stats::terms(fm), "intercept"), error = function(e) 0L)
+  isTRUE(int == 1L)
+}
+
+# TRUE when a random-effect term's design matrix -- built on the analytic `data` the
+# way lme4 builds it, model.matrix(~ lhs, data) -- carries the all-ones (intercept)
+# vector in its COLUMN SPACE. This catches an intercept that maihda_re_lhs_has_intercept()
+# (which reads only the formula intercept attribute) misses because it is realized
+# NUMERICALLY rather than written as `1`: a constant slope column such as (0 + one |
+# stratum) with one == 1, or a full dummy encoding (0 + f | stratum) whose columns sum
+# to the intercept. Two stratum terms that each span the intercept put two intercepts on
+# the same grouping factor, which lme4 fits as separate 'stratum'/'stratum.1' variance
+# components and splits the between-stratum variance arbitrarily across -- the same
+# non-identifiable defect the attribute test guards against for explicit duplicates.
+# Membership is tested by QR rank: the all-ones vector is in colspace(Z) exactly when
+# rank([Z, 1]) == rank(Z). Falls back to the attribute test when the design cannot be
+# built or ranked (an absent/all-NA column, a parse error): conservative -- it never
+# silently drops the guard, and never over-rejects on an un-buildable term.
+maihda_re_lhs_spans_intercept <- function(lhs, data) {
+  fm <- tryCatch(stats::as.formula(paste("~", paste(deparse(lhs), collapse = " "))),
+                 error = function(e) NULL)
+  if (!is.null(fm) && is.data.frame(data) && nrow(data) > 0L) {
+    z <- tryCatch(
+      stats::model.matrix(fm, stats::model.frame(fm, data = data,
+                                                 na.action = stats::na.omit)),
+      error = function(e) NULL)
+    if (!is.null(z) && nrow(z) > 0L && ncol(z) > 0L) {
+      r_z <- tryCatch(qr(z)$rank, error = function(e) NA_integer_)
+      r_aug <- tryCatch(qr(cbind(z, 1))$rank, error = function(e) NA_integer_)
+      if (!is.na(r_z) && !is.na(r_aug)) {
+        return(isTRUE(r_aug == r_z))
+      }
+    }
+  }
+  maihda_re_lhs_has_intercept(lhs)
+}
+
+maihda_resolve_strata_formula <- function(formula, data, autobin = TRUE,
+                                          bin_rows = NULL) {
+  re_terms <- reformulas::findbars(formula)
+  strata_info <- attr(data, "strata_info")
+  strata_vars <- attr(data, "strata_vars")
+  if (is.null(strata_vars) || length(strata_vars) == 0) {
+    strata_vars <- maihda_infer_strata_vars(strata_info)
+  }
+  strata_sep <- attr(data, "strata_sep")
+  strata_autobin_info <- attr(data, "strata_autobin_info")
+
+  if (length(re_terms) > 0) {
+    grouping_vars_by_term <- lapply(re_terms, function(x) all.vars(x[[3]]))
+    is_stratum_term <- vapply(grouping_vars_by_term, function(vars) {
+      identical(vars, "stratum")
+    }, logical(1))
+    has_stratum_group <- any(is_stratum_term)
+
+    # Reject more than one random-effect term that puts an INTERCEPT on 'stratum'.
+    # lme4 fits `... + (1 | stratum) + (1 | stratum)` -- and equally the compound
+    # `(1 | stratum) + (1 + x | stratum)`, or `(1 | stratum) + (x | stratum)` whose
+    # second intercept is implicit -- as two SEPARATE stratum variance components
+    # ("stratum" and "stratum.1") and splits the between-stratum variance arbitrarily
+    # between them. That partition is non-identifiable and makes the VPC and PCV
+    # ill-defined: the summary counts only the first component as between-stratum
+    # variance and misclassifies the rest as "other random effects". Test each stratum
+    # term for an intercept by whether its random-effect design matrix -- built on the
+    # ANALYTIC rows lme4 fits (bin_rows) -- spans the intercept vector
+    # (maihda_re_lhs_spans_intercept), not merely by its formula intercept attribute.
+    # That catches every spelling -- 1, 0 + 1, 1 + x, and a bare slope x with its implicit
+    # intercept -- AND an intercept realized NUMERICALLY: a constant slope column such as
+    # (0 + one | stratum) with one == 1, or a full dummy encoding whose columns sum to 1,
+    # both of which the attribute test reports as "no intercept" yet lme4 fits as a second
+    # stratum intercept variance. A single compound (1 + x | stratum) term (one correlated
+    # intercept+slope) and an uncorrelated pair (1 | stratum) + (0 + x | stratum) (second
+    # term a genuinely varying slope, no intercept in its column space) are both
+    # identifiable and are left to the downstream intercept-only validation / the fit.
+    if (sum(is_stratum_term) > 1) {
+      # The analytic sample (subset / missing / weight-NA rows dropped) -- a column can be
+      # constant there yet vary in the raw data, so the intercept-span test must see the
+      # rows the fit uses. bin_rows is that keep mask (NULL when no filtering applies).
+      analytic_data <- if (!is.null(bin_rows) && is.logical(bin_rows) &&
+                           length(bin_rows) == nrow(data)) {
+        data[bin_rows, , drop = FALSE]
+      } else {
+        data
+      }
+      has_intercept <- vapply(re_terms[is_stratum_term], function(term) {
+        maihda_re_lhs_spans_intercept(term[[2]], analytic_data)
+      }, logical(1))
+      if (sum(has_intercept) > 1) {
+        stop("The model formula includes ", sum(has_intercept), " random-effect terms ",
+             "that each put an intercept on 'stratum' (e.g. (1 | stratum) and ",
+             "(1 + x | stratum), or (x | stratum) whose intercept is implicit; ",
+             "(0 + 1 | stratum) also builds an intercept column). Duplicate stratum ",
+             "intercepts are non-identifiable: lme4 splits the between-stratum variance ",
+             "arbitrarily across them (fitted as 'stratum' and 'stratum.1'), so the VPC ",
+             "and PCV are not well defined. Use a single stratum intercept -- combine ",
+             "them into one (1 + x | stratum) term, or make the extra term slope-only, ",
+             "(0 + x | stratum).", call. = FALSE)
+      }
+    }
+
+    if (!has_stratum_group) {
+      if (length(re_terms) != 1) {
+        stop("Automatic strata creation only supports a single intercept-only random effect, ",
+             "for example (1 | gender:race). For more complex random-effects structures, ",
+             "call make_strata() first and include (1 | stratum) explicitly.",
+             call. = FALSE)
+      }
+
+      random_lhs <- paste(deparse(re_terms[[1]][[2]]), collapse = " ")
+      if (random_lhs != "1") {
+        stop("Automatic strata creation only supports intercept-only random effects, ",
+             "for example (1 | gender:race).",
+             call. = FALSE)
+      }
+
+      if (!maihda_is_colon_interaction(re_terms[[1]][[3]])) {
+        stop("Automatic strata creation supports a single variable or a colon ",
+             "interaction such as (1 | gender:race). For other grouping expressions ",
+             "(e.g. interaction(), paste(), cut()), call make_strata() first and use ",
+             "(1 | stratum).", call. = FALSE)
+      }
+
+      strata_vars <- grouping_vars_by_term[[1]]
+      missing_grouping_vars <- setdiff(strata_vars, names(data))
+      if (length(missing_grouping_vars) > 0) {
+        stop("Grouping variables not found in data: ",
+             paste(missing_grouping_vars, collapse = ", "), call. = FALSE)
+      }
+      if ("stratum" %in% names(data)) {
+        stop("Automatic strata creation would overwrite an existing 'stratum' column. ",
+             "Use the existing (1 | stratum) model or rename/remove that column first.",
+             call. = FALSE)
+      }
+
+      strata_result <- make_strata(data, vars = strata_vars, autobin = autobin,
+                                   bin_rows = bin_rows)
+      data$stratum <- strata_result$data$stratum
+      strata_info <- strata_result$strata_info
+      strata_sep <- strata_result$sep
+      strata_autobin_info <- strata_result$autobin_info
+      attr(data, "strata_info") <- strata_info
+      attr(data, "strata_vars") <- strata_vars
+      attr(data, "strata_sep") <- strata_sep
+      attr(data, "strata_autobin_info") <- strata_autobin_info
+
+      fixed_formula <- maihda_nobars(formula)
+      formula <- stats::update(fixed_formula, . ~ . + (1 | stratum))
+    }
+  }
+
+  list(formula = formula, data = data, strata_info = strata_info,
+       strata_vars = strata_vars, strata_sep = strata_sep,
+       autobin_info = strata_autobin_info)
+}
+
+# Append the contextual cross-classified random intercept(s) to a formula whose
+# stratum grouping is already resolved, validating the roles first: the formula
+# must carry a stratum random effect, and a context variable may not double as a
+# stratum dimension or as a fixed-effect term (either would absorb the variance
+# the contextual partition is meant to estimate). Idempotent: a context that is
+# already a random-effect grouping (e.g. a maihda() refit of a derived formula
+# that carries the context term) is validated but not appended again. Shared by
+# fit_maihda() and maihda_describe().
+maihda_apply_context_formula <- function(formula, context, strata_vars) {
+  re_terms_now <- reformulas::findbars(formula)
+  grouping_vars_now <- unique(unlist(
+    lapply(re_terms_now, function(x) all.vars(x[[3]])), use.names = FALSE))
+  if (!"stratum" %in% grouping_vars_now) {
+    stop("'context' adds a crossed contextual random effect alongside the ",
+         "intersectional stratum effect, but the formula has no stratum random ",
+         "effect. Use the shorthand (1 | var1:var2) or include (1 | stratum).",
+         call. = FALSE)
+  }
+  clash_dims <- intersect(context, strata_vars)
+  if (length(clash_dims) > 0) {
+    stop("Context variable(s) ", paste(clash_dims, collapse = ", "),
+         " also define the intersectional strata. A variable cannot be both a ",
+         "stratum dimension and a higher-level context; remove it from one of ",
+         "the two roles.", call. = FALSE)
+  }
+  clash_fixed <- intersect(context, all.vars(maihda_nobars(formula)[[3]]))
+  if (length(clash_fixed) > 0) {
+    stop("Context variable(s) ", paste(clash_fixed, collapse = ", "),
+         " already appear in the fixed part of the formula, which would absorb ",
+         "the context variance the contextual partition is meant to estimate. ",
+         "Supply the context only via 'context', or only as a fixed effect, ",
+         "not both.", call. = FALSE)
+  }
+  context_to_add <- setdiff(context, grouping_vars_now)
+  if (length(context_to_add) > 0) {
+    re_add <- paste(
+      sprintf("(1 | %s)",
+              vapply(context_to_add, maihda_quote_name, character(1))),
+      collapse = " + ")
+    formula <- stats::update(formula,
+                             stats::as.formula(paste(". ~ . +", re_add)))
+  }
+  formula
+}
+
+# Resolve a user family specification (name string, family/constructor function,
+# or family-like list) to the family object the engines and summaries consume.
+# "negbinomial" (the brms spelling) resolves to a plain marker list rather than
+# a stats family object: there is no theta-free negative-binomial family
+# constructor in stats -- lme4 estimates theta itself via glmer.nb() and brms
+# via its 'shape' parameter, so no theta is needed (or wanted) here. Shared by
+# fit_maihda() and maihda_describe().
+maihda_resolve_family_spec <- function(family) {
+  if (is.character(family)) {
+    family <- switch(family,
+                     gaussian = gaussian(),
+                     binomial = binomial(),
+                     poisson = poisson(),
+                     negbinomial = list(family = "negbinomial", link = "log"),
+                     ordinal = ,
+                     cumulative = maihda_cumulative("logit"),
+                     stop("Unsupported family: ", family))
+  } else if (is.function(family)) {
+    family <- family()
+  }
+
+  if (!is.list(family) || is.null(family$family) || is.null(family$link)) {
+    stop("'family' must be a family name, family object, or family function.",
+         call. = FALSE)
+  }
+  family
 }
 
 #' Print method for maihda_model
@@ -897,10 +1765,18 @@ print.maihda_model <- function(x, ...) {
   if (!is.null(x$longitudinal_info)) {
     lng <- x$longitudinal_info
     ct <- maihda_lng_time_center(lng)
+    sc <- maihda_lng_time_scale(lng)
+    internal <- if (sc != 1) {
+      sprintf(" (growth terms on internal time %s / %s; the underlying model is in those units)",
+              if (ct != 0) sprintf("(%s - %g)", lng$time, ct) else lng$time,
+              format(sc, scientific = FALSE))
+    } else if (ct != 0) {
+      sprintf(" (growth terms internally centered at %g)", ct)
+    } else {
+      ""
+    }
     cat(sprintf("Longitudinal: id = %s, time = %s%s, degree = %d (3-level growth)\n",
-                lng$id, lng$time,
-                if (ct != 0) sprintf(" (growth terms internally centered at %g)", ct) else "",
-                lng$time_degree))
+                lng$id, lng$time, internal, lng$time_degree))
   }
   if (!is.null(x$sampling_weights)) {
     cat("Sampling weights:", x$sampling_weights,
@@ -911,7 +1787,7 @@ print.maihda_model <- function(x, ...) {
         }, "\n")
   }
   cat("\n")
-  maihda_print_fit_diagnostics(x$diagnostics)
+  maihda_print_fit_diagnostics(x$diagnostics, cc_info = x$cc_info)
   maihda_print_interactions_line(x$interactions)
   cat("Underlying model:\n")
   print(x$model, ...)

@@ -228,6 +228,59 @@ test_that("maihda_prepare_brms_sampling_weights normalizes and drops bad rows", 
   )
 })
 
+test_that("brms sampling weights are normalized on the analysis sample", {
+  # Weights used to be normalized to mean 1 BEFORE brms excluded rows incomplete
+  # on the model variables, so the weights actually fitted had an arbitrary mean,
+  # scaling the pseudo-posterior's effective sample size. The two-row case: after
+  # mean-1 normalization over both rows the NA-outcome row is dropped by brms,
+  # leaving a single weight of 0.02 -- a ~50x-tempered likelihood.
+  d2 <- data.frame(y = c(1.5, NA), stratum = c("a", "b"), w = c(0.02, 1.98))
+  expect_warning(
+    prep2 <- maihda_prepare_brms_sampling_weights(d2, y ~ (1 | stratum), "w"),
+    "incomplete on the model variables"
+  )
+  expect_equal(prep2$data$.maihda_sw, 1)
+  expect_equal(prep2$keep, c(TRUE, FALSE))
+
+  # NA on a fixed-effect covariate and on a random-effect grouping variable also
+  # mark the row incomplete; the survivors' normalized weights keep mean 1.
+  d <- data.frame(
+    y = c(NA, rnorm(5)),
+    x = c(0, NA, rnorm(4)),
+    stratum = c("a", "b", NA, "b", "a", "b"),
+    w = c(50, 50, 50, 1, 2, 3)
+  )
+  expect_warning(
+    prep <- maihda_prepare_brms_sampling_weights(d, y ~ x + (1 | stratum), "w"),
+    "dropped 3 row\\(s\\) incomplete"
+  )
+  expect_equal(nrow(prep$data), 3)
+  expect_equal(mean(prep$data$.maihda_sw), 1)
+  expect_equal(prep$keep, c(FALSE, FALSE, FALSE, TRUE, TRUE, TRUE))
+
+  # A transformed predictor whose transformation yields NaN counts as incomplete
+  # (brms's model frame drops it, so the normalization must too).
+  d3 <- data.frame(y = rnorm(4), x = c(-1, 1, 2, 3),
+                   stratum = c("a", "b", "a", "b"), w = c(10, 1, 1, 1))
+  expect_warning(
+    prep3 <- maihda_prepare_brms_sampling_weights(d3, y ~ sqrt(x) + (1 | stratum), "w"),
+    "incomplete on the model variables"
+  )
+  expect_equal(nrow(prep3$data), 3)
+  expect_equal(mean(prep3$data$.maihda_sw), 1)
+
+  # An addition-term variable (y | trials(n)) is a model variable too.
+  d4 <- data.frame(y = c(2, 3, 4), n = c(10, NA, 10),
+                   stratum = c("a", "b", "a"), w = c(5, 5, 1))
+  expect_warning(
+    prep4 <- maihda_prepare_brms_sampling_weights(
+      d4, y | trials(n) ~ (1 | stratum), "w"),
+    "incomplete on the model variables"
+  )
+  expect_equal(nrow(prep4$data), 2)
+  expect_equal(mean(prep4$data$.maihda_sw), 1)
+})
+
 # ---- sampling-weight fingerprint ---------------------------------------------
 
 test_that("maihda_sampling_weight_fingerprint distinguishes weight specifications", {
@@ -290,7 +343,9 @@ test_that("fit_maihda auto-switches to wemix and fits a weighted gaussian model"
   expect_s3_class(s, "maihda_summary")
   expect_gt(s$vpc$estimate, 0)
   expect_lt(s$vpc$estimate, 1)
-  # Design-consistent (sandwich) fixed-effect standard errors are reported.
+  # Sandwich (robust) fixed-effect standard errors are reported. NOT described as
+  # design-consistent: the wrapper takes only a person weight, so it cannot
+  # represent a complex design's PSUs or sampling strata.
   expect_true("se" %in% names(s$fixed_effects))
   expect_true(all(is.finite(s$fixed_effects$se)))
   expect_true(all(s$fixed_effects$se > 0))
@@ -393,30 +448,18 @@ test_that("predict_maihda works for wemix fits (individual and strata)", {
   expect_gt(stats::cor(p_ind, m$data$y), 0.3)
 })
 
-test_that("wemix predictions add the formula offset", {
-  skip_on_cran()
-  skip_if_not_installed("WeMix")
-
+test_that("wemix refuses a formula offset, which WeMix::mix() does not fit", {
+  # This test used to rebuild the offset fit's prediction as X %*% beta + offset + u
+  # from the fit's own coefficients. mix() had fitted those without the offset, so
+  # the check compared the predictions with the same wrong fit (audit 2026-09-17b,
+  # which pins the fitting defect itself). The refusal comes before WeMix is called.
   d <- make_dw_data()
   d$expo <- runif(nrow(d), 0.5, 4)
-  m <- suppressMessages(
-    fit_maihda(y ~ age + offset(log(expo)) + (1 | gender:race:edu), data = d,
-               engine = "wemix", sampling_weights = "w"))
-
-  # Rebuild the link-scale prediction independently as X %*% beta + offset + u.
-  off <- log(m$data$expo)
-  beta <- m$model$coef
-  tt <- stats::delete.response(stats::terms(reformulas::nobars(m$formula)))
-  mf <- stats::model.frame(tt, m$data, na.action = stats::na.pass)
-  X <- stats::model.matrix(tt, mf)
-  re <- maihda_wemix_ranef_vector(m)
-  u <- re[as.character(m$data$stratum)]; u[is.na(u)] <- 0
-  ref <- drop(X[, names(beta), drop = FALSE] %*% beta) + off + unname(u)
-
-  eta <- predict_maihda(m, type = "link")
-  expect_equal(unname(eta), unname(ref), tolerance = 1e-8)
-  # A fit that dropped the offset would differ by max|offset| (> 0.5 here).
-  expect_gt(max(abs(off)), 0.5)
+  expect_error(
+    suppressMessages(
+      fit_maihda(y ~ age + offset(log(expo)) + (1 | gender:race:edu), data = d,
+                 engine = "wemix", sampling_weights = "w")),
+    "does not support offset() terms (offset(log(expo)))", fixed = TRUE)
 })
 
 test_that("calculate_pcv works across wemix fits and guards mismatched weights", {
@@ -595,7 +638,8 @@ test_that("summary(bootstrap = TRUE) is rejected for the wemix engine", {
   m <- suppressMessages(
     fit_maihda(y ~ age + (1 | gender:race:edu), data = d,
                engine = "wemix", sampling_weights = "w"))
-  expect_error(summary(m, bootstrap = TRUE, n_boot = 10), "replicate weights")
+  expect_error(suppressWarnings(summary(m, bootstrap = TRUE, n_boot = 10)),
+               "replicate weights")
 
   # Crossed-dimensions / contextual partitions are undefined for wemix; a model
   # that somehow carries those tags is rejected by summary().
@@ -728,7 +772,9 @@ test_that("maihda_fit_diagnostics flags a boundary (singular) wemix fit", {
     class = "WeMixResults")
   diag_s <- maihda_fit_diagnostics(singular)
   expect_identical(diag_s$engine, "wemix")
-  expect_true(isTRUE(diag_s$converged))
+  # This stub carries no likelihood function, so there is no evidence about how
+  # the optimisation terminated: the verdict is "unknown", not "converged".
+  expect_true(is.na(diag_s$converged))
   expect_true(isTRUE(diag_s$singular))
 
   healthy <- structure(
@@ -832,52 +878,19 @@ test_that("fit_maihda routes sampling weights into a brms fit (Stan-free)", {
                captured$data$w / captured$data$w[1])
 })
 
-test_that("maihda_reslice_dot_args slices only row-aligned forwarded values", {
-  env <- new.env()
-  dot_vals <- list(subset = 1:5, chains = 4L, mat = matrix(1:10, nrow = 5))
-  for (nm in names(dot_vals)) {
-    assign(paste0(".maihda_arg_", nm), dot_vals[[nm]], envir = env)
-  }
-  keep <- c(TRUE, FALSE, TRUE, FALSE, TRUE)
-
-  maihda_reslice_dot_args(dot_vals, keep, 5L, env)
-
-  # Row-aligned vector and matrix are sliced to the kept rows...
-  expect_equal(get(".maihda_arg_subset", env), c(1L, 3L, 5L))
-  expect_equal(get(".maihda_arg_mat", env),
-               matrix(1:10, nrow = 5)[keep, , drop = FALSE])
-  # ...a scalar (length != n) is left untouched.
-  expect_equal(get(".maihda_arg_chains", env), 4L)
-})
-
-test_that("fit_maihda re-slices row-aligned dots after the brms weight drop", {
-  skip_if_not_installed("brms")
-
+test_that("engine = 'brms' rejects a forwarded subset instead of re-slicing it", {
+  # The brms path no longer forwards lme4-style row-aligned dots (they are not
+  # brms::brm() arguments and were silently ignored); it rejects them, so there is
+  # nothing left to re-slice after a sampling-weight row drop. Rejected during
+  # argument handling, so no brms/Stan compile is needed.
   d <- make_dw_data(n = 12)
-  # Force two rows out of the fit via a zero and a missing weight.
-  d$w[3] <- 0
-  d$w[7] <- NA
   s <- make_strata(d, vars = c("gender", "race", "edu"))
-
-  captured <- NULL
-  local_mocked_bindings(
-    brm = function(formula, data, family, ...) {
-      captured <<- list(data = data, dots = list(...))
-      structure(list(), class = "brmsfit")
-    },
-    .package = "brms"
-  )
-
-  # `subset` is forwarded and row-aligned to the pre-drop data (12 rows); after the
-  # weight drop the data is 10 rows, so the bound subset must be re-sliced to match
-  # -- otherwise brms gets a 12-long subset against a 10-row data frame.
-  sub <- rep(TRUE, nrow(s$data))
-  suppressMessages(suppressWarnings(
-    fit_maihda(y ~ age + (1 | stratum), data = s$data,
-               engine = "brms", sampling_weights = "w", subset = sub)
-  ))
-  expect_equal(nrow(captured$data), 10L)
-  expect_length(captured$dots$subset, 10L)
+  expect_error(
+    suppressMessages(suppressWarnings(
+      fit_maihda(y ~ age + (1 | stratum), data = s$data,
+                 engine = "brms", sampling_weights = "w",
+                 subset = rep(TRUE, nrow(s$data))))),
+    "not supported by engine = \"brms\"", fixed = TRUE)
 })
 
 test_that("wemix unseen stratum: helper maps to zero, public path gates it", {
@@ -893,7 +906,7 @@ test_that("wemix unseen stratum: helper maps to zero, public path gates it", {
   nd <- data.frame(x = c(0, 0), stratum = c("s1", "unseen"))
 
   # The internal linpred primitive maps an unseen stratum to a zero random effect
-  # (eta = fixed part). This is the population-average fallback, NOT the public
+  # (eta = fixed part). This is the zero-effect fallback, NOT the public
   # default: the seen stratum keeps its 0.5 effect, the unseen one drops to 0.
   eta <- maihda_wemix_linpred(m, newdata = nd, include_re = TRUE)
   expect_equal(unname(eta), c(2.5, 2))
@@ -905,17 +918,17 @@ test_that("wemix unseen stratum: helper maps to zero, public path gates it", {
     "not present in the fitted model"
   )
 
-  # allow_new_levels = TRUE opts into the population average. The gaussian identity
+  # allow_new_levels = TRUE opts into the zero-effect fallback. The gaussian identity
   # link makes the response scale equal the latent eta computed above.
   pa <- predict_maihda(m, newdata = nd, type = "individual",
                        allow_new_levels = TRUE)
   expect_equal(unname(pa), c(2.5, 2))
 })
 
-test_that("brms unseen stratum honours the zero-effect population-average fallback", {
-  # Regression for the audit finding: allow_new_levels = TRUE promises a population-
-  # average (fixed-effects-only) prediction for an unseen stratum -- the stratum
-  # random effect treated as zero. Forwarding allow_new_levels to brms is NOT enough:
+test_that("brms unseen stratum honours the zero-effect fallback", {
+  # Regression for the audit finding: allow_new_levels = TRUE promises a
+  # fixed-effects-only prediction for an unseen stratum, at a zero random
+  # effect. Forwarding allow_new_levels to brms is NOT enough:
   # its default sample_new_levels = "uncertainty" DRAWS a new-level effect from the
   # random-effects distribution instead of zeroing it. The fix predicts unseen rows
   # with re_formula = NA, so the unseen prediction must match a manual re_formula = NA
@@ -959,18 +972,18 @@ test_that("brms unseen stratum honours the zero-effect population-average fallba
   pa <- predict_maihda(m, newdata = nd, type = "individual", scale = "response",
                        allow_new_levels = TRUE)
 
-  # Unseen row == the population-average (re_formula = NA) prediction: fixed effects
+  # Unseen row == the zero-effect (re_formula = NA) prediction: fixed effects
   # only, stratum random effect zero (NOT a sampled new-level effect).
-  popavg <- stats::fitted(m$model, newdata = nd, re_formula = NA,
-                         summary = TRUE)[, "Estimate"]
-  expect_equal(unname(pa[2]), unname(popavg[2]))
+  fixed_only <- stats::fitted(m$model, newdata = nd, re_formula = NA,
+                              summary = TRUE)[, "Estimate"]
+  expect_equal(unname(pa[2]), unname(fixed_only[2]))
 
   # Seen row keeps its estimated stratum effect, so it differs from the fixed-only
   # prediction and matches the full-random-effects prediction.
   seen_full <- stats::fitted(m$model, newdata = nd[1, , drop = FALSE],
                             summary = TRUE)[, "Estimate"]
   expect_equal(unname(pa[1]), unname(seen_full))
-  expect_false(isTRUE(all.equal(unname(pa[1]), unname(popavg[1]))))
+  expect_false(isTRUE(all.equal(unname(pa[1]), unname(fixed_only[1]))))
 })
 
 test_that("brms unseen stratum keeps a seen context random effect (lme4 parity)", {

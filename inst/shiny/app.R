@@ -10,13 +10,22 @@ library(promises)
 # Set up multisession for async processing
 maihda_app_previous_future_plan <- future::plan()
 future::plan(multisession)
-shiny::onStop(function() {
-  future::plan(maihda_app_previous_future_plan)
-})
 
 # Allow larger uploads than Shiny's 5 MB default so real-world CSV/DTA/SAV files
-# do not silently fail before reaching reactive_data()'s reader.
+# do not silently fail before reaching reactive_data()'s reader. Capture the previous
+# value first so onStop() can restore it: shiny.maxRequestSize is a process-global
+# option, so without restoration the 50 MB limit leaks into the R session and any
+# other Shiny app launched afterwards in the same process silently inherits it.
+maihda_app_previous_max_request <- getOption("shiny.maxRequestSize")
 options(shiny.maxRequestSize = 50 * 1024^2)
+
+# Restore every process-global setting this app changed (async plan + upload limit)
+# when it stops, so nothing leaks into the surrounding R session. Setting the option
+# back to its previous value -- NULL when it was unset -- restores Shiny's default.
+shiny::onStop(function() {
+  future::plan(maihda_app_previous_future_plan)
+  options(shiny.maxRequestSize = maihda_app_previous_max_request)
+})
 
 # A system-ui font stack (deliberately not font_google()): it needs no network
 # call at startup, so the app never fails to launch offline, and still renders in
@@ -548,11 +557,18 @@ server <- function(input, output, session) {
 
     # Surface the fit-quality diagnostics fit_maihda() already computes (singular
     # fit / non-convergence): these silently invalidate the VPC/PCV if ignored.
-    diag_lines <- MAIHDA:::maihda_format_fit_diagnostics(model_results()$diagnostics)
-    diag_ui <- if (length(diag_lines) > 0) {
+    diag_lines <- MAIHDA:::maihda_format_fit_diagnostics(
+      model_results()$diagnostics, cc_info = model_results()$cc_info)
+    # One bullet per diagnostic, its sentences as running text; convergence messages
+    # are listed under their header.
+    diag_items <- MAIHDA:::maihda_app_diagnostics_items(diag_lines)
+    diag_ui <- if (length(diag_items) > 0) {
       div(class = "alert alert-warning",
           tags$strong("Fit diagnostics"),
-          tags$ul(lapply(diag_lines, function(l) tags$li(l))))
+          tags$ul(lapply(diag_items, function(item) {
+            tags$li(item$text,
+                    if (length(item$sub) > 0) tags$ul(lapply(item$sub, tags$li)))
+          })))
     } else {
       div(class = "text-success small",
           icon("check-circle"), " Model converged with no singularity warnings.")

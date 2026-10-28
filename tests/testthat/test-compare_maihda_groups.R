@@ -414,7 +414,12 @@ test_that("compare_maihda_groups ignores missing group values", {
   sk <- interaction(d$gender, d$race, drop = TRUE)
   d$y <- 1 + 0.3 * d$age + rnorm(nlevels(sk), sd = 0.7)[sk] + rnorm(n, sd = 0.4)
 
-  cmp <- compare_maihda_groups(y ~ age + (1 | gender:race), data = d, group = "country")
+  # A group's small additive sample can drive the adjusted fit to the boundary
+  # (singular, PCV ~ 100%) -- now recorded silently in pcv_status, with no warning --
+  # and a small per-group sample can also leave groups with different populated strata;
+  # this test is about NA-group handling, so tolerate any such diagnostic.
+  cmp <- suppressWarnings(
+    compare_maihda_groups(y ~ age + (1 | gender:race), data = d, group = "country"))
   expect_setequal(cmp$group, c("A", "B"))
   expect_false(any(is.na(cmp$group)))
 })
@@ -504,10 +509,6 @@ test_that("plot() on a maihda_group_comparison returns ggplot objects for both t
 
   # the method's class guard (reachable via a direct call)
   expect_error(plot.maihda_group_comparison(mtcars), "maihda_group_comparison")
-
-  # deprecated alias still works but warns, including for the new type
-  expect_warning(plot_group_comparison(cmp, type = "vpc"), "deprecated")
-  expect_warning(plot_group_comparison(cmp, type = "between_variance"), "deprecated")
 })
 
 test_that("plot() notes omitted groups in the caption instead of dropping silently", {
@@ -569,20 +570,22 @@ test_that("compare_maihda_groups reports a per-group PCV with >= 2 dimensions", 
                (cmp$var_between[ok] - cmp$var_between_adjusted[ok]) / cmp$var_between[ok],
                tolerance = 1e-8)
 
-  # var_between_adjusted_ml is the adjusted fit's ACTUAL between-stratum variance, so
-  # it must reproduce the per-group adjusted model fitted on the same sample/strata
-  # (the ML-refit var_model2 from calculate_pcv()). It is nonzero here and -- because
-  # of the REML-vs-ML gap in the null variance -- not identical to the derived
-  # var_between_adjusted coherence value.
+  # var_between_adjusted_ml is the adjusted fit's ACTUAL between-stratum variance on
+  # the PCV's estimation basis, so it must reproduce the per-group adjusted model
+  # fitted on the same sample/strata (var_model2 from calculate_pcv()).
   d_ok <- droplevels(d[d$country == "A", ])
   null_a <- fit_maihda(y ~ age + (1 | gender:race), data = d_ok)
   adj_a  <- fit_maihda(y ~ age + gender + race + (1 | gender:race), data = d_ok)
-  ml_a   <- calculate_pcv(null_a, adj_a)$var_model2
-  expect_equal(cmp$var_between_adjusted_ml[cmp$group == "A"], ml_a, tolerance = 1e-6)
-  expect_false(isTRUE(all.equal(
+  vm2    <- calculate_pcv(null_a, adj_a)$var_model2       # default = fitted (REML)
+  expect_equal(cmp$var_between_adjusted_ml[cmp$group == "A"], vm2, tolerance = 1e-6)
+  # Under the default estimation = "fitted" the derived and actual adjusted variances
+  # coincide (both on the REML basis; there is no REML-vs-ML gap to absorb). The
+  # "_ml" suffix is retained only for output-schema continuity.
+  expect_equal(
     cmp$var_between_adjusted[cmp$group == "A"],
-    cmp$var_between_adjusted_ml[cmp$group == "A"]
-  )))
+    cmp$var_between_adjusted_ml[cmp$group == "A"],
+    tolerance = 1e-6
+  )
 
   expect_s3_class(plot(cmp, type = "pcv"), "ggplot")
 })

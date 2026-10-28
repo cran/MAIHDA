@@ -11,6 +11,7 @@
   conf_level = 0.95,
   response_vpc = FALSE,
   seed = NULL,
+  df_method = c("between-within", "normal", "bootstrap"),
   ...
 )
 }
@@ -21,13 +22,22 @@
 confidence intervals for VPC/ICC. Default is FALSE. Supported for lme4
 models only; \code{brms} models always return a posterior credible interval
 (see Details), so \code{bootstrap = TRUE} is rejected for them.
-For a negative-binomial model (\code{glmer.nb}) the bootstrap refits via
-\code{lme4::refit()}, which holds the dispersion parameter theta fixed at
-its original estimate, so the interval is conditional on the estimated
+Each simulated response is refitted from the fitted model's estimates
+(\code{lme4::refit()}); for a growth fit (\code{fit_maihda(id =, time =)}) it is
+then refitted as \code{fit_maihda()} fits the model, from the further starting
+values and, for a \code{glmer} fit, across a variance bound (see
+\code{\link{fit_maihda}}, arguments \code{time} and \code{stratum_slope}), and
+the best fit is kept, at two to five times the time of one refit.
+For a negative-binomial model (\code{glmer.nb}) the bootstrap refits hold
+the dispersion parameter theta fixed at its original estimate, as
+\code{lme4::refit()} does, so the interval is conditional on the estimated
 theta (theta's own sampling uncertainty is not propagated). The
 \code{ordinal} (clmm) engine has no simulate/refit machinery, so
 \code{bootstrap = TRUE} is rejected there (use \code{engine = "brms"} for
-interval estimates).}
+interval estimates). For a Gaussian model carrying lme4 precision
+\code{weights}, the simulated responses draw each residual at
+\eqn{\sigma / \sqrt{w_i}}, so the interval rests on the same
+\eqn{\sigma^2 / w_i} semantics as the point estimate above.}
 
 \item{n_boot}{Number of bootstrap samples if bootstrap = TRUE. Default is 1000.}
 
@@ -37,11 +47,23 @@ bootstrap CI or the brms posterior credible interval. Default is 0.95.}
 \item{response_vpc}{Logical; for a binomial (lme4) model, also compute the
 response-scale VPC (\code{\link{maihda_vpc_response}}) and attach it as the
 \code{vpc_response} slot. It is estimated by simulation, so it is opt-in (default
-\code{FALSE}) and uses \code{seed} for reproducibility. Ignored for other
-families/engines.}
+\code{FALSE}) and uses \code{seed} for reproducibility. For a Poisson or
+negative-binomial (lme4) model whose only random effect is the stratum
+intercept, the same slot receives the count-scale VPC of Leckie et al. (2020),
+a closed form that needs no seed. Ignored for other families, engines and
+random-effect structures.}
 
 \item{seed}{Optional integer seed for the response-scale VPC simulation when
 \code{response_vpc = TRUE}.}
+
+\item{df_method}{Reference distribution for the fixed-effect p-values and
+intervals of an \code{lme4} fit: \code{"between-within"} (default) a
+\eqn{t} on containment degrees of freedom for a Gaussian fit and a z
+elsewhere, \code{"normal"} a z, \code{"bootstrap"} a null-restricted
+parametric bootstrap costing \code{n_boot} refits \emph{per tested
+fixed-effect coefficient}. \code{"bootstrap"} is the reference to use for a
+GLMM term that is constant within a stratum, such as an adjusted model's
+dimension main effects. Every other engine uses a z regardless.}
 
 \item{...}{Additional arguments (not currently used).}
 }
@@ -55,31 +77,76 @@ A maihda_summary object containing:
   \item{variance_components}{Data frame of variance components. For a
     contextual cross-classified fit (\code{fit_maihda(context = )}) each
     context appears as its own \code{Context: <name>} row}
+  \item{longitudinal}{For a longitudinal (growth-curve) fit, the time-varying
+    summary: \code{vpc_t} (the VPC over a reporting grid, with bootstrap or
+    posterior bands), the per-level variances over that grid, the stratum and
+    individual covariance blocks, and the two \emph{trajectory VPCs}
+    \code{vpc_intercept} and \code{vpc_slope} described below, each with an
+    interval in \code{vpc_intercept_ci} / \code{vpc_slope_ci} (a posterior
+    credible interval for brms, a bootstrap interval for a bootstrapped lme4
+    fit, \code{NA} otherwise) and the basis in
+    \code{trajectory_vpc_method}. \code{NULL} for a cross-sectional fit}
   \item{context}{For a contextual cross-classified fit, the stratum vs.
     context partition: per-context variances and shares, the contexts' total
     share (\code{vpc_context_total}, with an interval when bootstrapped or for
-    brms), and the between-stratum share (\code{vpc_stratum}); \code{NULL}
-    otherwise}
+    brms), and the between-stratum share (\code{vpc_stratum}); for brms also
+    each context's number of levels in the fitted data (\code{context_levels}),
+    and \code{print()} names a context with fewer than 10, whose variance
+    depends on the prior on its standard deviation, and the realised partition
+    in \code{realised}: the same quantities for the effects of the strata and
+    context levels in the data (see the section Realised strata and contexts of
+    \code{\link{maihda}}); \code{NULL} otherwise}
   \item{discriminatory_accuracy}{For a binomial/Bernoulli outcome, the
     \code{maihda_da} object (AUC + MOR) from
-    \code{\link{maihda_discriminatory_accuracy}}; \code{NULL} otherwise. Also
-    \code{NULL} for a crossed-dimensions fit (whose single-stratum between-variance
-    the MOR needs is not defined across crossed random effects) and for a
-    contextual cross-classified fit (\code{fit_maihda(context = )}), where the AUC
-    would be built from predictions that include the context random effects -- a
-    mismatch with the stratum-vs-context partition the summary reports}
+    \code{\link{maihda_discriminatory_accuracy}}; \code{NULL} otherwise. A
+    contextual fit (\code{fit_maihda(context = )}) is included -- its headline AUC
+    is the intersectional-scope concordance that excludes the context random
+    effect. \code{NULL} for a crossed-dimensions fit (whose headline here is the
+    additive/interaction decomposition) and a longitudinal fit}
+  \item{count_vpc}{For a log-link count model, the \code{approximation} the
+    level-1 variance came from, the marginal count \code{lambda} (and
+    \code{theta} / \code{lambda_effective} for the negative binomial) it was
+    evaluated at, the \code{alternatives} all three approximations give at that
+    \code{lambda} (\code{level1_variance} is the one used), and
+    \code{low_count} -- \code{TRUE} below the \eqn{\lambda = 2} threshold above
+    which Nakagawa et al. (2017) report the three agree. These are plug-in
+    values at a single \code{lambda}: on the likelihood engines that is exactly
+    the number in \code{variance_components}, but a \code{brms} summary works
+    draw by draw and reports the posterior median of the level-1 variance there,
+    which differs slightly.
+    \code{NULL} for every other family.}
   \item{vpc_response}{The response-scale VPC (\code{maihda_vpc_response}) when
-    \code{response_vpc = TRUE} for a single-stratum binomial lme4 model;
-    \code{NULL} otherwise (including for crossed-dimensions and contextual fits,
-    whose partition the stratum-only simulation does not match)}
+    \code{response_vpc = TRUE} for a binomial lme4 model, including a contextual
+    fit (the context variance enters the VPC denominator), and the count-scale
+    VPC for a Poisson or negative-binomial lme4 model whose only random effect
+    is the stratum intercept; \code{NULL} otherwise
+    (including for crossed-dimensions and longitudinal fits)}
   \item{stratum_estimates}{Data frame of stratum-specific random effects with labels if available}
-  \item{fixed_effects}{Fixed effects estimates}
+  \item{fixed_effects}{Fixed-effect estimates. For the lme4, WeMix and ordinal
+    engines a data frame with \code{term}, \code{estimate}, \code{se},
+    \code{statistic}, \code{df}, \code{p_value} and the Wald interval
+    \code{lower}/\code{upper} at \code{conf_level}; \code{df} is \code{NA}
+    wherever the reference is a z. The WeMix standard errors are its sandwich
+    (robust) ones. For brms, the \code{brms::fixef()} matrix (posterior mean,
+    \code{Est.Error} and the credible-interval quantiles at
+    \code{conf_level}). Available in a tidy, engine-independent shape from
+    \code{tidy(x, component = "fixed")}}
+  \item{conf_level}{The interval level used for the fixed effects (and, when
+    bootstrapped or Bayesian, the VPC)}
+  \item{df_method}{The reference distribution the \code{fixed_effects} table
+    used, \code{"between-within"}, \code{"normal"} or \code{"bootstrap"}}
   \item{thresholds}{For a cumulative (ordinal) clmm fit, the threshold (cut
     point) estimates with standard errors -- the cumulative model's
     "intercepts"; NULL otherwise}
   \item{model_summary}{Original model summary}
   \item{diagnostics}{Fit-quality diagnostics (singular fit / convergence)
     carried over from the fitted model and reported by the print method}
+  \item{strata_autobin_info}{The auto-binning recipe carried over from the
+    fitted model: for each numeric stratum dimension \code{make_strata()}
+    discretised, its \code{breaks} and \code{labels}. The cut-points are
+    quantiles of the analytic sample, so they define the strata (and hence the
+    estimand); the print method reports them. An empty list when nothing was
+    binned}
 }
 \description{
 Provides a summary of a MAIHDA model including variance partition coefficients
@@ -92,15 +159,31 @@ summarised directly from the posterior draws: the reported estimate is the
 posterior median of the per-draw VPC (\eqn{E[\sigma^2]}-based, not the biased
 \eqn{E[\sigma]^2}) and the interval is a central credible interval at
 \code{conf_level} (default 95\%), so no \code{bootstrap} argument is needed.
-The variance-components table reports the posterior-mean variance components,
-so the stratum proportion shown there may differ slightly from the headline
-VPC because the median of a ratio is not the ratio of means. For non-Gaussian
+The variance-components table of a cross-sectional \code{brms} fit reports the
+posterior median of each variance component -- the between-stratum row is the
+variance the PCV and the Median Odds Ratio use, and its \code{sd} the posterior
+median SD -- with the total and the proportions computed from those rows. The
+stratum proportion therefore equals the headline VPC when the level-1 variance
+is fixed by the link and the stratum is the only random effect, and differs
+from it slightly otherwise, because the median of a ratio is not the ratio of
+medians; in a crossed-dimensions fit, whose between-strata variance is the sum
+of several components, the share those rows add up to can differ markedly from
+the headline VPC when dimensions have few levels. With few strata the posterior
+of a variance is right-skewed, and its
+median overstates the variance (and with it the VPC and the Median Odds
+Ratio); the overstatement shrinks as strata are added. A longitudinal fit's
+table holds the posterior means of its covariance blocks. For non-Gaussian
 \code{brms} families the level-1 (residual) variance uses the usual
-latent-scale approximation; for the count families the marginal expected
-counts are built from the posterior-mean fixed effects and random-effect
-variances rather than per draw, to avoid an expensive
-\eqn{ndraws \times nobs} computation (the negative-binomial \code{shape}
-draws are still propagated).
+latent-scale approximation. For the count families (Poisson, negative
+binomial) the marginal expected counts are propagated \emph{per draw} -- from
+the fixed-part linear-predictor draws and each draw's total random-intercept
+variance -- for the intercept-only VPC structures (strata, crossed-dimensions,
+contextual), so the credible interval reflects fixed-effect and random-effect
+variance uncertainty; the negative-binomial \code{shape} draws are always
+propagated. A random-slope (longitudinal) structure, whose per-row
+random-effect design that fast path does not carry, instead holds the marginal
+expected counts at a posterior-mean plug-in (constant across draws) to avoid an
+expensive \eqn{ndraws \times nobs} computation.
 }
 \section{Interpreting the VPC/ICC}{
  The VPC is the between-stratum variance
@@ -117,14 +200,18 @@ draws are still propagated).
   latent/distributional approximation (\eqn{\pi^2/3} for logistic;
   \eqn{\log(1 + 1/\lambda)} for Poisson per Stryhn et al. 2006 and
   \eqn{\log(1 + 1/\lambda + 1/\theta)} for the negative binomial per Nakagawa,
-  Johnson & Schielzeth 2017, each evaluated at the \emph{marginal} expected
-  count \eqn{\lambda_i = \exp(x_i'\beta + v_i/2)} -- the fixed-part prediction
-  with the log-normal correction for the row's total random-effect variance
-  \eqn{v_i}, which reduces to Nakagawa et al.'s
-  \eqn{\lambda = \exp(\beta_0 + \sigma^2/2)} in the null model -- and
-  averaged over the analytic sample, \emph{not} at the conditional fitted
-  means, whose BLUPs would tie the level-1 variance to the realized random
-  effects), so the
+  Johnson & Schielzeth 2017 -- their \code{"delta"} and \code{"trigamma"}
+  alternatives are available via \code{fit_maihda(count_approximation = )}, and
+  the choice is reported in the printed summary and in \code{count_vpc} because
+  the three diverge materially below a marginal count of 2 -- each evaluated at a single \emph{marginal}
+  expected count \eqn{\lambda}: the mean over the analytic sample of the
+  row-level \eqn{\lambda_i = \exp(x_i'\beta + v_i/2)} -- the fixed-part
+  prediction with the log-normal correction for the row's total random-effect
+  variance \eqn{v_i}. The counts are averaged \emph{before} the transform,
+  which is where the cited \eqn{\lambda} is defined and which reduces to
+  Nakagawa et al.'s \eqn{\lambda = \exp(\beta_0 + \sigma^2/2)} in the null
+  model; \emph{not} at the conditional fitted means, whose BLUPs would tie the
+  level-1 variance to the realized random effects), so the
   VPC is on that latent scale; for a \emph{weighted} Gaussian model the level-1
   variance is the mean conditional residual variance,
   \eqn{\bar{\sigma^2 / w_i}}, since the per-observation residual variance is
@@ -132,6 +219,120 @@ draws are still propagated).
   between-stratum deviation; they equal the \emph{pure} intersectional
   (interaction) component only when the additive main effects of the strata
   variables are included in the model.
+
+  For a Poisson or negative-binomial model the VPC can also be computed on the
+  count scale itself, with no approximation of the level-1 variance (Leckie et
+  al., 2020): see \code{\link{maihda_vpc_response}}, or set
+  \code{response_vpc = TRUE}.
+}
+
+\section{Fixed-effect reference distribution}{
+
+A Gaussian \code{lme4} fit refers each Wald statistic to a \eqn{t} on
+\emph{containment} (between-within) degrees of freedom, reported in the
+\code{df} column: a term absorbed by a random-effect grouping is tested
+against that grouping's units minus the terms it absorbs, and a term absorbed
+by none against \eqn{n} minus the random-effect levels. A random slope counts
+as absorbing. Set \code{df_method = "normal"} for a z instead.
+
+A GLMM, a WeMix pseudo-ML fit and an \code{ordinal::clmm} fit have no
+finite-sample \eqn{t} and use the Wald z; a brms summary reports the
+posterior. For Kenward-Roger or Satterthwaite, apply \pkg{pbkrtest} or
+\pkg{lmerTest} to \code{x$model}.
+
+\code{df_method = "bootstrap"} replaces that reference for an \code{lme4} fit
+with at least one fixed-effect term, and is the one to use for a GLMM, whose z
+is anticonservative for a term constant within a stratum, most of all when the
+strata are few. For each fixed-effect coefficient the model is refitted with
+that coefficient \emph{constrained to zero}, \code{n_boot} responses are
+simulated from the restricted fit, the full model is refitted on each, and the
+observed Wald statistic is referred to the resulting distribution of
+\eqn{|t^*|}. The restricted fit of a growth model is made as \code{fit_maihda()}
+makes the model's own fit, with the same refits from further starting values
+(\code{\link{fit_maihda}}, arguments \code{time} and \code{stratum_slope}), and so
+is the full model's refit on each draw (see \code{bootstrap}). The
+estimate and standard error are unchanged. The p-value is
+\eqn{(1 + \#\{|t^*| \ge |t|\}) / (B + 1)}{(1 + #{|t*| >= |t|}) / (B + 1)}
+over the \eqn{B} refits that succeeded, and the interval is the estimate plus
+or minus a critical value read from the same draws, times the standard error,
+so zero falls outside it exactly when the p-value is at most
+\code{1 - conf_level}. That agreement is algebraic, not a coverage guarantee.
+\code{df} is \code{NA}, and so are the intercept's p-value and interval: an
+intercept has no null model to simulate from.
+
+The restriction is on the coefficient, not on its term. For a term spanning
+several design columns (a factor with three or more levels, a polynomial, an
+interaction between factors) each column is tested against its own null: that
+column zeroed, the siblings kept and re-estimated. What the constraint means
+follows the fitted contrasts: treatment coding merges that level into the
+reference, sum coding sets its deviation from the unweighted mean of the level
+means to zero.
+
+The bootstrap is an approximation, not an exact test. Its null is a fit
+estimated from the same data, so it is least reliable with few strata, where
+the stratum variance is often estimated at exactly zero; a p-value near the
+threshold from such a fit deserves little weight. \code{n_boot} sets the Monte
+Carlo resolution, not that approximation: the p-value lies on a grid of step
+\eqn{1 / (B + 1)}, and more draws only shrink its Monte Carlo error. No
+\code{n_boot} makes the test exact.
+
+It costs \code{n_boot} refits \emph{per tested coefficient} -- a \eqn{k}-level
+factor costs \eqn{k - 1} blocks -- and is separate from the
+\code{bootstrap = TRUE} VPC interval. A Gaussian refit takes milliseconds, a
+binomial one about a second at \eqn{n = 1000} and tens of seconds at
+\eqn{n = 6000}, so \code{n_boot = 199} is the usual choice for a GLMM.
+\code{summary()} warns when the draws are too few for the requested level; the
+check is level-aware: 99, 199 and 999 are the smallest counts that put ten
+draws beyond the cut-off at the 10\%, 5\% and 1\% levels.
+}
+
+\section{Two VPCs for a longitudinal fit}{
+
+A longitudinal summary reports \strong{two different variance partitions}, and
+they are not interchangeable. They differ in one term of the denominator: the
+level-1 (occasion) residual variance \eqn{\sigma^2_e}, which in a growth model is
+\emph{within-individual volatility} -- how far a single measurement falls from
+that person's own smooth trajectory. It mixes measurement error, genuine
+short-term fluctuation, and any misfit of the assumed functional form. A
+cross-sectional MAIHDA cannot separate it from between-individual variance at
+all; repeated measures are what split the two.
+
+\strong{The headline VPC} (\code{vpc}, and \code{longitudinal$vpc_t} over time)
+keeps it:
+\deqn{VPC_S(t) = \frac{Var_S(t)}{Var_S(t) + Var_I(t) + \sigma^2_e}.}
+This is the discriminatory-accuracy question -- how much of an \emph{observed
+measurement} at time \eqn{t} a stratum accounts for -- and it is the quantity
+comparable to published cross-sectional MAIHDA VPCs. Report this one unless you
+specifically mean the trajectory question.
+
+\strong{The trajectory VPCs} (\code{longitudinal$vpc_intercept} and
+\code{longitudinal$vpc_slope}) drop it, following Bell et al. (2024), equation
+(5):
+\deqn{VPC_{intercept} = \frac{Var_S(t_0)}{Var_S(t_0) + Var_I(t_0)}, \qquad
+      VPC_{slope} = \frac{SlopeVar_S(t_0)}{SlopeVar_S(t_0) + SlopeVar_I(t_0)}.}
+These ask how intersectionally patterned people's \emph{trajectories} are i.e., what
+share of the between-individual variation in where a trajectory starts, and in how
+fast it changes, lies between strata. Because \eqn{\sigma^2_e} is absent neither is
+affected by how noisy the outcome measure is, which makes them comparable across
+studies using different instruments.
+
+Both are evaluated at the baseline \eqn{t_0} (\code{ref_time}, the earliest
+observed time), pairing with \code{PCV_intercept} and \code{PCV_slope} from
+\code{maihda(decomposition = "longitudinal")}. The intercept VPC depends on where
+time is zeroed and the slope VPC does not, so an intercept VPC computed at another
+reference time, such as the mean age of Bell et al.'s examples, differs from the
+one reported here. \code{vpc_slope} is \code{NA} when the model was fit with
+\code{stratum_slope = FALSE} (no between-stratum slope variance exists to take a
+share of).
+
+Both come with an interval in \code{vpc_intercept_ci} / \code{vpc_slope_ci},
+and \code{trajectory_vpc_method} records its basis. For a \code{brms} fit the
+two shares are computed \emph{per posterior draw} and reported as the posterior
+median with a credible interval, matching \code{vpc_t} and the headline VPC on
+the same fit; for an \code{lme4} fit the point estimates are the plug-in from
+the fitted covariance blocks and \code{summary(bootstrap = TRUE)} adds a
+parametric-bootstrap interval (\code{NA} without one). Report the interval:
+these shares are poorly determined when the strata are few.
 }
 
 \examples{
@@ -144,4 +345,15 @@ summary_result <- summary(model)
 # summary_boot <- summary(model, bootstrap = TRUE, n_boot = 50)
 }
 
+}
+\references{
+Bell, A., Evans, C., Holman, D., & Leckie, G. (2024). Extending intersectional
+multilevel analysis of individual heterogeneity and discriminatory accuracy
+(MAIHDA) to study individual longitudinal trajectories, with application to
+mental health in the UK. \emph{Social Science & Medicine}, 351, 116955.
+\doi{10.1016/j.socscimed.2024.116955}
+
+Leckie, G., Browne, W. J., Goldstein, H., Merlo, J., & Austin, P. C. (2020).
+Partitioning variation in multilevel models for count data.
+\emph{Psychological Methods}, 25(6), 787-801. \doi{10.1037/met0000265}
 }

@@ -47,16 +47,61 @@ this happened. For a single model the criterion is reported as fitted (the
 \code{estimator} column then reads \code{"REML"}).
 
 \strong{Comparability.} Like the VPC, information criteria are only comparable
-across models fitted to the \emph{same} analytic sample (same rows and outcome).
-AIC/BIC additionally require the same response distribution -- they are not
-comparable across families (e.g. a Gaussian vs a Poisson fit), nor between the
-likelihood engines and \code{brms} (AIC/BIC vs WAIC/LOOIC are different scales).
-\code{maihda_ic()} does not enforce this; \code{\link{compare_maihda}} warns when
-the supplied models differ in outcome, sample, or family.
+across models fitted to the \emph{same} analytic sample (same rows and outcome)
+with the \emph{same} weights -- prior (precision) weights and sampling
+(design) weights each change which likelihood, or pseudo-likelihood, is being
+maximised, so the criteria of a weighted and an unweighted fit of the identical
+model are not on a common scale. Unlike the VPC and PCV, they do not always need
+the same family: a criterion compares log-likelihoods of the same observations,
+so Poisson and negative-binomial fits of the same counts are comparable, as are
+binomial or cumulative (ordinal) fits that differ in their link, and a delta is
+reported for them. Any other change of family or link withholds it -- a Gaussian
+vs a Poisson fit compares a density with a probability, and the continuous
+families are compared only within the same family and link. Criteria are never
+comparable between the likelihood engines and \code{brms} (AIC/BIC vs
+WAIC/LOOIC are different scales). When the supplied models differ in any of
+these respects \code{maihda_ic()} warns and omits the \code{delta} column,
+still reporting each model's own criteria.
+
+\strong{Parameter count.} \code{df} counts the estimated parameters. A
+negative-binomial \code{lme4} fit with a fixed \code{theta}
+(\code{family = MASS::negative.binomial(theta)}) therefore has one fewer than
+\code{lme4}'s own count, which includes theta for every negative-binomial
+family, so its \code{AIC} is 2 and its \code{BIC} \code{log(n)} below
+\code{AIC()} and \code{BIC()} on the fitted model; \code{glm()} counts that
+family the same way. A \code{family = "negbinomial"} fit estimates theta and
+counts it.
+
+\strong{lme4 GLMM likelihoods.} The criteria of a quadrature fit (\code{nAGQ > 1})
+are the complete likelihood and compare with a Laplace fit's: where \code{lme4}'s
+\code{logLik()} of such a fit leaves out the saturated log-likelihood,
+\code{maihda_ic()} adds it back. A \code{glmer} fit of a family with a scale
+parameter -- a Gaussian with a non-identity link, Gamma, inverse Gaussian -- reports
+\code{NA} criteria (estimator \code{"ML (glmer scale family: no likelihood)"}):
+\code{lme4}'s \code{logLik()} for those families is not the marginal likelihood, and
+on test fits it exceeded the largest value that likelihood attains.
+
+\strong{Predictive target of the Bayesian criteria.} \code{brms::waic()} and
+\code{brms::loo()} are computed from pointwise log-likelihoods
+\emph{conditional on the fitted random effects}, so WAIC/LOOIC assess
+prediction of new observations \emph{within the strata (and persons or
+contexts) already represented in the data} -- not performance for a new,
+unseen intersectional stratum. Choosing between strata definitions on LOOIC
+therefore compares conditional predictive fit; generalisation to new strata
+is a leave-one-group-out cross-validation question (e.g.
+\code{brms::kfold()} with \code{group = "stratum"}), which this package does
+not wrap. AIC/BIC for the likelihood engines are instead computed from the
+\emph{marginal} likelihood (random effects integrated out) -- a further
+reason the likelihood and Bayesian criteria are never comparable with each
+other.
 
 \strong{Design-weighted fits.} For the \code{wemix} (design-weighted) engine the
 criteria are reported as \code{NA}: a pseudo-likelihood with sampling weights does
-not define a standard AIC/BIC.
+not define a standard AIC/BIC. A \code{brms} fit with \code{sampling_weights} is
+treated the same way: its sampling weights enter as likelihood weights, giving a
+pseudo-posterior whose weighted pointwise log-likelihoods are not log predictive
+densities, so WAIC/LOOIC are likewise reported as \code{NA} (the
+\code{estimator} column reads \code{"Bayesian (weighted pseudo-posterior)"}).
 }
 \examples{
 \donttest{

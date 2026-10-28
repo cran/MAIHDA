@@ -28,10 +28,12 @@
 #' \code{write.csv(maihda_table(a)$models, ...)} or pass it to \code{knitr::kable()}):
 #' statistics are rows, models are columns, and each estimate has accompanying
 #' \code{*_lower}/\code{*_upper} columns that hold the confidence/credible interval
-#' when one is available (the VPC bootstrap or posterior interval, and the bootstrap
-#' PCV interval) and \code{NA} otherwise. The intercept and the variance/SD rows are
-#' point estimates. The \code{print()} method renders the same table in the
-#' familiar \dQuote{estimate [low, high]} layout.
+#' when one is available (the intercept's interval, the VPC bootstrap or posterior
+#' interval, and the bootstrap PCV interval) and \code{NA} otherwise. The intercept
+#' carries the same interval \code{summary()} reports for it -- a Wald interval
+#' for the likelihood engines, a credible interval for brms. The variance and SD
+#' rows are point estimates. The \code{print()} method renders the same table in the familiar
+#' \dQuote{estimate [low, high]} layout.
 #'
 #' For a \code{"crossed-dimensions"} analysis (one model, no null/adjusted pair) the
 #' results table has a single estimate column and gains \dQuote{Additive share} /
@@ -83,9 +85,10 @@
 #'     produced}
 #'   \item{models_note}{a character note (or \code{NULL}) flagging that the PCV was
 #'     computed from maximum-likelihood-refitted between-stratum variances while the
-#'     variance/VPC rows are each model's own (REML) estimate, so the PCV need not
-#'     equal the reduction implied by the displayed variance rows; see
-#'     \code{\link{calculate_pcv}}}
+#'     variance/VPC rows are each model's own (REML) estimate -- or from REML-type
+#'     variances (\code{estimation = "REML"}) while those rows are maximum-likelihood
+#'     estimates -- so the PCV need not equal the reduction implied by the displayed
+#'     variance rows; see \code{\link{calculate_pcv}}}
 #'   \item{model_keys, model_labels}{the estimate-column keys and their display labels}
 #'   \item{family, engine, mode, scale, ranked_by, n_obs, n_strata_total, context_vars}{
 #'     metadata used by \code{print()}}
@@ -174,8 +177,9 @@ maihda_table <- function(x, n_strata = 10L, scale = c("response", "link"),
   }
 
   models_df <- maihda_build_results_table(model_stats, pcv)
-  # Flag the REML-variance-rows / ML-based-PCV basis mismatch (two-model lme4 fits)
-  # so a reader does not misread the PCV as inconsistent with the variance rows.
+  # Flag a PCV computed on a different basis from the variance rows (an ML-refit or a
+  # REML-type PCV on lme4) so a reader does not misread the PCV as inconsistent with
+  # the variance rows.
   models_note <- maihda_table_pcv_note(model_stats, pcv, model_keys,
                                        primary_model$engine)
 
@@ -293,28 +297,42 @@ maihda_collect_model_stats <- function(s) {
   st
 }
 
-# The intercept (grand mean, beta0) from a summary's fixed_effects, as a point
-# estimate c(est, NA, NA). Handles the lme4/wemix/ordinal data-frame form
-# (term/estimate) and the brms matrix form (rownames + an "Estimate" column). A
-# cumulative (ordinal) model has thresholds rather than a single intercept, so it
-# returns NA -- the thresholds are reported by summary()$thresholds.
+# The intercept (grand mean, beta0) from a summary's fixed_effects, as
+# c(est, lower, upper). Handles the lme4/wemix/ordinal data-frame form
+# (term/estimate plus the Wald interval in lower/upper) and the brms matrix form
+# (rownames + an "Estimate" column and two quantile columns). The interval is
+# whatever the summary computed at its conf_level; NA when the summary carries
+# none (a pre-0.2.2 object). A cumulative (ordinal) model has thresholds rather
+# than a single intercept, so it returns NA -- the thresholds are reported by
+# summary()$thresholds.
 maihda_extract_intercept <- function(s) {
   na3 <- c(NA_real_, NA_real_, NA_real_)
   fe <- s$fixed_effects
   if (is.null(fe)) return(na3)
 
   if (is.matrix(fe)) {
-    rn <- rownames(fe)
-    i <- which(rn %in% c("Intercept", "(Intercept)"))
+    cn <- colnames(fe)
+    i <- which(rownames(fe) %in% c("Intercept", "(Intercept)"))
     if (length(i) == 0) return(na3)
-    est_col <- if ("Estimate" %in% colnames(fe)) "Estimate" else 1L
-    return(c(as.numeric(fe[i[1], est_col]), NA_real_, NA_real_))
+    est_col <- if ("Estimate" %in% cn) "Estimate" else 1L
+    # Credible interval = the two extreme quantile columns, at whatever level the
+    # fit was summarised (Q2.5/Q97.5 at the 95% default).
+    qcol <- grep("^Q[0-9.]+$", cn, value = TRUE)
+    qval <- suppressWarnings(as.numeric(sub("^Q", "", qcol)))
+    if (length(qcol) < 2L || anyNA(qval)) {
+      return(c(as.numeric(fe[i[1], est_col]), NA_real_, NA_real_))
+    }
+    return(c(as.numeric(fe[i[1], est_col]),
+             as.numeric(fe[i[1], qcol[which.min(qval)]]),
+             as.numeric(fe[i[1], qcol[which.max(qval)]])))
   }
 
   if (!all(c("term", "estimate") %in% names(fe))) return(na3)
   i <- which(fe$term %in% c("(Intercept)", "Intercept"))
   if (length(i) == 0) return(na3)
-  c(as.numeric(fe$estimate[i[1]]), NA_real_, NA_real_)
+  c(as.numeric(fe$estimate[i[1]]),
+    if ("lower" %in% names(fe)) as.numeric(fe$lower[i[1]]) else NA_real_,
+    if ("upper" %in% names(fe)) as.numeric(fe$upper[i[1]]) else NA_real_)
 }
 
 # The between-stratum (intersectional) variance from a summary, regardless of fit
@@ -397,16 +415,22 @@ maihda_build_results_table <- function(model_stats, pcv = NULL) {
 }
 
 # Note flagging that a two-model PCV was computed on a different variance basis than
-# the displayed single-model variance rows. calculate_pcv() refits a Gaussian lme4
-# fit to ML before differencing the between-stratum variances (REML variances are not
-# comparable across models with different fixed effects; see ?calculate_pcv), whereas
-# the "Between-stratum variance"/SD and VPC/ICC rows are read from each model's own
-# (REML) fit -- the same quantities summary() reports. When the two bases differ, the
-# displayed PCV does not equal (var_null - var_adj)/var_null read off the table, which
-# reads as an inconsistency unless explained. Returns NULL (no note) when the bases
-# coincide: an already-ML engine (glmer/brms/wemix/ordinal), or a boundary null where
-# calculate_pcv() kept the REML fit -- detected directly by comparing the PCV's own
-# between-stratum variances to the displayed ones rather than proxying on isREML().
+# the displayed single-model variance rows. Two cases. With estimation = "ML",
+# calculate_pcv() refits a Gaussian lme4 fit to ML before differencing the
+# between-stratum variances (see ?calculate_pcv), whereas the "Between-stratum
+# variance"/SD and VPC/ICC rows are read from each model's own (REML) fit -- the same
+# quantities summary() reports. With estimation = "REML" on a glmer pair the PCV
+# compares REML-type variances, whereas those rows are the fits' own
+# maximum-likelihood estimates. When the two
+# bases differ, the displayed PCV
+# does not equal (var_null - var_adj)/var_null read off the table, which reads as an
+# inconsistency unless explained. Returns NULL (no note) when the bases coincide: the
+# default estimation = "fitted" on lme4 (the PCV then uses the same variances shown,
+# REML for an lmer fit and maximum likelihood for a glmer fit), the wemix/ordinal
+# engines, a brms analysis (the variance rows are the posterior medians the PCV
+# compares), or a boundary null where the ML refit
+# was skipped -- detected directly by comparing the PCV's own between-stratum variances
+# to the displayed ones rather than proxying on isREML() or the estimation argument.
 maihda_table_pcv_note <- function(model_stats, pcv, model_keys, engine) {
   if (is.null(pcv) || !identical(engine, "lme4") ||
       !all(c("null", "adjusted") %in% model_keys)) {
@@ -419,11 +443,33 @@ maihda_table_pcv_note <- function(model_stats, pcv, model_keys, engine) {
   if (any(is.na(c(v1, v2, disp1, disp2)))) return(NULL)
   differs <- function(a, b) isTRUE(abs(a - b) > 1e-8 + 1e-6 * max(abs(a), abs(b)))
   if (!differs(disp1, v1) && !differs(disp2, v2)) return(NULL)
-  paste0("The PCV is computed from maximum-likelihood-refitted between-stratum ",
-         "variances (required for a valid cross-model comparison; see ",
-         "?calculate_pcv), while the Between-stratum variance/SD and VPC/ICC rows are ",
-         "each model's own REML estimate. The PCV therefore need not equal the ",
-         "variance reduction implied by the displayed variance rows.")
+  # A boundary model keeps its REML fit even under estimation = "ML" (the refit is
+  # skipped), so the comparison is then on a MIXED basis, not a pure ML one -- say so
+  # rather than present it as the pure ML comparison that was requested.
+  basis <- pcv$estimation_used
+  if (is.null(basis)) basis <- pcv$estimation
+  # estimation = "REML" on a glmer pair: REML-type variances against rows that are the
+  # fits' own maximum-likelihood estimates.
+  if (identical(basis, "REML")) {
+    return(paste0(
+      "The PCV is computed from REML-type between-stratum variances (estimation = ",
+      "\"REML\"; see ?calculate_pcv), while the Between-stratum variance/SD and ",
+      "VPC/ICC rows are each model's own maximum-likelihood estimate. The PCV ",
+      "therefore need not equal the variance reduction implied by the displayed ",
+      "variance rows."))
+  }
+  ml_desc <- if (identical(basis, "mixed")) {
+    paste0("maximum-likelihood-refitted between-stratum variances (estimation = ",
+           "\"ML\"; a between-stratum variance at the boundary kept its REML fit, so ",
+           "this is a mixed, not a pure ML, comparison")
+  } else {
+    paste0("maximum-likelihood-refitted between-stratum variances (estimation = ",
+           "\"ML\"")
+  }
+  paste0("The PCV is computed from ", ml_desc, "; see ?calculate_pcv), while the ",
+         "Between-stratum variance/SD and VPC/ICC rows are each model's own REML ",
+         "estimate. The PCV therefore need not equal the variance reduction implied ",
+         "by the displayed variance rows.")
 }
 
 # Rank every stratum by its model-predicted outcome, reusing the same per-stratum
@@ -434,7 +480,9 @@ maihda_table_pcv_note <- function(model_stats, pcv, model_keys, engine) {
 maihda_strata_ranking <- function(object, summary_obj, scale = c("response", "link")) {
   scale <- match.arg(scale)
   if (!is.null(object$longitudinal_info)) {
-    maihda_stop_longitudinal_scalar("A ranked-strata table")
+    maihda_stop_longitudinal_scalar(
+      "A ranked-strata table",
+      stratum_slope = maihda_object_stratum_slope(object))
   }
   pred <- switch(object$engine,
     lme4 = maihda_stratum_predictions_lme4(object, summary_obj, scale = scale),
@@ -557,7 +605,8 @@ print.maihda_table <- function(x, digits = x$digits, ...) {
     cat("\nRanked strata: ", x$strata_note, "\n", sep = "")
   }
 
-  cat("\nEstimates are point values unless a [low, high] interval is shown ",
-      "(VPC/PCV).\n", sep = "")
+  cat("\nEstimates are point values unless a [low, high] interval is shown. The\n",
+      "intercept interval is the Wald one summary() reports; the variance and SD\n",
+      "rows carry no interval.\n", sep = "")
   invisible(x)
 }

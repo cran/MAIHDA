@@ -195,6 +195,38 @@ test_that("fit_maihda fits a cumulative model via clmm with auto-switch and cont
   )
 })
 
+test_that("print() of an ordinal fit stays compact and never echoes the data", {
+  skip_on_cran()
+  skip_if_not_installed("ordinal")
+
+  d <- make_ord_data()
+  m <- fit_ord(d)
+  out <- capture.output(print(m))
+
+  # Regression (2026-09-01): the clmm call embedded the analytic data FRAME itself,
+  # and ordinal's print.clmm/summary.clmm deparse call$data -- so printing an
+  # ordinal fit dumped every fitted row (~2,100 lines on a 3,000-row example).
+  # These 800 rows would blow the cap the same way on any relapse.
+  expect_lt(length(out), 60)
+  expect_false(any(grepl("structure(list(", out, fixed = TRUE)))
+
+  # The header, the fit-diagnostics block and the clmm summary all survive.
+  expect_true(any(grepl("^Engine: ordinal", out)))
+  expect_true(any(grepl("^Family: cumulative", out)))
+  expect_true(any(grepl("^Formula: y ~ x", out)))
+  expect_true(any(grepl("Underlying model:", out, fixed = TRUE)))
+  expect_true(any(grepl("^formula: y ~ x", out)))
+  expect_true(any(grepl("Random effects:", out, fixed = TRUE)))
+  expect_true(any(grepl("Thresholds:", out, fixed = TRUE)))
+  # The data line names the frame rather than printing it.
+  expect_true(any(grepl("^data:[[:space:]]+data[[:space:]]*$", out)))
+
+  # Same defect reached the fitted object users pull out directly.
+  expect_lt(length(capture.output(print(m$model))), 40)
+  expect_lt(length(capture.output(print(summary(m$model)))), 40)
+  expect_lt(length(deparse(m$model$call)), 5)
+})
+
 test_that("clmm prefilters on the evaluated frame, not raw complete.cases", {
   skip_on_cran()
   skip_if_not_installed("ordinal")
@@ -247,7 +279,8 @@ test_that("summary of a clmm MAIHDA reports the latent-scale VPC and thresholds"
 
   # DA stays binomial-only; bootstrap is rejected with the brms recommendation.
   expect_null(s$discriminatory_accuracy)
-  expect_error(summary(m, bootstrap = TRUE, n_boot = 10), "engine = \"brms\"")
+  expect_error(suppressWarnings(summary(m, bootstrap = TRUE, n_boot = 10)),
+               "engine = \"brms\"")
 
   # A probit fit uses latent residual variance 1.
   mp <- suppressMessages(suppressWarnings(
@@ -294,15 +327,19 @@ test_that("clmm predictions work on both scales and respect newdata strata", {
   )
 
   # Public individual predictions reject an unseen stratum by default rather than
-  # silently returning a fixed-only (0-random-effect) prediction.
+  # silently returning a fixed-only (0-random-effect) prediction. The stratum is
+  # supplied DIRECTLY, so the dimension columns are dropped: leaving them in place
+  # would keep identifying the copied row's own stratum, which a supplied 'stratum'
+  # must agree with (see the contradiction check in maihda_prepare_prediction_data).
   nd_unseen <- m$data[1, , drop = FALSE]
+  nd_unseen[c("gender", "race", "edu")] <- NULL
   nd_unseen$stratum <- "999"
   expect_error(
     predict_maihda(m, newdata = nd_unseen, type = "individual", scale = "link"),
     "not present in the fitted model"
   )
 
-  # allow_new_levels = TRUE opts into the population average: the latent location
+  # allow_new_levels = TRUE opts into the zero-effect fallback: the latent location
   # equals the fixed part with the stratum random effect dropped (mapped to 0).
   pa_link <- predict_maihda(m, newdata = nd_unseen, type = "individual",
                             scale = "link", allow_new_levels = TRUE)
@@ -397,7 +434,8 @@ test_that("calculate_pcv and maihda() run the two-model ordinal decomposition", 
   pcv <- calculate_pcv(a$model, a$model_adjusted)
   expect_equal(pcv$pcv, a$pcv$pcv)
   expect_error(
-    calculate_pcv(a$model, a$model_adjusted, bootstrap = TRUE, n_boot = 10),
+    suppressWarnings(
+      calculate_pcv(a$model, a$model_adjusted, bootstrap = TRUE, n_boot = 10)),
     "point estimate"
   )
 
@@ -610,12 +648,36 @@ test_that("brms cumulative summary returns a draws-based latent VPC", {
   skip_if_not_installed("brms")
 
   d <- make_ord_data(n = 600)
+  # Sampler settings are load-bearing, not incidental. At the old chains = 2,
+  # iter = 500 this fit reached max Rhat 1.08 with a bulk ESS of 26 on the
+  # thresholds -- brms warned "some Rhats are > 1.05" out of the summary() call
+  # below, and every assertion still passed, so the block proved only that the
+  # code ran. iter = 2000 (1000 warmup) converges; keep the seed so the chains
+  # are reproducible and the convergence assertion cannot flake.
   m <- suppressWarnings(suppressMessages(
     fit_maihda(y ~ x + (1 | gender:race:edu), data = d, family = "ordinal",
-               engine = "brms", chains = 2, iter = 500, refresh = 0, seed = 1)))
+               engine = "brms", chains = 2, iter = 2000, warmup = 1000,
+               refresh = 0, seed = 1)))
+  # Guard the fixture: if a future brms/Stan release degrades the mixing, this
+  # fails loudly instead of letting the weak assertions below pass on noise.
+  # Also exercises maihda_fit_diagnostics()'s brms branch on a real Stan fit; the
+  # verdict's direction and its 1.01 cut are pinned deterministically against mock
+  # fits in test-audit-2026-07-26.R and test-audit-2026-08-31.R, which is what
+  # keeps this guard from being vacuous. isTRUE() so a dropped or NULL
+  # $diagnostics fails here rather than passing quietly.
+  expect_true(isTRUE(m$diagnostics$converged))
+
   s <- summary(m)
   expect_true(s$vpc$estimate > 0 && s$vpc$estimate < 1)
   expect_true(is.finite(s$vpc$ci_lower) && is.finite(s$vpc$ci_upper))
+  # Recovery, not just finiteness. Use the REALIZED between-stratum variance, not
+  # the nominal sd_u: make_ord_data draws 12 effects at sd_u = 0.6 and this seed
+  # realizes sd 0.8183 (var 0.6695), so against the logistic level-1 variance
+  # pi^2/3 the latent VPC is 0.6695 / (0.6695 + 3.2899) = 0.169. A converged
+  # posterior must cover it; the old chains = 2, iter = 500 fit could not support
+  # a claim this sharp.
+  expect_true(s$vpc$ci_lower < 0.169 && 0.169 < s$vpc$ci_upper)
+  expect_true(s$vpc$estimate >= s$vpc$ci_lower && s$vpc$estimate <= s$vpc$ci_upper)
 
   # Response-scale predictions collapse the fitted() probability array to the
   # expected category score.

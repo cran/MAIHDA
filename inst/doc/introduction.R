@@ -95,6 +95,15 @@ stepwise_results <- stepwise_pcv(
 
 print(stepwise_results)
 
+## ----bb-importance------------------------------------------------------------
+imp <- pcv_importance(
+  data    = analysis$model$original_data,
+  outcome = "BMI",
+  vars    = c("Gender", "Race", "Education")   # order does not matter
+)
+print(imp)
+plot(imp)
+
 ## ----bb-da, eval=FALSE--------------------------------------------------------
 # # A binary-outcome analysis
 # ob <- maihda(Obese ~ Gender + Race + (1 | Gender:Race), data = maihda_health_data,

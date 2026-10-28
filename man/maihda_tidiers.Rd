@@ -32,9 +32,9 @@ a \code{maihda_model} (from \code{\link{fit_maihda}}), or a
   \item{\code{"variance"}}{the variance-components table (between-stratum, any
     other random effects, residual, and total) with each component's variance,
     SD and proportion.}
-  \item{\code{"fixed"}}{the fixed-effect estimates, in broom's
-    \code{term}/\code{estimate}/\code{std.error} shape (with
-    \code{conf.low}/\code{conf.high} for the brms engine).}
+  \item{\code{"fixed"}}{the fixed-effect estimates in broom's
+    \code{term}/\code{estimate}/\code{std.error}/\code{statistic}/
+    \code{p.value}/\code{conf.low}/\code{conf.high} shape.}
 }}
 
 \item{...}{Unused, for S3 consistency.}
@@ -47,7 +47,8 @@ A \code{tibble}. For \code{component = "strata"}: columns
   \code{stratum}, \code{label}, \code{estimate}, \code{std.error},
   \code{conf.low}, \code{conf.high}. For \code{"variance"}: \code{component},
   \code{variance}, \code{sd}, \code{proportion}. For \code{"fixed"}: \code{term},
-  \code{estimate}, \code{std.error}, \code{conf.low}, \code{conf.high}.
+  \code{estimate}, \code{std.error}, \code{statistic}, \code{df}, \code{p.value},
+  \code{conf.low}, \code{conf.high}.
 }
 \description{
 \code{\link[generics]{tidy}} methods that return the MAIHDA estimates as a tidy
@@ -55,6 +56,23 @@ A \code{tibble}. For \code{component = "strata"}: columns
 \code{ggplot2}. They read the slots that \code{\link{summary.maihda_model}}
 already computes and add no new statistics.
 }
+\section{Fixed-effect statistics}{
+ For the lme4, WeMix and ordinal engines
+  \code{statistic} is the Wald statistic (\code{estimate / std.error}),
+  \code{p.value} its two-sided p-value, \code{conf.low}/\code{conf.high} the
+  matching Wald interval at the summary's \code{conf_level}, and \code{df}
+  the denominator degrees of freedom they were built on.
+
+  A Gaussian \pkg{lme4} fit reports containment (between-within) \code{df}
+  and a \eqn{t}; every other engine leaves \code{df} \code{NA} and uses a z.
+  Under \code{summary(df_method = "bootstrap")} \code{p.value} and the
+  interval come from the parametric bootstrap and \code{df} is \code{NA}.
+  See \code{\link{summary.maihda_model}}. For brms the estimate is the
+  posterior mean with its \code{Est.Error} and credible interval, and
+  \code{statistic}/\code{df}/\code{p.value} are \code{NA}. Standard errors
+  are \code{NA} where they are undefined (a boundary fit).
+}
+
 \examples{
 data("maihda_health_data")
 m <- fit_maihda(BMI ~ Age + (1 | Gender:Race:Education), data = maihda_health_data)

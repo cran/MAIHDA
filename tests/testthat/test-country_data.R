@@ -29,17 +29,24 @@ test_that("maihda_country_data is available and has correct structure", {
 test_that("maihda_country_data showcases differing intersectional VPC across countries", {
   data(maihda_country_data, envir = environment())
 
-  cmp <- compare_maihda_groups(
+  # The PISA strata are (documented as) essentially additive, so several countries'
+  # adjusted two-model fits land on the boundary (singular) and their PCV saturates
+  # near 100%. That is surfaced ONLY via the pcv_status = "singular" column, with NO
+  # warning (a singular adjusted fit cannot be told apart from genuinely additive
+  # strata, the legitimate result here), so the comparison is warning-free.
+  expect_no_warning(cmp <- compare_maihda_groups(
     math ~ 1 + (1 | gender:ses),
     data = maihda_country_data,
     group = "country"
-  )
+  ))
 
   # One estimable row per country, each with the full 6 (gender x ses) strata
   expect_equal(nrow(cmp), 6)
   expect_true(all(cmp$status == "ok"))
   expect_true(all(cmp$n_strata == 6))
   expect_true(all(is.finite(cmp$vpc) & cmp$vpc >= 0 & cmp$vpc <= 1))
+  # The near-100% PCV from the additive strata is flagged, never a silent NA.
+  expect_true(all(cmp$pcv_status %in% c("ok", "singular")))
 
   # The point of the dataset: VPC genuinely varies across countries.
   expect_gt(diff(range(cmp$vpc)), 0.02)

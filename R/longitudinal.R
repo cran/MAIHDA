@@ -39,13 +39,41 @@
 # plots, prediction newdata -- stays on the original scale; only the model terms
 # use the derived column below, and a(t)' Sigma a(t) evaluations subtract the
 # stored centering offset first.
+#
+# INTERNAL TIME SCALING. A growth fit lme4 makes, with lmer() or glmer(), is also fit on
+# time divided by a power of ten k chosen so that the time span lies in [1, 10): k = 1
+# for a span that already does (waves 0-9, years 0-9), 1000 for days over five years,
+# 0.1 for a span of 0.4. lme4 optimises the random-effect covariance on its relative
+# Cholesky scale, where a slope entry is per unit of time (and a t^d entry per unit to
+# the power d): counted in fine units these entries are tiny next to the intercept's,
+# and lmer stops far from the optimum while recording the fit as converged -- every
+# linear growth fit of a balanced 16-stratum design in days (up to 198 REML units above
+# the exact optimum; refitML() off in 360 of 376), and quadratic fits from a span of
+# about 12 (in days every one of 108, by a median of 719 units). On (t - c) / k with the
+# restarts below, the linear fits of that design reach the REML and ML optima (0 and 1
+# of 400 more than 0.01 above them), and its quadratic fits, with restarts of their own,
+# reach the REML optimum (0 of 672 more than 0.01 above it at six time units, 2 more than
+# 0.001).
+# The stored fit stays on the internal time, so a refit made from it -- refitML() for
+# estimation = "ML", maihda_ic(), the bootstrap refits -- solves the well-conditioned
+# problem too; every quantity in units of time is converted back where it is read: the
+# covariance blocks (maihda_re_block_lme4()), the stratum coefficients
+# (maihda_longitudinal_stratum_re()), the fixed effects (maihda_lng_unscale_fixed()),
+# the REML log-likelihood of maihda_ic(), the gap of the residual-autocorrelation check,
+# and a time put into the model frame ((t - c) / k: maihda_lng_internal_time()).
+# A glmer growth fit is refitted on the internal time as maihda_fit_glmer_growth() says:
+# the scaling alone moves glmer's failures rather than removing them. Not scaled
+# (maihda_longitudinal_scales_time()): a brms fit, whose default prior on every
+# random-effect SD (student_t(3, 0, s) with s set from the response, the same with time
+# in waves or in days) would then be a different prior on the slope SD, changing the
+# posterior and not only its parameterisation.
 
 # ---- internal time centering -------------------------------------------------
 
-# Reserved column name for the internally centered time variable, mirroring the
-# reserved-column pattern of .maihda_dim_* (decompose_maihda.R) and .maihda_sw
-# (design_weights.R). Written into the analytic data by fit_maihda() when
-# centering applies; prediction newdata rebuilds it from the original time column
+# Reserved column name for the internal time variable, (t - center) / scale, mirroring
+# the reserved-column pattern of .maihda_dim_* (decompose_maihda.R) and .maihda_sw
+# (design_weights.R). Written into the analytic data by fit_maihda() when centering or
+# scaling applies; prediction newdata rebuilds it from the original time column
 # (maihda_prepare_prediction_data), so callers always work in original units.
 .maihda_ctime_col <- ".maihda_ctime"
 
@@ -70,9 +98,96 @@ maihda_lng_time_center <- function(lng) {
   }
 }
 
+# The scale the internal time was divided by (1 when the fit used unscaled time, or
+# for an object stored before internal scaling existed). A centered time t - center maps
+# to the model's coordinates as (t - center) / scale, so a coefficient or covariance
+# entry of time to the power d is per scale^d units of the user's time.
+maihda_lng_time_scale <- function(lng) {
+  s <- lng$time_scale
+  if (is.numeric(s) && length(s) == 1 && is.finite(s) && s > 0) s else 1
+}
+
+# The model's (internal) time for user times `t`: (t - center) / scale.
+maihda_lng_internal_time <- function(lng, t) {
+  (t - maihda_lng_time_center(lng)) / maihda_lng_time_scale(lng)
+}
+
+# The power of the internal time in each fixed-effect coefficient named in `terms`
+# (0 for one without it): 1 for the internal time and its interactions with the
+# dimensions (dim:time), d for I(time^d) and its interactions. Read off the names: the
+# package builds every term on the internal column itself, and a term the user wrote on
+# the original time column is in the user's units already.
+maihda_lng_coef_time_power <- function(terms, lng) {
+  vars <- maihda_time_terms(maihda_lng_time_term(lng), as.integer(lng$time_degree))
+  vapply(strsplit(terms, ":", fixed = TRUE),
+         function(pieces) sum(match(pieces, vars, nomatch = 0L)), numeric(1))
+}
+
+# The fixed-effect table of a growth fit on internally scaled time, in the user's units:
+# a coefficient of internal time to the power d is divided by scale^d, and so are its
+# standard error and interval; the statistic, df and p-value do not change. On an axis
+# that starts at 0 the internal column is the user's time divided by the scale, so its
+# rows take the user's time name, as on a fit of the user's time; a centered fit keeps
+# the internal name, as an unscaled centered fit does. Unchanged for an unscaled fit.
+maihda_lng_unscale_fixed <- function(fe, object) {
+  lng <- object$longitudinal_info
+  scale <- maihda_lng_time_scale(lng)
+  if (is.null(lng) || scale == 1 || !is.data.frame(fe) || !nrow(fe)) {
+    return(fe)
+  }
+  f <- scale^-maihda_lng_coef_time_power(as.character(fe$term), lng)
+  for (col in intersect(c("estimate", "se", "lower", "upper"), names(fe))) {
+    fe[[col]] <- fe[[col]] * f
+  }
+  if (maihda_lng_time_center(lng) == 0) {
+    fe$term <- gsub(maihda_lng_time_term(lng), maihda_quote_name(lng$time),
+                    as.character(fe$term), fixed = TRUE)
+  }
+  fe
+}
+
+# Whether a growth fit is made on internally scaled time: one lme4 fits, with lmer(),
+# glmer() or, for a negative-binomial family, glmer.nb(). A brms fit is not (see the
+# header).
+maihda_longitudinal_scales_time <- function(engine, family) {
+  identical(engine, "lme4") &&
+    !is.null(tryCatch(maihda_resolve_family_spec(family), error = function(e) NULL))
+}
+
+# The internal time scale of an lme4 growth fit: the power of ten k that puts the time
+# span in [1, 10), so that 1 is returned for a span that already lies there (waves 0-9,
+# years 0-9: those fits are unchanged). 1 as well when there is no finite positive span.
+maihda_longitudinal_scale <- function(time_values) {
+  tv <- time_values[is.finite(time_values)]
+  if (length(tv) < 2L) {
+    return(1)
+  }
+  span <- max(tv) - min(tv)
+  if (!is.finite(span) || span <= 0) {
+    return(1)
+  }
+  k <- 10^floor(log10(span))
+  # log10() of a span next to a power of ten can land on the wrong side of the
+  # integer; settle it on the span itself.
+  if (span / k >= 10) k <- k * 10
+  if (span / k < 1) k <- k / 10
+  k
+}
+
 # Centering offset for a time vector: its minimum finite value, anchoring the
 # growth terms at the observed baseline. 0 (no centering; the historical raw-time
 # path, byte-identical results) when the axis already starts at 0.
+# The polynomial degree of the STRATUM (level-3) random-effect block: the full
+# time_degree normally, but 0 under stratum_slope = FALSE, where the stratum level
+# keeps a random intercept only. The between-stratum variance is then a single
+# number that does not vary with time -- Var_S(t) = sigma^2_u0 -- so the VPC
+# trajectory moves only through the person-level slope variance and the residual.
+# NULL-safe: a maihda_model stored before stratum_slope existed carries the full
+# intercept-and-slope block, matching its fit.
+maihda_lng_stratum_degree <- function(lng) {
+  if (isFALSE(lng$stratum_slope)) 0L else as.integer(lng$time_degree)
+}
+
 maihda_longitudinal_center <- function(time_values) {
   tv <- time_values[is.finite(time_values)]
   if (length(tv) == 0) {
@@ -90,6 +205,8 @@ maihda_longitudinal_center <- function(time_values) {
 #' @param time Single column name: a numeric measurement-time variable (level 1).
 #' @param time_degree Integer >= 1: polynomial degree of the growth curve (1 =
 #'   linear). brms supports degree 1 only.
+#' @param stratum_slope Single \code{TRUE}/\code{FALSE}: keep the stratum-level
+#'   random slope(s) on time.
 #' @param data The model data.
 #' @param engine The fitting engine; only "lme4"/"brms" support the 3-level
 #'   growth structure.
@@ -98,13 +215,18 @@ maihda_longitudinal_center <- function(time_values) {
 #' @param formula Optional model formula, used only to tell a package-derived
 #'   refit (whose formula already references the reserved \code{.maihda_ctime}
 #'   column) from a fresh user call when guarding that reserved name.
-#' @return A list \code{list(id, time, time_degree)}.
+#' @param family The model family (name, function or object), used only to tell
+#'   whether the fit will be made on internally scaled time (an lmer fit) when
+#'   guarding that reserved name.
+#' @return A list \code{list(id, time, time_degree, stratum_slope)}.
 #' @keywords internal
 maihda_validate_longitudinal <- function(id, time, time_degree, data,
                                          engine = "lme4",
                                          sampling_weights = NULL,
                                          context = NULL,
-                                         formula = NULL) {
+                                         formula = NULL,
+                                         stratum_slope = TRUE,
+                                         family = "gaussian") {
   if (!is.character(time) || length(time) != 1 || is.na(time) || !nzchar(time)) {
     stop("'time' must be a single column name (a character string) naming the ",
          "measurement-time variable for a longitudinal MAIHDA.", call. = FALSE)
@@ -142,6 +264,9 @@ maihda_validate_longitudinal <- function(id, time, time_degree, data,
          call. = FALSE)
   }
   time_degree <- as.integer(time_degree)
+  if (!is.logical(stratum_slope) || length(stratum_slope) != 1 || is.na(stratum_slope)) {
+    stop("'stratum_slope' must be a single TRUE or FALSE.", call. = FALSE)
+  }
 
   # Genuinely repeated measures: at least one id must appear more than once, else
   # the level-2 (person) random effects are unidentified and this is not longitudinal.
@@ -173,29 +298,150 @@ maihda_validate_longitudinal <- function(id, time, time_degree, data,
          call. = FALSE)
   }
 
-  # Guard the reserved centered-time column against silently overwriting a user
-  # variable of the same name. Only fires when centering will actually occur
-  # (min(time) != 0 writes the column) AND the formula does not already reference
-  # it -- a formula that does is a package-derived refit (maihda()'s null/adjusted
-  # pair re-entering fit_maihda with the first fit's original_data), whose column
-  # is the package's own and is recomputed idempotently.
+  # Growth-term identifiability: enough distinct observed times for the
+  # polynomial degree, and within-person time variation for the person-level
+  # slopes. Re-checked on the analytic sample by fit_maihda(); dropping rows can
+  # only reduce both, so this early check never rejects a fittable model.
+  maihda_check_longitudinal_times(data, id, time, time_degree)
+
+  # Guard the reserved internal-time column against silently overwriting a user
+  # variable of the same name. Only fires when centering or scaling will actually
+  # occur (min(time) != 0, or an lme4 time span outside [1, 10), writes the column)
+  # AND the formula does not already reference it -- a formula that does is a
+  # package-derived refit (maihda()'s null/adjusted pair re-entering fit_maihda with
+  # the first fit's original_data), whose column is the package's own and is
+  # recomputed idempotently.
   if (.maihda_ctime_col %in% names(data) &&
-      maihda_longitudinal_center(data[[time]]) != 0 &&
+      (maihda_longitudinal_center(data[[time]]) != 0 ||
+       (maihda_longitudinal_scales_time(engine, family) &&
+          maihda_longitudinal_scale(data[[time]]) != 1)) &&
       (is.null(formula) || !.maihda_ctime_col %in% all.vars(formula))) {
     stop("'", .maihda_ctime_col, "' is a reserved internal column name for the ",
-         "longitudinal MAIHDA fit (it carries the internally centered time, ",
-         "needed because '", time, "' does not start at 0), but 'data' already ",
-         "contains a column of that name; fitting would overwrite it. Rename ",
-         "your '", .maihda_ctime_col, "' column before fitting.", call. = FALSE)
+         "longitudinal MAIHDA fit (it carries the internally centered and scaled ",
+         "time, needed because '", time, "' does not start at 0 or its span lies ",
+         "outside 1 to 10 time units), but 'data' already contains a column of that ",
+         "name; fitting would overwrite it. Rename your '", .maihda_ctime_col,
+         "' column before fitting.", call. = FALSE)
   }
 
-  list(id = id, time = time, time_degree = time_degree)
+  list(id = id, time = time, time_degree = time_degree,
+       stratum_slope = stratum_slope)
+}
+
+#' Guard against longitudinal ids reused across strata
+#'
+#' \code{(time | id)} treats every row sharing an id value as the SAME person,
+#' so ids that are only unique within a site or group (person "1" in every
+#' site) silently merge different people's trajectories into one level-2 unit.
+#' An id appearing in more than one stratum is the observable symptom of that
+#' (a person's intersectional stratum is a person-level attribute, so a
+#' genuinely unique id maps to exactly one stratum); reject it with guidance
+#' rather than guessing a nesting. Called after strata resolution, when the
+#' \code{stratum} column exists. Rows missing id or stratum are ignored (the
+#' engines drop them).
+#'
+#' @param data The model data carrying the resolved \code{stratum} column.
+#' @param id Name of the person/unit identifier column.
+#' @return \code{NULL}, invisibly; stops on ambiguous ids.
+#' @keywords internal
+maihda_check_longitudinal_ids <- function(data, id) {
+  ids <- data[[id]]
+  strat <- data[["stratum"]]
+  ok <- !is.na(ids) & !is.na(strat)
+  pairs <- unique(data.frame(id = as.character(ids[ok]),
+                             stratum = as.character(strat[ok]),
+                             stringsAsFactors = FALSE))
+  dup <- unique(pairs$id[duplicated(pairs$id)])
+  if (length(dup) > 0) {
+    shown <- paste(utils::head(sort(dup), 5), collapse = ", ")
+    if (length(dup) > 5) shown <- paste0(shown, ", ...")
+    stop("Longitudinal '", id, "' values appear in more than one stratum (",
+         length(dup), " id value(s): ", shown, "). The growth model treats ",
+         "every row sharing an id as the same person, so ids that are only ",
+         "unique within a site or group would merge different people's ",
+         "trajectories. Give every person a globally unique id (e.g. ",
+         "paste(site, ", id, ")) before fitting. If instead a person's ",
+         "stratum variables changed between occasions, fix the stratum at a ",
+         "single reference occasion (e.g. baseline) first -- the strata are ",
+         "person-level groupings and must be constant within a person.",
+         call. = FALSE)
+  }
+  invisible(NULL)
+}
+
+#' Guard against unidentified growth terms (distinct-times checks)
+#'
+#' A degree-\code{d} growth curve is only estimable when the observed times
+#' actually span it. Two conditions, both required: the polynomial basis needs
+#' at least \code{d + 1} distinct observed time values (on a single time even
+#' the linear slope does not exist; on two times a quadratic is collinear with
+#' the linear term), and the person-level slope block \code{(time | id)} needs
+#' at least one id measured at two distinct times (ids repeating only at a
+#' single time are replicate measurements, not a growth design). Data failing
+#' either check can still FIT: lme4 drops rank-deficient fixed-effect columns
+#' but keeps the random-effect columns, leaving the likelihood flat (or
+#' near-flat) in the affected covariance parameters, so the "slope variances"
+#' it returns are arbitrary -- observed: optimizer starting values reported
+#' back verbatim on all-equal times, and a ~1300-fold optimizer-dependent
+#' swing in the between-stratum variance at unobserved times for a quadratic
+#' on two waves -- with at most a "boundary (singular) fit" note. Reject with
+#' guidance instead.
+#'
+#' Called on the full input by \code{maihda_validate_longitudinal()} and again
+#' on the analytic sample by \code{fit_maihda()}: dropped rows (subset,
+#' missing outcome/covariate/weight) can only REDUCE the distinct times, so
+#' the early check never rejects a fittable model, and the re-check catches
+#' data whose identifying occasions sit on rows the fit drops.
+#'
+#' @param data The model data (full input or analytic sample).
+#' @param id,time Column names of the person identifier and time variable.
+#' @param time_degree Integer polynomial degree of the growth curve.
+#' @return \code{NULL}, invisibly; stops when the growth terms are unidentified.
+#' @keywords internal
+maihda_check_longitudinal_times <- function(data, id, time, time_degree) {
+  ids <- data[[id]]
+  tv <- data[[time]]
+  ok <- !is.na(ids) & is.finite(tv)
+  n_times <- length(unique(tv[ok]))
+  if (n_times < time_degree + 1L) {
+    stop("The growth curve is unidentified: '", time, "' takes ", n_times,
+         " distinct observed value(s), but a polynomial of degree ",
+         time_degree, " needs at least ", time_degree + 1L,
+         " (time_degree + 1) distinct measurement times to estimate its ",
+         "fixed and random growth terms",
+         if (n_times <= 1L) {
+           " (with a single observed time there is no time variation to model)"
+         },
+         ". Reduce 'time_degree' or supply data measured at more times.",
+         call. = FALSE)
+  }
+  # Within-person time variation: same unique-pairs bookkeeping as
+  # maihda_check_longitudinal_ids(), duplicated id here meaning "this person
+  # was seen at more than one distinct time".
+  pairs <- unique(data.frame(id = as.character(ids[ok]), time = tv[ok],
+                             stringsAsFactors = FALSE))
+  if (!any(duplicated(pairs$id))) {
+    stop("The growth curve is unidentified: no '", id, "' value is measured ",
+         "at more than one distinct '", time, "' value, so there is no ",
+         "within-person time variation and the person-level growth slopes (",
+         time, " | ", id, ") cannot be estimated. Repeated rows per id at a ",
+         "single time are replicate measurements, not a growth design; a ",
+         "growth-curve MAIHDA needs people observed at multiple times.",
+         call. = FALSE)
+  }
+  invisible(NULL)
 }
 
 # Polynomial-in-time term labels, e.g. c("wave", "I(wave^2)") for degree 2. The
 # first random/fixed term is the linear time; higher degrees use I(time^k) so the
-# design vector at time t is a(t) = (1, t, t^2, ..., t^degree).
+# design vector at time t is a(t) = (1, t, t^2, ..., t^degree). Degree 0 is
+# intercept-only -- no growth terms at all -- which is what the stratum level uses
+# under stratum_slope = FALSE; a(t) is then the constant 1 and the level's variance
+# does not vary with time.
 maihda_time_terms <- function(time, time_degree) {
+  if (time_degree < 1) {
+    return(character(0))
+  }
   qtime <- maihda_quote_name(time)
   terms <- qtime
   if (time_degree >= 2) {
@@ -230,15 +476,18 @@ maihda_time_terms <- function(time, time_degree) {
 #'   centering applies).
 #' @param orig_time The user's original time column name; differs from
 #'   \code{time} only when centering applies.
+#' @param stratum_slope Keep the stratum-level random slope(s) on time? When
+#'   \code{FALSE} the level-3 block is a random intercept only,
+#'   \code{(1 | stratum)}, while the person level keeps its full growth block.
 #' @return The growth formula (same environment as \code{base_formula}).
 #' @keywords internal
 #' @importFrom stats update as.formula terms
 maihda_longitudinal_formula <- function(base_formula, id, time, time_degree,
-                                        orig_time = time) {
+                                        orig_time = time, stratum_slope = TRUE) {
   poly_terms <- maihda_time_terms(time, time_degree)
   ptime <- paste(poly_terms, collapse = " + ")
 
-  fixed <- reformulas::nobars(base_formula)
+  fixed <- maihda_nobars(base_formula)
   fixed_labels <- attr(stats::terms(fixed), "term.labels")
   if (!identical(orig_time, time)) {
     # Centering active: drop any bare raw-time polynomial from the fixed part --
@@ -256,9 +505,13 @@ maihda_longitudinal_formula <- function(base_formula, id, time, time_degree,
       paste(". ~ . +", paste(add_fixed, collapse = " + "))))
   }
 
+  # The fixed time polynomial is added either way -- dropping the stratum random
+  # slope changes only how the stratum DEVIATIONS around the average trajectory are
+  # modelled, never whether there is an average trajectory.
+  stratum_re <- if (isTRUE(stratum_slope)) ptime else "1"
   re <- sprintf("(%s | %s) + (%s | %s)",
                 ptime, maihda_quote_name(id),
-                ptime, maihda_quote_name("stratum"))
+                stratum_re, maihda_quote_name("stratum"))
   stats::update(fixed, stats::as.formula(paste(". ~ . +", re)))
 }
 
@@ -305,8 +558,10 @@ maihda_longitudinal_adjusted_formula <- function(null_formula, strata_vars,
 # rows/cols in the order (Intercept), time, I(time^2), ..., so the time design
 # vector a(t) = (1, t, t^2, ...) lines up with it. This is the longitudinal
 # generalisation of maihda_stratum_variance_lme4()'s single (Intercept,Intercept)
-# cell.
-maihda_re_block_lme4 <- function(model, group, time, time_degree) {
+# cell. `scale` is the fit's internal time scale (maihda_lng_time_scale()): the fitted
+# entry of t^i and t^j is per scale^(i + j) units of the user's time, so it is divided
+# by that, which puts the block in centered user units.
+maihda_re_block_lme4 <- function(model, group, time, time_degree, scale = 1) {
   vc <- lme4::VarCorr(model)
   if (!group %in% names(vc)) {
     stop("No '", group, "' random effect found in the model.", call. = FALSE)
@@ -320,37 +575,1444 @@ maihda_re_block_lme4 <- function(model, group, time, time_degree) {
          ". A longitudinal MAIHDA needs a random intercept and slope on '", time,
          "' at this level.", call. = FALSE)
   }
-  m[idx, idx, drop = FALSE]
+  maihda_unscale_block(m[idx, idx, drop = FALSE], scale)
+}
+
+# A covariance block over (1, t, t^2, ...) of internal time t = (user time) / scale, in
+# the user's units: entry (i, j), counting from 0, divided by scale^(i + j). Unchanged
+# for scale 1.
+maihda_unscale_block <- function(Sigma, scale = 1) {
+  if (scale == 1) {
+    return(Sigma)
+  }
+  p <- seq_len(nrow(Sigma)) - 1L
+  Sigma / scale^outer(p, p, `+`)
+}
+
+# TRUE when the stratum growth block has LOST A DIMENSION -- a variance at zero or,
+# far more commonly, a perfect intercept-slope correlation. lme4 pins the slope's
+# own Cholesky diagonal at exactly 0 in that case, so the block is rank 1: the
+# slope variance is no longer separately identified from the intercept variance,
+# even though both are strictly positive and neither is anywhere near zero on the
+# residual scale.
+#
+# This is precisely the case maihda_stratum_growth_at_boundary_lme4() cannot see
+# (it requires EVERY variance to be at the boundary) and that
+# maihda_variance_at_boundary() cannot see either (it tests the magnitude of the
+# scalar a(t)' Sigma a(t), which is positive at all but one time). Left undetected it
+# yields a confident-looking PCV_slope built on a boundary artefact -- the reported
+# cause of "puzzling slope PCV" values on irregular longitudinal data.
+maihda_stratum_growth_rank_deficient_lme4 <- function(model, tol = 1e-4) {
+  any(maihda_stratum_block_boundary_lme4(model, tol = tol))
+}
+
+# The relative Cholesky factor of one random-effects term, in lme4's order (column by
+# column, lower triangle): for a linear growth block (l11, l21, l22). NULL when the term
+# is absent or theta cannot be read.
+maihda_re_theta_block_lme4 <- function(model, group) {
+  tryCatch({
+    th <- lme4::getME(model, "theta")
+    cnms <- lme4::getME(model, "cnms")
+    sizes <- vapply(cnms, function(cn) length(cn) * (length(cn) + 1) / 2, numeric(1))
+    k <- which(names(cnms) == group)
+    if (length(k) != 1L || sum(sizes) != length(th)) {
+      NULL
+    } else {
+      end <- cumsum(sizes)[k]
+      unname(th[seq.int(end - sizes[k] + 1, end)])
+    }
+  }, error = function(e) NULL)
+}
+
+# Boundary verdict, per component, for a LINEAR growth block from its relative Cholesky
+# factor l = (l11, l21, l22): c(intercept, slope). The intercept is at the boundary when
+# its SD is below `tol` of the residual SD, as in lme4. The slope is judged by its SD
+# conditional on the intercept against its own SD, sqrt(1 - rho^2) = |l22| /
+# sqrt(l21^2 + l22^2), below `ratio_tol` -- a ratio of two SDs in the same units, so the
+# verdict does not depend on the unit of time, where |l22| itself does (it is a slope SD
+# per time unit, relative to the residual SD). With the intercept at the boundary the
+# slope's conditional SD is its whole SD, so only a slope SD of exactly zero puts it there.
+maihda_linear_block_boundary <- function(l, tol = 1e-4, ratio_tol = 0.01) {
+  intercept <- abs(l[1]) < tol
+  slope_sd <- sqrt(l[2]^2 + l[3]^2)
+  slope <- slope_sd == 0 || (!intercept && abs(l[3]) / slope_sd < ratio_tol)
+  c(intercept = intercept, slope = slope)
+}
+
+# Per-component boundary verdict for the stratum block of an lme4 growth fit: the
+# unit-free rule above for a linear block, lme4's rule (each Cholesky diagonal entry
+# below `tol` of the residual SD, maihda_re_boundary_components_lme4()) for a block of any
+# other size. NULL when there is no stratum term or theta cannot be read.
+maihda_stratum_block_boundary_lme4 <- function(model, tol = 1e-4, ratio_tol = 0.01) {
+  comps <- maihda_re_boundary_components_lme4(model, tol = tol)
+  if (is.null(comps) || !"stratum" %in% names(comps)) {
+    return(NULL)
+  }
+  blk <- comps[[which(names(comps) == "stratum")[1]]]
+  if (length(blk) == 2L) {
+    l <- maihda_re_theta_block_lme4(model, "stratum")
+    if (length(l) == 3L && all(is.finite(l))) {
+      blk <- stats::setNames(maihda_linear_block_boundary(l, tol, ratio_tol), names(blk))
+    }
+  }
+  blk
+}
+
+# Engine-agnostic wrapper: TRUE only for an lme4 growth fit whose stratum block is
+# rank-deficient. brms samples the correlation rather than optimizing it to a
+# boundary, so the question does not arise there and the answer is FALSE.
+maihda_stratum_growth_rank_deficient <- function(object) {
+  identical(object$engine, "lme4") &&
+    isTRUE(tryCatch(maihda_stratum_growth_rank_deficient_lme4(object$model),
+                    error = function(e) FALSE))
+}
+
+# TRUE when the stratum block's LINEAR TIME component specifically sits at the
+# boundary -- the stratum slope variance conditional on the stratum intercept is zero
+# (for a linear block, next to nothing against the slope's own variance; see
+# maihda_linear_block_boundary()) and the slope is not separately identified.
+#
+# This is deliberately NARROWER than rank deficiency of the whole block. For the 2x2
+# linear block the two coincide (Sigma = ss' forces sigma^2_u1 = s2^2) unless the
+# intercept variance is the one at zero, which leaves the slope variance identified on
+# its own; and a 3x3
+# quadratic block that loses only its I(time^2) dimension still estimates the linear
+# slope variance perfectly well -- gating PCV_slope on the block-level verdict there
+# would discard a sound proportion (observed: 0.874 on the package's own quadratic
+# fixture, whose stratum Cholesky diagonal is 1.074, 0.2357, 0).
+maihda_stratum_slope_at_boundary_lme4 <- function(model, tol = 1e-4) {
+  blk <- maihda_stratum_block_boundary_lme4(model, tol = tol)
+  length(blk) >= 2L && isTRUE(unname(blk[[2]]))
+}
+
+maihda_stratum_slope_at_boundary <- function(object) {
+  identical(object$engine, "lme4") &&
+    isTRUE(tryCatch(maihda_stratum_slope_at_boundary_lme4(object$model),
+                    error = function(e) FALSE))
+}
+
+# ---- restarts of an lmer growth fit ----------------------------------------------------
+
+# lmer's default optimiser can stop on the wrong side of the boundary of a growth model's
+# linear stratum block -- at a point whose stratum intercept-slope correlation has the
+# opposite sign to the optimum's, often with the intercept SD at exactly 0 -- whatever the
+# unit of time: with a time span between 1 and 10 (see the header) 5 to 34 of about 400
+# fits of a balanced 16-stratum design stopped above the optimum. fit_maihda() therefore refits
+# such a model from two more starting points and keeps the fit with the lowest criterion
+# (maihda_fit_lmer_growth()).
+#
+# The starts: lme4's theta of the first fit with the stratum block replaced by half the
+# person-level block's intercept and slope SDs of the same fit -- in the same time units,
+# so the start suits any unit -- once with a positive and once with a negative
+# intercept-slope correlation. An empty list when the stratum block is not 2 x 2, there is
+# no person-level block with a slope, or its SDs are not positive and finite.
+maihda_growth_restart_starts <- function(theta, cnms, id, scale = 0.5) {
+  if (!is.numeric(theta) || !is.list(cnms) || is.null(names(cnms))) {
+    return(list())
+  }
+  sizes <- vapply(cnms, function(cn) length(cn) * (length(cn) + 1) / 2, numeric(1))
+  if (sum(sizes) != length(theta)) {
+    return(list())
+  }
+  end <- cumsum(sizes)
+  beg <- end - sizes + 1
+  s <- which(names(cnms) == "stratum")
+  p <- which(names(cnms) == id)
+  if (length(s) != 1L || length(p) != 1L || length(cnms[[s]]) != 2L ||
+      length(cnms[[p]]) < 2L) {
+    return(list())
+  }
+  person <- theta[seq.int(beg[p], end[p])]
+  sd_int <- abs(person[1])
+  sd_slope <- sqrt(person[2]^2 + person[length(cnms[[p]]) + 1]^2)
+  if (!is.finite(sd_int) || !is.finite(sd_slope) || sd_int <= 0 || sd_slope <= 0) {
+    return(list())
+  }
+  lapply(c(1, -1), function(sign) {
+    start <- theta
+    start[seq.int(beg[s], end[s])] <- scale * c(sd_int, sign * sd_slope, sd_slope)
+    start
+  })
+}
+
+# A growth model with a quadratic or higher time polynomial can stop at a boundary of
+# either block: on balanced 16-stratum designs lmer's default optimiser stopped more than
+# 0.01 above the REML optimum in 10 to 20 per cent of such fits (9 to 36 per cent by time
+# unit), with or without a stratum slope, mostly with the person-level block collapsed to
+# rank 2 where the optimum's is full rank -- which the starts above, made on the first
+# fit's person-level block, often cannot leave -- or with the stratum block on a boundary
+# the optimum does not have. lme4 checks no gradient on a singular fit
+# or on a model with ten or more covariance parameters (a quadratic model with a stratum
+# slope has twelve), so such a fit is mostly recorded as converged: all 132 misses with a
+# stratum slope, 25 of 33 without. fit_maihda() refits it from two more starts
+# (maihda_fit_lmer_growth()):
+#
+# - lmer's fit of the same model on time centred at the middle of its range, carried
+#   back to the model's own time (maihda_growth_centred_start()). Shifting time
+#   leaves the REML criterion unchanged, but on the centred time the criterion is better
+#   conditioned in lme4's parameters (median condition number of its Hessian at the
+#   optimum 244 against 615 on that design), and lmer reaches the optimum there far more
+#   often;
+# - when that refit and lmer's own fit differ by more than 0.01, both blocks diagonal
+#   (maihda_growth_diagonal_start()): every correlation starts at zero, away from every
+#   boundary. A smaller difference is mostly one of the two stopping a little short, which
+#   keeping the lower of them repairs: on 96 ordinary fits this start ran in 11, against
+#   40 with a threshold of 1e-4, for the same fits kept. Where both stop short together,
+#   about 0.01 above the optimum, it is not tried (1 of 314 fits on 14 other designs).
+#
+# On the balanced design the two leave 0 of 672 quadratic fits and 2 of 78 cubic ones more
+# than 0.01 above the exact REML optimum (lmer's own fit: 132 and 35), at about twice the
+# time of lmer's own fit.
+
+# Lower-triangular factor L, with a non-negative diagonal, of a symmetric positive
+# semi-definite matrix S = L L': lme4's form of a random-effect block. Where a pivot is
+# zero (to `tol` of its diagonal entry) the column is left at zero, as lme4 holds a
+# rank-deficient block.
+maihda_chol_psd <- function(S, tol = 1e-10) {
+  S <- (S + t(S)) / 2
+  q <- nrow(S)
+  L <- matrix(0, q, q)
+  for (j in seq_len(q)) {
+    prev <- seq_len(j - 1L)
+    d <- S[j, j] - sum(L[j, prev]^2)
+    if (!is.finite(d) || d <= tol * abs(S[j, j])) {
+      next
+    }
+    L[j, j] <- sqrt(d)
+    for (i in seq.int(j + 1L, length.out = q - j)) {
+      L[i, j] <- (S[i, j] - sum(L[i, prev] * L[j, prev])) / L[j, j]
+    }
+  }
+  L
+}
+
+# theta of a growth model fitted on `time` - `shift`, carried back to the same model on
+# `time`: random effects over the powers 0..d of (time - shift) are U b over the powers of
+# time, with U[j, i] = choose(i, j) (-shift)^(i - j) for powers counted from 0, so a
+# block's covariance becomes U Sigma U', factored again (maihda_chol_psd()). An
+# intercept-only block is unchanged. NULL when theta does not match the terms or a block
+# is not the polynomial's leading terms in order: (Intercept), time, I(time^2), ...
+maihda_growth_unshift_theta <- function(theta, cnms, time, time_degree, shift) {
+  if (!is.numeric(theta) || !is.list(cnms) || !is.numeric(shift) ||
+      length(shift) != 1L || !is.finite(shift)) {
+    return(NULL)
+  }
+  sizes <- vapply(cnms, function(cn) length(cn) * (length(cn) + 1) / 2, numeric(1))
+  if (sum(sizes) != length(theta)) {
+    return(NULL)
+  }
+  terms <- c("(Intercept)", maihda_time_terms(time, time_degree))
+  end <- cumsum(sizes)
+  beg <- end - sizes + 1
+  for (k in seq_along(cnms)) {
+    q <- length(cnms[[k]])
+    if (q > length(terms) || !identical(unname(as.character(cnms[[k]])), terms[seq_len(q)])) {
+      return(NULL)
+    }
+    if (q == 1L) {
+      next
+    }
+    idx <- seq.int(beg[k], end[k])
+    L <- matrix(0, q, q)
+    L[lower.tri(L, diag = TRUE)] <- theta[idx]
+    p <- seq_len(q) - 1L
+    U <- outer(p, p, function(j, i) choose(i, j) * (-shift)^pmax(i - j, 0))
+    L <- maihda_chol_psd(U %*% tcrossprod(L) %*% t(U))
+    theta[idx] <- L[lower.tri(L, diag = TRUE)]
+  }
+  theta
+}
+
+# The start carried back from the call `fit_call` (evaluated in `fit_env`) fitted with
+# its time variable `time` centred at the middle of its range: a list of one theta, or an
+# empty list when the call's data or that column cannot be found, time is centred there
+# already, or a block cannot be carried back (maihda_growth_unshift_theta()). The centred
+# fit's own warnings and messages are dropped; its errors pass through.
+maihda_growth_centred_start <- function(fit_call, fit_env, time, time_degree) {
+  data_name <- fit_call$data
+  if (!is.name(data_name) || !is.character(time) || length(time) != 1L) {
+    return(list())
+  }
+  data <- get0(as.character(data_name), envir = fit_env, inherits = FALSE)
+  if (!is.data.frame(data) || !is.numeric(data[[time]])) {
+    return(list())
+  }
+  t <- data[[time]][is.finite(data[[time]])]
+  if (!length(t)) {
+    return(list())
+  }
+  shift <- (min(t) + max(t)) / 2
+  if (shift == 0) {
+    return(list())
+  }
+  data[[time]] <- data[[time]] - shift
+  centred_env <- new.env(parent = fit_env)
+  assign(as.character(data_name), data, envir = centred_env)
+  fit <- maihda_eval_holding_conditions(fit_call, centred_env)$value
+  theta <- maihda_growth_unshift_theta(lme4::getME(fit, "theta"), lme4::getME(fit, "cnms"),
+                                       time, time_degree, shift)
+  if (is.null(theta)) list() else list(theta)
+}
+
+# The start with both growth blocks diagonal: the person-level block at the first fit's
+# person-level SDs and the stratum block at `scale` times them, so every correlation
+# starts at zero. An empty list when theta and the terms do not match, there is no
+# person-level or stratum block, the stratum block has more terms than the person-level
+# one, or a person-level SD is not positive and finite.
+maihda_growth_diagonal_start <- function(theta, cnms, id, scale = 0.5) {
+  if (!is.numeric(theta) || !is.list(cnms) || is.null(names(cnms))) {
+    return(list())
+  }
+  sizes <- vapply(cnms, function(cn) length(cn) * (length(cn) + 1) / 2, numeric(1))
+  if (sum(sizes) != length(theta)) {
+    return(list())
+  }
+  end <- cumsum(sizes)
+  beg <- end - sizes + 1
+  p <- which(names(cnms) == id)
+  s <- which(names(cnms) == "stratum")
+  if (length(p) != 1L || length(s) != 1L || length(cnms[[s]]) > length(cnms[[p]])) {
+    return(list())
+  }
+  q <- length(cnms[[p]])
+  L <- matrix(0, q, q)
+  L[lower.tri(L, diag = TRUE)] <- theta[seq.int(beg[p], end[p])]
+  sds <- sqrt(rowSums(L^2))
+  if (!all(is.finite(sds)) || any(sds <= 0)) {
+    return(list())
+  }
+  block <- function(v) {
+    D <- diag(v, length(v))
+    D[lower.tri(D, diag = TRUE)]
+  }
+  start <- theta
+  start[seq.int(beg[p], end[p])] <- block(sds)
+  start[seq.int(beg[s], end[s])] <- block(scale * sds[seq_along(cnms[[s]])])
+  list(start)
+}
+
+# The criterion lme4 minimised: the REML criterion of a REML fit, the deviance otherwise.
+maihda_lmer_criterion <- function(model) {
+  if (lme4::isREML(model)) lme4::REMLcrit(model) else stats::deviance(model)
+}
+
+# Which of several fits to keep, from their criteria: the first (lmer's own fit) unless
+# another is lower by more than `tol`, then the lowest. Two optimisers that reach the same
+# optimum of a growth fit differed by less than 1e-4 in the criterion up to a few
+# thousand rows, and by up to 2e-4 at 12,000; a refit at the same optimum can then
+# replace lmer's fit, with estimates that agree to the optimiser's precision.
+maihda_pick_lowest <- function(crit, tol = 1e-4) {
+  if (!length(crit)) {
+    return(NA_integer_)
+  }
+  if (!is.finite(crit[1])) {
+    ok <- which(is.finite(crit))
+    return(if (length(ok)) ok[which.min(crit[ok])] else 1L)
+  }
+  better <- which(is.finite(crit) & crit < crit[1] - tol)
+  if (length(better)) better[which.min(crit[better])] else 1L
+}
+
+# Evaluate a fitting call while holding back its warnings and messages, so that only the
+# fit that is kept speaks. Errors pass through.
+maihda_eval_holding_conditions <- function(call, env) {
+  conditions <- list()
+  value <- withCallingHandlers(
+    eval(call, env),
+    warning = function(w) {
+      conditions[[length(conditions) + 1L]] <<- w
+      invokeRestart("muffleWarning")
+    },
+    message = function(m) {
+      conditions[[length(conditions) + 1L]] <<- m
+      invokeRestart("muffleMessage")
+    })
+  list(value = value, conditions = conditions)
+}
+
+maihda_signal_conditions <- function(conditions) {
+  for (cnd in conditions) {
+    if (inherits(cnd, "warning")) {
+      warning(cnd)
+    } else if (inherits(cnd, "message")) {
+      message(cnd)
+    }
+  }
+  invisible(NULL)
+}
+
+# Fit an lmer growth model (`fit_call`, evaluated in `fit_env`), refit it from more starts
+# and return the fit with the lowest criterion, signalling that fit's warnings and messages
+# only. A linear model is refitted from the starts of maihda_growth_restart_starts(); a
+# model whose time polynomial (in the model's time variable `time`) has degree 2 or more
+# from the start of maihda_growth_centred_start() and, when that refit and lmer's fit
+# differ by more than `differ` or there is no such refit, from the start of
+# maihda_growth_diagonal_start(). A restart that fails is passed over. `first`, a value /
+# conditions pair of maihda_eval_holding_conditions(), is taken as lmer's fit instead of
+# evaluating `fit_call` (a bootstrap draw's refit from the fitted model).
+maihda_fit_lmer_growth <- function(fit_call, fit_env, id, tol = 1e-4, time = NULL,
+                                   time_degree = 1L, differ = 0.01, first = NULL) {
+  if (is.null(first)) {
+    first <- maihda_eval_holding_conditions(fit_call, fit_env)
+  }
+  fits <- list(first)
+  refit <- function(start) {
+    restart_call <- fit_call
+    restart_call$start <- start
+    tryCatch(maihda_eval_holding_conditions(restart_call, fit_env), error = function(e) NULL)
+  }
+  criterion <- function(f) {
+    if (is.null(f)) NA_real_ else tryCatch(maihda_lmer_criterion(f$value),
+                                           error = function(e) NA_real_)
+  }
+  theta <- tryCatch(lme4::getME(first$value, "theta"), error = function(e) NULL)
+  cnms <- tryCatch(lme4::getME(first$value, "cnms"), error = function(e) NULL)
+  if (isTRUE(time_degree >= 2)) {
+    centred <- tryCatch(maihda_growth_centred_start(fit_call, fit_env, time, time_degree),
+                        error = function(e) list())
+    for (start in centred) {
+      fits[[length(fits) + 1L]] <- refit(start)
+    }
+    c0 <- criterion(first)
+    c1 <- if (length(fits) > 1L) criterion(fits[[2L]]) else NA_real_
+    if (!is.finite(c0) || !is.finite(c1) || abs(c1 - c0) > differ) {
+      diagonal <- tryCatch(maihda_growth_diagonal_start(theta, cnms, id),
+                           error = function(e) list())
+      for (start in diagonal) {
+        fits[[length(fits) + 1L]] <- refit(start)
+      }
+    }
+  } else {
+    starts <- tryCatch(maihda_growth_restart_starts(theta, cnms, id),
+                       error = function(e) list())
+    for (start in starts) {
+      fits[[length(fits) + 1L]] <- refit(start)
+    }
+  }
+  crit <- vapply(fits, criterion, numeric(1))
+  kept <- fits[[maihda_pick_lowest(crit, tol)]]
+  maihda_signal_conditions(kept$conditions)
+  kept$value
+}
+
+# Whether fit_maihda() restarts an lme4 fit: a growth model fitted by lmer, without
+# starting values of the user's own, with a linear stratum slope or a time polynomial of
+# degree 2 or more (with or without a stratum slope).
+maihda_growth_restarts_apply <- function(fit_fun, longitudinal_info, dot_vals) {
+  if (!identical(fit_fun, quote(lme4::lmer)) || is.null(longitudinal_info) ||
+      "start" %in% names(dot_vals)) {
+    return(FALSE)
+  }
+  degree <- suppressWarnings(as.integer(longitudinal_info$time_degree))
+  if (length(degree) != 1L || is.na(degree)) {
+    return(FALSE)
+  }
+  degree >= 2L || (degree == 1L && !isFALSE(longitudinal_info$stratum_slope))
+}
+
+# ---- refits of a glmer growth fit ------------------------------------------------------
+
+# glmer() fits in two stages: bobyqa on the variance parameters with the fixed effects in
+# the penalised least squares (nAGQ = 0), then Nelder-Mead on both from that point. The
+# first stage often stops a growth fit with a block's intercept SD at its bound of 0 beside
+# a non-zero intercept-slope entry, a point that is not a maximum
+# (maihda_lme4_boundary_traps()), and the second stage stops there too. On a Poisson growth
+# design of 16 strata of 6 persons and 6 waves, about a third of 120 fits (30 data sets,
+# time in waves, weeks, months and days) ended more than 0.01 below the maximum of the
+# Laplace likelihood, by up to 32, and about half on the internal time alone, nearly all
+# recorded as converged. fit_maihda() therefore refits a glmer growth model on the
+# internal time (maihda_fit_glmer_growth()): a linear one with a stratum slope from two
+# more starts, keeping the fit with the highest likelihood, and then any one at a boundary
+# trap once from the other side of the bound. That reached the maximum in all 120 fits,
+# and in 48 each of Bernoulli and binomial outcomes and of two other designs (8 strata of
+# 12 persons with 4 waves; 32 strata of 4 persons with 8 waves and a fifth of the
+# occasions missing), and in 24 negative-binomial fits; 2 of 48 adjusted fits stayed 0.011
+# short of a stratum block at 0, and those are recorded as not converged.
+#
+# The refit across the bound is made by bobyqa, as for other glmer fits
+# (maihda_fit_glmer_bound()), and a refit that is kept is refitted once more
+# (maihda_glmer_refit_pass()): across the bound again when it stopped at one, otherwise
+# from where it stopped. Where the maximum has the stratum block at rank one, its intercept
+# and slope perfectly correlated, the likelihood is flat along that block and Nelder-Mead,
+# glmer's own second stage, can stop short of it: of 20 Poisson growth fits kept at a
+# bound, one stopped 0.023 below (recorded as not converged), and from that fit's estimates
+# rounded to six digits 0.005 below on every order of the rows tried (recorded as
+# converged). bobyqa reached the maximum from all of them, in 0.26 to 0.5 times the
+# evaluations; on quadratic growth it can take up to about three times as many. From
+# points made by setting a block's intercept entry to 0 at the maximum (Poisson, binomial
+# and fixed-size negative-binomial outcomes; linear and quadratic growth), 20 of 48 split
+# the refits: Nelder-Mead stopped more than 0.001 short from 16 of them (from all 8
+# quadratic ones, by up to 2.0), bobyqa from 5. bobyqa can stop on the bound of a rank-one
+# block beside a maximum just inside it (0.0016 and 0.020 below, recorded as converged) or
+# stop at a bound again (0.17 to 6.9 below, recorded as not converged); the second refit
+# reached the maximum from all 5. Where nothing is left to gain it takes a median of about
+# 35 evaluations on linear growth and 100 on quadratic growth, at times a few hundred.
+#
+# A quadratic growth fit gets no restarts, and its maximum often has the quadratic term's
+# variance at or near zero, which glmer's second stage approaches slowly: on 240 quadratic
+# growth fits (Poisson, binomial and Bernoulli outcomes; four designs of 8 to 32 strata;
+# time in five units; null and adjusted), 47 ended more than 0.01 below the maximum after
+# the refits above, by up to 21, and the 11 of them recorded as converged were all singular,
+# which lme4 does not check. Adjusted linear Poisson growth fits ended up to 0.022 below (4
+# of 30 more than 0.01). Every glmer growth fit is therefore also searched as other glmer
+# fits with a random slope are, and refitted from the lower end when that lies at least 0.001
+# below (maihda_glmer_search_refit()); from the fits of the refits above, the search and its
+# refit reached the maximum on each of the 46 it was tried on that had stopped more than
+# 0.001 short (28 of them more than 0.01 short). The searches added a median 23% to the
+# fitting time on 11 fits at their maximum (-8% to 52%), and with a refit the fit took 1.65 to
+# 4.8 times as long (8 fits 0.39 to 15.7 short); refits gaining less than 0.001, now not
+# made, had taken half of the time the searches added on 48 other fits, one 72,732
+# evaluations of bobyqa for a gain below 0.001. The searches' deviance function starts its
+# penalised least squares from the same point at every evaluation and, at lme4's tolerance,
+# stopped 0.022 above a Bernoulli growth fit's own -2 log-likelihood, where re-expressing
+# the fit is refused; the search of a growth fit runs it to a relative tolerance of 1e-10.
+#
+# A growth fit that one of these refits replaced records bobyqa, and lme4::refit() of it
+# without a control runs bobyqa at minqa's defaults (see the refits of other glmer fits
+# below). On 29 such fits (quadratic growth with Poisson, binomial and Bernoulli outcomes,
+# linear growth with Poisson outcomes), that refit ended more than 0.01 above 2 of them (by
+# 1.80 and 0.23), and of 87 responses simulated from them it stopped more than 0.01 short of
+# the maximum of 13 and at minqa's limit of evaluations on 19, 13 of them within 0.001 of the
+# maximum, where the refit of a bootstrap draw (maihda_refit_growth_draw()) keeps it and
+# counts it as not converged. Such a fit is therefore refitted once more from its estimates
+# by the second stage of the call's own control (maihda_glmer_finish()), as other glmer fits
+# are. Refitted by Nelder-Mead, none of the 29 rose by more than 2e-9, refit() from them
+# moved none by more than 3e-5, and no draw's refit was counted as not converged. Nelder-Mead
+# from the fit stopped short of the maximum of 80 of the 87 responses (15 by more than 1), as
+# it does from any glmer fit that records it; the refits above took each draw to its maximum
+# all the same, in about 1.2 to 1.4 times the time. The pass added a median 5% to the
+# fitting time, and up to about a quarter.
+
+# Whether fit_maihda() makes an lme4 fit by maihda_fit_glmer_growth(): a growth model
+# fitted by glmer() or glmer.nb(), without starting values of the user's own.
+maihda_glmer_growth_applies <- function(fit_fun, longitudinal_info, dot_vals) {
+  (identical(fit_fun, quote(lme4::glmer)) || identical(fit_fun, quote(lme4::glmer.nb))) &&
+    !is.null(longitudinal_info) && !"start" %in% names(dot_vals)
+}
+
+# The starts of a linear glmer growth fit's restarts: lme4's theta of the first fit with
+# the person-level block reset to its SDs s0 and s1 and no correlation, and the stratum
+# block's Cholesky entries set to half of (s0, +/- s1, s1) -- an intercept SD of s0 / 2, a
+# slope SD of 0.71 s1 and an intercept-slope correlation of +0.71 or -0.71 -- as the lmer
+# restarts set it (maihda_growth_restart_starts()). The person block is reset because
+# glmer's first stage can leave it at its bound; an SD at the bound (1e-4 or less) is
+# started at 1, glmer's own start, a size that suits time on the internal scale. An empty
+# list unless the person and stratum blocks are both 2 x 2.
+maihda_glmer_growth_starts <- function(theta, cnms, id, scale = 0.5) {
+  if (!is.numeric(theta) || !is.list(cnms) || is.null(names(cnms))) {
+    return(list())
+  }
+  sizes <- vapply(cnms, function(cn) length(cn) * (length(cn) + 1) / 2, numeric(1))
+  if (sum(sizes) != length(theta)) {
+    return(list())
+  }
+  end <- cumsum(sizes)
+  beg <- end - sizes + 1
+  s <- which(names(cnms) == "stratum")
+  p <- which(names(cnms) == id)
+  if (length(s) != 1L || length(p) != 1L || length(cnms[[s]]) != 2L ||
+      length(cnms[[p]]) != 2L) {
+    return(list())
+  }
+  person <- theta[seq.int(beg[p], end[p])]
+  sd_int <- abs(person[1])
+  sd_slope <- sqrt(person[2]^2 + person[3]^2)
+  if (!is.finite(sd_int) || sd_int <= 1e-4) sd_int <- 1
+  if (!is.finite(sd_slope) || sd_slope <= 1e-4) sd_slope <- 1
+  lapply(c(1, -1), function(sign) {
+    start <- theta
+    start[seq.int(beg[p], end[p])] <- c(sd_int, 0, sd_slope)
+    start[seq.int(beg[s], end[s])] <- scale * c(sd_int, sign * sd_slope, sd_slope)
+    start
+  })
+}
+
+# The criterion of a glmer fit as a deviance to minimise: -2 times its log-likelihood
+# (Laplace, or quadrature). Not deviance(), which for a glmer fit is the conditional
+# deviance, the squared deviance residuals at the conditional modes, and can be lower for
+# a fit of lower likelihood.
+maihda_glmer_criterion <- function(model) {
+  -2 * as.numeric(stats::logLik(model))
+}
+
+# The second refit of maihda_fit_glmer_growth(), from `refit`, a refit across a bound that
+# maihda_glmer_mirror_refit() returned (a value / conditions pair): when `refit` stopped at
+# a bound again, across that bound once more by bobyqa (maihda_glmer_mirror_refit());
+# otherwise glmer's second stage from its estimates with its control
+# (`.maihda_arg_refit_control` in `fit_env`). The second refit's pair when its criterion is
+# lower than the first's by more than `tol`, else NULL.
+maihda_glmer_refit_pass <- function(refit, fit_call, fit_env, tol = 1e-4) {
+  theta <- lme4::getME(refit$value, "theta")
+  if (length(maihda_lme4_trap_columns(theta, lme4::getME(refit$value, "cnms")))) {
+    return(maihda_glmer_mirror_refit(refit, fit_call, fit_env, tol, optimizer = "bobyqa"))
+  }
+  pass_call <- fit_call
+  pass_call$start <- list(theta = unname(theta), fixef = lme4::fixef(refit$value))
+  pass_call$control <- as.name(".maihda_arg_refit_control")
+  pass <- maihda_eval_holding_conditions(pass_call, fit_env)
+  if (maihda_glmer_criterion(pass$value) < maihda_glmer_criterion(refit$value) - tol) {
+    pass
+  } else {
+    NULL
+  }
+}
+
+# Fit a glmer growth model (`fit_call`, evaluated in `fit_env`), refit it from the starts of
+# maihda_glmer_growth_starts() and keep the fit with the lowest criterion
+# (maihda_pick_lowest()); then refit that fit once from the other side of its boundary
+# traps by bobyqa (maihda_glmer_mirror_refit()) and, when that refit is kept, once more
+# (maihda_glmer_refit_pass()); then refit the kept fit from searches with its random-effect
+# blocks and fixed effects re-expressed (maihda_glmer_search_refit()), their deviance
+# function's penalised least squares run to a relative tolerance of 1e-10, when they reach a
+# criterion at least 0.001 lower; and when any of these refits replaced the fit, refit it once
+# more from its estimates by the second stage of the call's own control
+# (maihda_glmer_finish()). Only the kept fit's warnings and messages are signalled. A refit
+# that fails is passed over. `first` is taken as the first fit instead of evaluating
+# `fit_call`, as for maihda_fit_lmer_growth().
+maihda_fit_glmer_growth <- function(fit_call, fit_env, id, tol = 1e-4, first = NULL) {
+  if (is.null(first)) {
+    first <- maihda_eval_holding_conditions(fit_call, fit_env)
+  }
+  fits <- list(first)
+  starts <- tryCatch(
+    maihda_glmer_growth_starts(lme4::getME(first$value, "theta"),
+                               lme4::getME(first$value, "cnms"), id),
+    error = function(e) list())
+  for (start in starts) {
+    restart_call <- fit_call
+    restart_call$start <- list(theta = start)
+    fits[[length(fits) + 1L]] <- tryCatch(
+      maihda_eval_holding_conditions(restart_call, fit_env), error = function(e) NULL)
+  }
+  crit <- vapply(fits, function(f) {
+    if (is.null(f)) NA_real_ else tryCatch(maihda_glmer_criterion(f$value),
+                                           error = function(e) NA_real_)
+  }, numeric(1))
+  kept <- fits[[maihda_pick_lowest(crit, tol)]]
+  refitted <- FALSE
+  mirrored <- tryCatch(maihda_glmer_mirror_refit(kept, fit_call, fit_env, tol,
+                                                 optimizer = "bobyqa"),
+                       error = function(e) NULL)
+  if (!is.null(mirrored)) {
+    passed <- tryCatch(maihda_glmer_refit_pass(mirrored, fit_call, fit_env, tol),
+                       error = function(e) NULL)
+    kept <- if (is.null(passed)) mirrored else passed
+    refitted <- TRUE
+  }
+  searched <- tryCatch(maihda_glmer_search_refit(kept, fit_call, fit_env, tol,
+                                                 tolerance = 1e-10, gain = 1e-3),
+                       error = function(e) NULL)
+  if (!is.null(searched)) {
+    kept <- searched
+    refitted <- TRUE
+  }
+  if (refitted) {
+    finished <- tryCatch(maihda_glmer_finish(kept, fit_call, fit_env, tol),
+                         error = function(e) NULL)
+    if (!is.null(finished)) {
+      kept <- finished
+    }
+  }
+  maihda_signal_conditions(kept$conditions)
+  kept$value
+}
+
+# The start of maihda_glmer_mirror_refit(): `theta` with each column of `cols`
+# (maihda_lme4_trap_columns()) taken across its bound to diagonal entry `value`, in theta
+# order. A column is reflected (maihda_lme4_mirror_theta()), or, given `deviance` (a
+# function of theta) and two or more entries below, taken along the direction in which the
+# deviance falls fastest (maihda_lme4_first_order_theta()), as no reflection need reach the
+# side where the likelihood rises, to 0.9 of the length the block allows, so that the later
+# terms' block is not singular; a column that taking an earlier one of its block across
+# moved off its bound is left.
+maihda_lme4_cross_start <- function(theta, cnms, cols, value, deviance = NULL) {
+  for (cl in cols) {
+    if (abs(theta[cl$index]) >= 1e-4) {
+      next
+    }
+    across <- if (!is.null(deviance) && length(cl$below) > 1L) {
+      maihda_lme4_first_order_theta(theta, cnms, cl$index, value, deviance, fraction = 0.9)
+    }
+    theta <- if (is.null(across)) {
+      maihda_lme4_mirror_theta(theta, cnms, cl$index, value)
+    } else {
+      across
+    }
+  }
+  theta
+}
+
+# The refit of maihda_fit_glmer_growth() and maihda_fit_glmer_bound() from the other side
+# of a boundary trap: when the fit in `kept` (a value / conditions pair of
+# maihda_eval_holding_conditions()) has columns where a trap can sit
+# (maihda_lme4_trap_columns()), `fit_call` is evaluated once from its estimates with each
+# such column taken across its bound by maihda_lme4_cross_start(), the diagonal entry at
+# 0.05, and glmer's second stage only, by `optimizer` ("bobyqa") when one is named and
+# otherwise by the second-stage optimiser of the fit's control. With `first_order`, a
+# column with two or more entries below is taken across along the first-order direction
+# of the fit's deviance; otherwise every column is reflected. The refit's pair when its
+# criterion is lower than the kept fit's by more than `tol`, else NULL. The refit does not
+# wait for the deviance to fall within a small step across the bound
+# (maihda_lme4_boundary_traps()): the maximum can lie further across, where such a step
+# does not reach (a Poisson growth fit in weeks: the deviance rose by 0.0002 at a step of
+# 0.001, and the refit gained 0.17 in log-likelihood).
+maihda_glmer_mirror_refit <- function(kept, fit_call, fit_env, tol = 1e-4, optimizer = NULL,
+                                      first_order = FALSE) {
+  model <- kept$value
+  if (!isTRUE(tryCatch(model@devcomp$dims[["nAGQ"]] >= 1, error = function(e) FALSE))) {
+    return(NULL)
+  }
+  theta <- lme4::getME(model, "theta")
+  cnms <- lme4::getME(model, "cnms")
+  cols <- maihda_lme4_trap_columns(theta, cnms)
+  if (!length(cols)) {
+    return(NULL)
+  }
+  deviance <- if (first_order && any(lengths(lapply(cols, `[[`, "below")) > 1L)) {
+    maihda_lme4_theta_deviance(model)
+  }
+  theta <- maihda_lme4_cross_start(theta, cnms, cols, 0.05, deviance)
+  control <- if (is.null(fit_call$control)) {
+    lme4::glmerControl()
+  } else {
+    eval(fit_call$control, fit_env)
+  }
+  control$nAGQ0initStep <- FALSE
+  if (!is.null(optimizer)) {
+    # The second stage by bobyqa: settings of the control's own optimiser that bobyqa does
+    # not take are dropped, and its limit is 1e5 evaluations unless one is set (lme4's 1e4
+    # stopped the refit of a three-term block short, recorded as not converged).
+    if (!identical(control$optimizer[2], optimizer)) {
+      control$optCtrl <- control$optCtrl[names(control$optCtrl) %in%
+                                           c("npt", "rhobeg", "rhoend", "iprint", "maxfun")]
+    }
+    control$optimizer[2] <- optimizer
+    if (is.null(control$optCtrl$maxfun)) {
+      control$optCtrl$maxfun <- 1e5
+    }
+  }
+  assign(".maihda_arg_refit_control", control, envir = fit_env)
+  refit_call <- fit_call
+  refit_call$start <- list(theta = unname(theta), fixef = lme4::fixef(kept$value))
+  refit_call$control <- as.name(".maihda_arg_refit_control")
+  refit <- maihda_eval_holding_conditions(refit_call, fit_env)
+  if (maihda_glmer_criterion(refit$value) < maihda_glmer_criterion(kept$value) - tol) {
+    refit
+  } else {
+    NULL
+  }
+}
+
+# ---- refits of other glmer fits --------------------------------------------------------
+
+# A glmer fit that is not a growth model stops at a boundary trap too, in a random-effect
+# block with a slope such as (1 + x | stratum): glmer's first stage takes the block's
+# intercept SD to its bound of 0 beside a non-zero intercept-slope entry
+# (maihda_lme4_boundary_traps()). It does so mostly where the intercept variance is small
+# next to the slope variance: an adjusted model on additive strata, strata that fan out
+# from x = 0. On ten cross-sectional Poisson and Bernoulli designs of 8 and 18 strata
+# (200 fits), 44 fits stopped at such a bound and 39 of them more than 0.01 below the
+# maximum, up to 23 log-likelihood units, all recorded converged. fit_maihda() therefore
+# refits such a fit once from the other side of the bound (maihda_fit_glmer_bound()), by
+# bobyqa: from there glmer's own second stage, Nelder-Mead, left 10 of the 44 more than
+# 0.01 short (up to 0.97), bobyqa none, in a median 0.39 times the evaluations (up to 5.4
+# times with a covariate in years). A block without a slope has no such column, so an
+# intercept-only fit is never refitted. In a block of three or more terms the bound can be
+# crossed in many directions, and the reflection of the entries below is only one. On five
+# designs with such blocks (104 fits, among them a four-term block and a covariate in
+# years), 57 stopped in a column with two or more entries below, and the refit from the
+# reflection left 10 of them more than 0.01 short (up to 1.78), 5 recorded converged. Such
+# a column is therefore taken across along the direction in which the deviance falls
+# fastest at first order, to 0.9 of the length the block allows. Measured on 57 fits from
+# eight designs, 28 of them chosen as hard, that start left none more than 0.01 short but
+# one that no start reached, which the reflection left short along with 13 others, in a
+# median 0.96 times the reflection's evaluations on ordinary designs and 1.64 times on the
+# hard ones, up to 72,000 with a covariate in large units. At the full length the later terms' block starts
+# singular, and one fit, with a covariate from 10 to 100, stopped 0.86 short where the
+# reflection reached the maximum. The reflection stays for a column with one entry below,
+# where it is the other side. Growth refits keep the reflection: there the direction did
+# not help, the optimiser did.
+#
+# glmer's second stage, Nelder-Mead, takes its first steps 0.02 from where the first stage
+# stopped in every entry of theta. A slope on a covariate far from zero or in large units, such
+# as a birth or calendar year, has entries of about 1e-4 in its column, which such steps cannot
+# resolve: the fit stops where the first stage left them, often with what is left of the slope's
+# variance after the terms before it at zero, where lme4 calls the fit singular and runs no
+# convergence check, and at times short of the maximum without a variance at zero. On 133 fits of
+# 64 designs (Poisson and binomial; a birth year, a calendar year, an age and a covariate on a
+# scale of 1; blocks of one to three terms, with and without a slope by context; null and
+# adjusted; 18 strata of 80 rows, and 400 in four designs), 37 ended more than 0.01 below the
+# maximum, by up to 37, 27 of them recorded as converged, every one with a calendar or birth
+# year. fit_maihda() therefore searches such a fit with each random-effect block's terms
+# re-expressed on their own and the fixed effects centred and scaled (maihda_glmer_search()), from
+# lme4's starting values and from the fit's estimates, and refits from the lower end when it is
+# lower by more than 1e-4 (maihda_glmer_search_refit()). That left none of the 37 more than
+# 0.001 below the maximum, at a median 1.45 times the time of the fit before (quartiles 1.2 and
+# 2.0, up to 4.2); from lme4's starting values alone one fit stopped 0.061 short, and from a
+# variance at zero moved to the lowest deviance along it (as lmer fits are refitted,
+# maihda_lmer_zero_column_start()) 18 did. Of 16 negative-binomial fits with a slope on a year,
+# the four glmer.nb left singular were refitted 0.002 to 20 lower. A fit whose maximum has a block of lower
+# rank can end just beside it, where lme4 no longer calls it singular and its checks fire on a
+# Hessian that is not positive definite, and is then recorded as not converged (1 of the 133,
+# 6e-6 below the maximum).
+#
+# The searches' deviance function, rebuilt from a copy of the fit, starts its penalised least
+# squares from the same point at every evaluation, and lme4 takes the deviance with the
+# log-determinant of the weights before the last step, so its value is off by about the size of
+# that step: at lme4's relative tolerance of 1e-7 it lay up to 1e-4 relative above the converged
+# deviance at a fit's estimates. lme4's own -2 log-likelihood, from the last step of its fit, lay
+# up to 7.4e-5 relative from that. Where the two differed by more than 1e-5 relative the fit was
+# not re-expressed and not searched: in two sets of simulated null models, 0 / 1 and three-trial
+# binomial outcomes with strata spread on the logit scale with an SD of 2 or more, 23 of 254 and
+# 30 of 192 fits, up to 13.6 below the maximum and some recorded as converged; none of 204 with
+# an SD of about 0.5 and none of 32 adjusted models. The searches therefore run that function to
+# 1e-10, and a fit is re-expressed when its deviance at the fit's own estimates carried back
+# matches that function at the estimates and that lies within 1e-3 relative of lme4's
+# -2 log-likelihood: a function rebuilt without the fit's offset or weights lay 18% or more from
+# it. All of those fits were then searched and none ended further below the maximum, though 5
+# stayed up to 2.2e-3 below it where lme4's -2 log-likelihood of the refit did not show the gain;
+# with lme4's -2 log-likelihood kept as the target at 1e-10, 11 of the 254 were refused, 2 of them
+# searched before and 0.60 and 1.99 short. Of 162 fits searched either way, 3 ended higher and one
+# 0.022 lower, where the search from lme4's starting values on the less precise function had
+# reached another maximum; the time was unchanged (a median 0.99 times).
+#
+# lme4 records the optimiser that made a fit, and lme4::refit() of a fit without a control, as a
+# parametric bootstrap written by hand or another package calls it, runs that optimiser at its
+# package's defaults: for bobyqa, a first step of min(0.95, 0.2 max |theta, beta|), which moves
+# every entry within it of its bound up to it before it starts. (lme4::bootMer() passes the call's
+# control instead, which names a binding of the fit's environment that it does not find.) Of 104
+# fits of such designs (seeds 1 and 2), 43 were refitted by bobyqa; refit() failed on 15 of them
+# and ended more than 0.01 above 18 of the other 28, by up to 188, every one with a birth or
+# calendar year, and of 88 simulated responses of 24 of them it failed on 22 and fell short of the
+# maximum of 49 of the other 66, 38 by more than 1, by up to 276. A refitted fit is therefore
+# refitted once more from its estimates by the second stage of the call's own control
+# (maihda_glmer_finish()), and records that optimiser, as lme4's own fits do. Refitted by
+# Nelder-Mead, the 43 stayed at the fit (21) or failed (22), as lme4's own fits of those designs
+# fail, and the 88 responses failed on 37 and fell short of the maximum on 27 of the other 51, 8
+# by more than 1. Nelder-Mead's own first steps (0.02 in theta) fail in PIRLS from 14 of the 43,
+# Poisson fits on a birth or calendar year; first steps of 0.1% of each estimate do not. The pass
+# never ended higher than the refit by its criterion and moved no estimate by more than 0.14% of
+# the larger of its size and 1; on glmer fits it added up to about three quarters of the fit's
+# processor time, and on a glmer.nb fit, whose dispersion is searched again, about as much as the
+# fit took. Two fits at one maximum can differ in their criteria by the precision of lme4's
+# PIRLS, so the pass is measured against the refit on one deviance function (maihda_glmer_rise()).
+# Growth fits a refit replaced get the same pass (maihda_fit_glmer_growth()).
+
+# Whether fit_maihda() makes an lme4 fit by maihda_fit_glmer_bound(): a model fitted by
+# glmer() or glmer.nb() that is not a growth model, without starting values of the user's
+# own.
+maihda_glmer_bound_applies <- function(fit_fun, longitudinal_info, dot_vals) {
+  (identical(fit_fun, quote(lme4::glmer)) || identical(fit_fun, quote(lme4::glmer.nb))) &&
+    is.null(longitudinal_info) && !"start" %in% names(dot_vals)
+}
+
+# Fit a glmer model that is not a growth model (`fit_call`, evaluated in `fit_env`) and
+# refit it once from the other side of its boundary traps by bobyqa, a column with two or
+# more entries below taken across along the first-order direction
+# (maihda_glmer_mirror_refit()), the refit kept when its criterion is lower by more than
+# `tol`; then refit a model with a random slope from searches with its random-effect blocks
+# and fixed effects re-expressed, their deviance function's penalised least squares run to a
+# relative tolerance of 1e-10 (maihda_glmer_search_refit()), kept on the same terms; and
+# when either refit replaced the fit, refit it once more from its estimates by the second stage
+# of the call's own control (maihda_glmer_finish()). Only the kept fit's warnings and messages
+# are signalled. A refit that fails is passed over.
+maihda_fit_glmer_bound <- function(fit_call, fit_env, tol = 1e-4) {
+  kept <- maihda_eval_holding_conditions(fit_call, fit_env)
+  refitted <- FALSE
+  mirrored <- tryCatch(maihda_glmer_mirror_refit(kept, fit_call, fit_env, tol,
+                                                 optimizer = "bobyqa", first_order = TRUE),
+                       error = function(e) NULL)
+  if (!is.null(mirrored)) {
+    kept <- mirrored
+    refitted <- TRUE
+  }
+  searched <- tryCatch(maihda_glmer_search_refit(kept, fit_call, fit_env, tol,
+                                                 tolerance = 1e-10),
+                       error = function(e) NULL)
+  if (!is.null(searched)) {
+    kept <- searched
+    refitted <- TRUE
+  }
+  if (refitted) {
+    finished <- tryCatch(maihda_glmer_finish(kept, fit_call, fit_env, tol),
+                         error = function(e) NULL)
+    if (!is.null(finished)) {
+      kept <- finished
+    }
+  }
+  maihda_signal_conditions(kept$conditions)
+  kept$value
+}
+
+# Whether the lme4 fit `model` has a random-effect term other than an intercept.
+maihda_lme4_has_slope <- function(model) {
+  any(vapply(lme4::getME(model, "cnms"), function(terms) any(terms != "(Intercept)"),
+             logical(1)))
+}
+
+# `theta` with the factor L of each random-effect block carried to a factor of the
+# covariance of T b, for `Ts`, one matrix T per block of `cnms`: the lower-triangular factor
+# with a non-negative diagonal from an unpivoted QR decomposition of (T L)'. A block of lower
+# rank keeps its zero diagonal entries to within rounding. Factoring the covariance again
+# (maihda_lmer_transform_theta()) takes the square root of the rounding error of its largest
+# products there: a zero beside an intercept entry of 6.7 for a birth year came back at 3.7e-4,
+# and a search of a three-term block carried that way stopped 0.014 below a maximum of rank one
+# that it reached carried by this. NULL when theta does not hold a full Cholesky factor per
+# block.
+maihda_glmer_carry_theta <- function(theta, cnms, Ts) {
+  sizes <- lengths(cnms) * (lengths(cnms) + 1) / 2
+  if (!is.numeric(theta) || length(theta) != sum(sizes) || length(Ts) != length(cnms)) {
+    return(NULL)
+  }
+  end <- cumsum(sizes)
+  for (k in seq_along(cnms)) {
+    q <- length(cnms[[k]])
+    idx <- seq.int(end[k] - sizes[k] + 1, end[k])
+    L <- matrix(0, q, q)
+    L[lower.tri(L, diag = TRUE)] <- theta[idx]
+    R <- qr.R(qr(t(Ts[[k]] %*% L), tol = 0))
+    L <- t(R * ifelse(diag(R) < 0, -1, 1))
+    theta[idx] <- L[lower.tri(L, diag = TRUE)]
+  }
+  theta
+}
+
+# The glmer fit `model` with each random-effect block's terms re-expressed on their own
+# (maihda_lmer_block_scales()) and its fixed effects as the coefficients of centred and scaled
+# columns (maihda_centre_scale_map()). The model so re-expressed is the same model: its
+# deviance (-2 log-likelihood, Laplace or quadrature as fitted) at a point p, the re-expressed
+# theta followed by the re-expressed coefficients, is the fit's own deviance function at p
+# carried back (maihda_glmer_carry_theta() and the map). A list of the blocks' names and
+# scales, the map `A`, the length `k` of theta, the fit's own `p` and its deviance `at`,
+# `carry` (p to theta and the fixed effects), `deviance` (of p) and lme4's bounds `lower`, the
+# coefficients free; NULL when the fit's fixed effects were not optimised with its variances
+# (nAGQ 0), a block cannot be re-expressed (lme4's diag() and other structured blocks hold no
+# full Cholesky factor in theta), the deviance at the fit's `p` differs from the deviance function
+# at the fit's own estimates by more than 1e-5 relative, or that differs from lme4's
+# -2 log-likelihood by more than 1e-3 relative (a deviance function that is not the fit's).
+# lme4's -2 log-likelihood comes from the last step of its own penalised least squares and can
+# lie more than 1e-5 relative from the deviance function at the same estimates. `tolerance`, when
+# given, is the relative tolerance to which the deviance function runs its penalised iteratively
+# reweighted least squares (lme4's `tolPwrss`, 1e-7), which it starts from the same point at
+# every evaluation.
+maihda_glmer_reexpressed <- function(model, tolerance = NULL) {
+  if (!isTRUE(tryCatch(model@devcomp$dims[["nAGQ"]] >= 1, error = function(e) FALSE))) {
+    return(NULL)
+  }
+  cnms <- lme4::getME(model, "cnms")
+  scales <- maihda_lmer_block_scales(maihda_lme4_block_columns(model), cnms)
+  beta <- lme4::fixef(model)
+  X <- lme4::getME(model, "X")
+  if (is.null(scales) || length(beta) == 0L || ncol(X) != length(beta)) {
+    return(NULL)
+  }
+  phi <- maihda_glmer_carry_theta(unname(lme4::getME(model, "theta")), cnms,
+                                  lapply(scales, solve))
+  if (is.null(phi)) {
+    return(NULL)
+  }
+  A <- maihda_centre_scale_map(X)
+  k <- length(phi)
+  carry <- function(p) {
+    list(theta = maihda_glmer_carry_theta(p[seq_len(k)], cnms, scales),
+         fixef = stats::setNames(drop(A %*% p[-seq_len(k)]), names(beta)))
+  }
+  # Rebuilt from a copy: lme4 writes into vectors the deviance function shares with the fit.
+  devfun <- lme4::getME(maihda_lme4_detached_copy(model), "devfun")
+  if (!is.null(tolerance)) {
+    environment(devfun)$tolPwrss <- tolerance
+  }
+  deviance <- function(p) {
+    at <- carry(p)
+    devfun(c(at$theta, unname(at$fixef)))
+  }
+  p <- c(phi, drop(solve(A, unname(beta))))
+  at <- deviance(p)
+  own <- devfun(c(unname(lme4::getME(model, "theta")), unname(beta)))
+  target <- maihda_glmer_criterion(model)
+  if (!is.finite(at) || !is.finite(own) || abs(at - own) > 1e-5 * max(1, abs(own)) ||
+      abs(own - target) > 1e-3 * max(1, abs(target))) {
+    return(NULL)
+  }
+  list(cnms = cnms, scales = scales, A = A, k = k, p = p, at = at, carry = carry,
+       deviance = deviance,
+       lower = c(unname(lme4::getME(model, "lower")), rep(-Inf, length(beta))))
+}
+
+# A search of the glmer fit `model` re-expressed (maihda_glmer_reexpressed()): its deviance
+# minimised by `optimiser` (lme4::nloptwrap()) within lme4's bounds, from lme4's starting
+# values of theta with the fit's fixed effects (`from = "standardised"`; nothing is searched
+# when no term of a block is re-expressed) or from the fit's own estimates
+# (`from = "estimates"`), then once more from across a bound a column of theta stopped at
+# (maihda_lmer_across_bound()) and once more from where it stopped, the lower end kept each
+# time. A list of where the search ended, carried back (`start`: theta and the fixed effects),
+# the deviance there (`deviance`) and how far below the fit's that is (`gain`), both by the
+# fit's own deviance function, with lme4's bounds of theta (`lower`); NULL when no search is
+# made or none ends where the deviance can be evaluated. `tolerance` is that of the deviance
+# function (maihda_glmer_reexpressed()).
+maihda_glmer_search <- function(model, from = c("standardised", "estimates"),
+                                optimiser = lme4::nloptwrap, tolerance = NULL) {
+  from <- match.arg(from)
+  if (from == "standardised") {
+    scales <- maihda_lmer_block_scales(maihda_lme4_block_columns(model),
+                                       lme4::getME(model, "cnms"))
+    if (is.null(scales) || all(vapply(scales, function(Tm) all(Tm == diag(1, nrow(Tm))),
+                                      logical(1)))) {
+      return(NULL)
+    }
+  }
+  re <- maihda_glmer_reexpressed(model, tolerance)
+  if (is.null(re)) {
+    return(NULL)
+  }
+  start <- re$p
+  if (from == "standardised") {
+    th <- seq_len(re$k)
+    start[th] <- ifelse(re$lower[th] == 0, 1, 0)
+  }
+  # A point where the deviance cannot be evaluated (PIRLS fails far from the fit) counts as
+  # far above every other, so the search turns back from it.
+  objective <- function(p) {
+    v <- tryCatch(re$deviance(p), error = function(e) NA_real_)
+    if (is.finite(v)) v else 1e100
+  }
+  upper <- rep(Inf, length(re$lower))
+  run <- function(p, best = NULL) {
+    found <- tryCatch(optimiser(p, objective, lower = re$lower, upper = upper),
+                      error = function(e) NULL)
+    if (!is.null(found) && (is.null(best) || isTRUE(found$fval < best$fval))) found else best
+  }
+  best <- run(start)
+  if (is.null(best)) {
+    return(NULL)
+  }
+  across <- maihda_lmer_across_bound(best$par[seq_len(re$k)], re$cnms)
+  if (!is.null(across)) {
+    best <- run(c(across, best$par[-seq_len(re$k)]), best)
+  }
+  best <- run(best$par, best)
+  if (!is.finite(best$fval) || best$fval >= 1e100) {
+    return(NULL)
+  }
+  list(start = re$carry(best$par), deviance = best$fval, gain = re$at - best$fval,
+       lower = re$lower[seq_len(re$k)])
+}
+
+# The first step, bobyqa's `rhobeg`, of a refit from `theta` (lme4's bounds `lower`): half the
+# smallest positive diagonal entry, at most the 2e-4 of glmer's own second stage. bobyqa moves an
+# entry within its first step of a bound onto the bound or to that step before it starts, and a
+# slope on a year has entries of about 1e-4: from the end of a search 0.0068 below the maximum,
+# a refit with a first step of 2e-4 stopped 0.27 below, and one with half the smallest entry
+# kept the end.
+maihda_glmer_first_step <- function(theta, lower) {
+  min(2e-4, 0.5 * theta[lower == 0 & theta > 0])
+}
+
+# The refit of maihda_fit_glmer_bound() and maihda_fit_glmer_growth() from a search: when
+# the fit in `kept` (a value / conditions pair of maihda_eval_holding_conditions()) has a
+# random slope, it is searched
+# (maihda_glmer_search()) from lme4's starting values and from its estimates, and when the
+# lower end is lower than the fit's criterion by more than `tol`, `fit_call` is evaluated from
+# there by glmer's second stage only, by bobyqa with its first step below the end's smallest
+# positive variance entry (maihda_glmer_first_step()), with the call's own control otherwise.
+# The refit's pair when its criterion is lower than the kept fit's by more than `tol`, else
+# NULL. `tolerance` is that of the searches' deviance function (maihda_glmer_reexpressed());
+# `gain`, when given, is how far at least the lower end must lie below the fit's criterion for
+# the refit to be made.
+maihda_glmer_search_refit <- function(kept, fit_call, fit_env, tol = 1e-4, tolerance = NULL,
+                                      gain = NULL) {
+  model <- kept$value
+  if (!maihda_lme4_has_slope(model)) {
+    return(NULL)
+  }
+  found <- Filter(Negate(is.null), lapply(c("standardised", "estimates"), function(from) {
+    tryCatch(maihda_glmer_search(model, from, tolerance = tolerance), error = function(e) NULL)
+  }))
+  if (!length(found)) {
+    return(NULL)
+  }
+  best <- found[[which.min(vapply(found, `[[`, numeric(1), "deviance"))]]
+  if (!isTRUE(best$gain > tol) || (!is.null(gain) && !isTRUE(best$gain >= gain))) {
+    return(NULL)
+  }
+  control <- if (is.null(fit_call$control)) {
+    lme4::glmerControl()
+  } else {
+    eval(fit_call$control, fit_env)
+  }
+  control$nAGQ0initStep <- FALSE
+  # Settings of the fit's own optimiser are not those of this refit.
+  step <- maihda_glmer_first_step(unname(best$start$theta), best$lower)
+  control$optimizer[2] <- "bobyqa"
+  control$optCtrl <- list(rhobeg = step, rhoend = step * 1e-3, maxfun = 1e5)
+  assign(".maihda_arg_search_control", control, envir = fit_env)
+  refit_call <- fit_call
+  refit_call$start <- list(theta = unname(best$start$theta), fixef = best$start$fixef)
+  refit_call$control <- as.name(".maihda_arg_search_control")
+  refit <- maihda_eval_holding_conditions(refit_call, fit_env)
+  if (maihda_glmer_criterion(refit$value) < maihda_glmer_criterion(model) - tol) {
+    refit
+  } else {
+    NULL
+  }
+}
+
+# The rise in -2 log-likelihood from the estimates of the glmer fit `from` to those of the glmer
+# fit `to`, both evaluated on `to`'s deviance function (taken from a detached copy, so the fits are
+# left as they were), or the difference of their criteria where that function cannot be evaluated.
+# The criteria of two fits at one point differ by the precision of lme4's PIRLS: 8e-4 apart, about
+# 1e-3 below what the function gives there, for two fits of 12 groups of 25 rows. Two glmer.nb()
+# fits of different dispersions (a pass searches it again) are each evaluated on their own
+# deviance function, its PIRLS run to a relative tolerance of 1e-10: on `to`'s, `from` would be
+# taken at `to`'s dispersion, where a pass of a growth fit that ended 1.36 higher at a dispersion
+# 1.6 times the fit's measured 0.009 lower.
+maihda_glmer_rise <- function(to, from) {
+  at <- function(m) c(unname(lme4::getME(m, "theta")), unname(lme4::fixef(m)))
+  devfun_of <- function(m) lme4::getME(maihda_lme4_detached_copy(m), "devfun")
+  rise <- tryCatch({
+    if (identical(stats::family(to)$family, stats::family(from)$family)) {
+      devfun <- devfun_of(to)
+      devfun(at(to)) - devfun(at(from))
+    } else {
+      own <- function(m) {
+        devfun <- devfun_of(m)
+        environment(devfun)$tolPwrss <- 1e-10
+        devfun(at(m))
+      }
+      own(to) - own(from)
+    }
+  }, error = function(e) NA_real_)
+  if (is.finite(rise)) rise else maihda_glmer_criterion(to) - maihda_glmer_criterion(from)
+}
+
+# The last refit of maihda_fit_glmer_bound() and maihda_fit_glmer_growth(), of a fit a refit
+# replaced (`kept`, a value / conditions pair of maihda_eval_holding_conditions()): `fit_call`
+# evaluated from the fit's estimates by glmer's second stage only, by the second-stage optimiser
+# of the call's own control (Nelder-Mead unless the user set another), so that the fit records
+# the optimiser glmer() would.
+# Where Nelder-Mead's own first steps fail, or it stops without converging, its first steps are
+# 0.1% of each estimate, and 1e-6 for an estimate below 1e-3 in size. The pass's pair unless it
+# ends higher than the fit by more than `tol` (maihda_glmer_rise()); NULL when the fit records
+# that optimiser already, when the control names a function, or when the pass fails or its
+# optimiser reports a failure.
+maihda_glmer_finish <- function(kept, fit_call, fit_env, tol = 1e-4) {
+  model <- kept$value
+  control <- if (is.null(fit_call$control)) {
+    lme4::glmerControl()
+  } else {
+    eval(fit_call$control, fit_env)
+  }
+  own <- control$optimizer[[length(control$optimizer)]]
+  if (!is.character(own) || identical(model@optinfo$optimizer, own)) {
+    return(NULL)
+  }
+  control$nAGQ0initStep <- FALSE
+  finish_call <- fit_call
+  finish_call$start <- list(theta = unname(lme4::getME(model, "theta")), fixef = lme4::fixef(model))
+  finish_call$control <- as.name(".maihda_arg_finish_control")
+  run <- function(ctrl) {
+    assign(".maihda_arg_finish_control", ctrl, envir = fit_env)
+    tryCatch(maihda_eval_holding_conditions(finish_call, fit_env), error = function(e) NULL)
+  }
+  # A pass counts only when its optimiser reports success: one stopped by an evaluation limit of
+  # the user's own would replace a refit that converged with one that did not.
+  done <- function(pass) {
+    !is.null(pass) && identical(as.integer(pass$value@optinfo$conv$opt), 0L)
+  }
+  finished <- run(control)
+  if (!done(finished) && identical(own, "Nelder_Mead")) {
+    par <- c(unname(lme4::getME(model, "theta")), unname(lme4::fixef(model)))
+    control$optCtrl$xst <- 1e-3 * pmax(abs(par), 1e-3)
+    control$optCtrl$xt <- control$optCtrl$xst * 5e-4
+    finished <- run(control)
+  }
+  if (done(finished) && isTRUE(maihda_glmer_rise(finished$value, model) <= tol)) {
+    finished
+  } else {
+    NULL
+  }
+}
+
+# ---- refits of other lmer fits ---------------------------------------------------------
+
+# An lmer fit that is not a growth model stops short of the REML optimum in two ways when a
+# random-effect block has a slope, such as (1 + x | stratum). lmer's optimiser can stop with
+# the block's intercept SD at its bound of 0 beside a non-zero intercept-slope entry
+# (maihda_lme4_boundary_traps()), mostly where the intercept variance is small next to the
+# slope variance, as in an adjusted model on additive strata; and with a slope covariate far
+# from zero or in large units, such as age in years or a birth year, it stops short without
+# the intercept at its bound. On twelve designs of 8 to 36 strata (720 fits, half null and
+# half adjusted), 64 of 480 fits with a covariate on a scale of about 1 (normal with mean 0 or
+# 3, or uniform on (0, 1)) ended more than 0.01 above the optimum, up to 6.4, all but one
+# recorded as converged; with age in years 121 of 180, up to 20.6, and with a birth year 55
+# of 60. fit_maihda() therefore refits such a fit (maihda_fit_lmer_slopes()) once from the
+# other side of a bound it stopped at, and once from a start carried back from the same model
+# with its random-effect terms centred and scaled (maihda_lmer_standardised_start()), where
+# lmer's optimiser reaches the optimum far more often; the fit with the lowest criterion is
+# kept. That left 1 of the 720 more than 0.01 above the optimum (by 0.016), at about three
+# times the time of lmer's own fit.
+#
+# A slope in a block without an intercept, as in (1 + x || stratum), (1 | stratum) +
+# (0 + x | stratum) or (1 + x | stratum) + (0 + x | ctx), is re-expressed in that block alone,
+# divided by its root mean square (maihda_lmer_block_scales()): a calendar year divided by its
+# standard deviation instead is about 630, and the start made in those units lies far from the
+# optimum. lmer also stops with what is left of the variance of a block's last term at zero where
+# the criterion still falls as it moves off zero, a saddle, or beside such a zero on the ridge
+# between a slope block without an intercept and the intercept's; lme4 calls both singular and
+# checks neither. On nineteen designs of 8 to 36 strata and up to 7,200 rows (570 fits) with
+# calendar years, birth years, ages and covariates on a scale of about 1, in blocks of one to
+# three terms, the refits above with that start's terms divided by their standard deviations left
+# 57 fits more than 0.01 above the optimum (up to 12.8 with a calendar-year slope by context), all
+# recorded as converged. With the start re-expressed block by block, and the fit kept and lmer's
+# own refitted from a variance at zero moved to the lowest criterion along it
+# (maihda_lmer_zero_column_start()), 1 was left: a (1 + x || stratum) fit on an uncentred
+# calendar year and 7,200 rows, 69.8 above an optimum with an intercept SD near 100 that no start
+# reaches. That takes about 4.4 times the time of lmer's own fit (the median over the 570), more
+# where lmer's own fit stops with a variance at zero and is refitted from there: 9.4 with a
+# three-term block on an age and a birth year, 7.6 with (1 + x | stratum) on a calendar year.
+
+# Whether fit_maihda() makes an lme4 fit by maihda_fit_lmer_slopes(): a model fitted by lmer()
+# that is not a growth model, has a random-effect term with more than an intercept, and is
+# fitted without starting values of the user's own (under any spelling lmer() binds to
+# `start`).
+maihda_lmer_slopes_apply <- function(fit_fun, longitudinal_info, dot_vals, formula) {
+  if (!identical(fit_fun, quote(lme4::lmer)) || !is.null(longitudinal_info)) {
+    return(FALSE)
+  }
+  bound <- names(maihda_resolve_dot_names(dot_vals, lme4::lmer, c("formula", "data"),
+                                          watch = "start"))
+  if ("start" %in% bound) {
+    return(FALSE)
+  }
+  bars <- tryCatch(reformulas::findbars(formula), error = function(e) NULL)
+  any(vapply(bars, function(b) !identical(b[[2]], 1), logical(1)))
+}
+
+# `theta` with every column at a boundary trap (maihda_lme4_trap_columns()) taken across its
+# bound, the diagonal entry at 0.05 and the entries below negated
+# (maihda_lme4_mirror_theta()); NULL when there is no such column.
+maihda_lmer_across_bound <- function(theta, cnms) {
+  cols <- maihda_lme4_trap_columns(theta, cnms)
+  if (!length(cols)) {
+    return(NULL)
+  }
+  maihda_lme4_mirror_theta(theta, cnms, vapply(cols, `[[`, integer(1), "index"), 0.05)
+}
+
+# The lmer fit `model` with each random-effect block's terms re-expressed on their own
+# (maihda_lmer_block_scales(): centred at their means and divided by their standard deviations
+# in a block with an intercept, divided by their root mean squares in a block without one). The
+# model so re-expressed is the same model: its REML criterion (deviance for a maximum-likelihood
+# fit) at a theta `phi` of the re-expressed blocks is the fit's own deviance function at `phi`
+# carried back (maihda_lmer_transform_theta()), for the same rows, weights and offset whatever
+# the formula's spelling of the terms. A list of the blocks' names and scales, the fit's own
+# `phi`, `carry` (phi to theta), `criterion` (of phi) and lme4's bounds `lower`; NULL when the
+# blocks cannot be re-expressed or the deviance function does not reproduce the fit's
+# criterion.
+maihda_lmer_reexpressed <- function(model) {
+  cnms <- lme4::getME(model, "cnms")
+  scales <- maihda_lmer_block_scales(maihda_lme4_block_columns(model), cnms)
+  if (is.null(scales)) {
+    return(NULL)
+  }
+  # Rebuilt from a copy: lme4 writes into vectors the deviance function shares with the fit.
+  deviance <- lme4::getME(maihda_lme4_detached_copy(model), "devfun")
+  theta <- unname(lme4::getME(model, "theta"))
+  target <- maihda_lmer_criterion(model)
+  at_fit <- deviance(theta)
+  if (!is.finite(at_fit) || abs(at_fit - target) > 1e-5 * max(1, abs(target))) {
+    return(NULL)
+  }
+  phi <- maihda_lmer_transform_theta(theta, cnms, lapply(scales, solve))
+  if (is.null(phi)) {
+    return(NULL)
+  }
+  carry <- function(p) maihda_lmer_transform_theta(p, cnms, scales)
+  list(cnms = cnms, scales = scales, phi = phi, carry = carry,
+       criterion = function(p) deviance(carry(p)), lower = unname(lme4::getME(model, "lower")))
+}
+
+# `criterion`, a function of a re-expressed theta (maihda_lmer_reexpressed()), minimised as
+# lmer() minimises its own, by `optimiser` from `start` within the bounds `lower`, and once more
+# from across a bound it stopped at (maihda_lmer_across_bound()), the lower kept: the
+# optimiser's result.
+maihda_lmer_minimise <- function(criterion, start, cnms, lower, optimiser) {
+  upper <- rep(Inf, length(lower))
+  best <- optimiser(start, criterion, lower = lower, upper = upper)
+  across <- maihda_lmer_across_bound(best$par, cnms)
+  if (!is.null(across)) {
+    refit <- tryCatch(optimiser(across, criterion, lower = lower, upper = upper),
+                      error = function(e) NULL)
+    if (!is.null(refit) && is.finite(refit$fval) && refit$fval < best$fval) {
+      best <- refit
+    }
+  }
+  best
+}
+
+# The start carried back from the lmer fit `model` refitted with each random-effect block's
+# terms re-expressed on their own (maihda_lmer_reexpressed()): its criterion minimised by
+# `optimiser` (lmer's default, lme4::nloptwrap()) from lme4's starting values, within lme4's
+# bounds and once more from across a bound it stopped at (maihda_lmer_minimise()), and the
+# minimum carried back. A term in a block without an intercept is divided by its root mean
+# square there: centring it would change the model, and a covariate far from zero divided by its
+# standard deviation stays far from zero (a calendar year at about 630), where that start is far
+# from the optimum. A list of one theta, or an empty list when no term is re-expressed or the
+# deviance function does not reproduce the fit's criterion.
+maihda_lmer_standardised_start <- function(model, optimiser = lme4::nloptwrap) {
+  scales <- maihda_lmer_block_scales(maihda_lme4_block_columns(model), lme4::getME(model, "cnms"))
+  if (is.null(scales) || all(vapply(scales, function(Tm) all(Tm == diag(1, nrow(Tm))),
+                                    logical(1)))) {
+    return(list())
+  }
+  re <- maihda_lmer_reexpressed(model)
+  if (is.null(re)) {
+    return(list())
+  }
+  best <- maihda_lmer_minimise(re$criterion, ifelse(re$lower == 0, 1, 0), re$cnms, re$lower,
+                               optimiser)
+  back <- re$carry(best$par)
+  if (is.null(back)) list() else list(back)
+}
+
+# The start of maihda_fit_lmer_slopes()'s refit of the lmer fit `model` from a variance at zero.
+# In a random-effect column with nothing below it (the last term of a block, or a block of one
+# term) the criterion depends on the Cholesky diagonal entry only through its square, so at zero
+# it is flat to first order, and lmer's optimiser can stop there while the criterion falls as
+# that variance moves off zero: a saddle, not a minimum. With each block's terms re-expressed
+# (maihda_lmer_reexpressed()), every such column whose diagonal entry is below 1e-3 and along
+# which the criterion is lower at 1e-3 than at the fit is moved to the lowest criterion along it,
+# the other entries held (the lowest of a grid from 1e-4 to 10, then optimize() between its
+# neighbours); from there the criterion is minimised as in maihda_lmer_standardised_start(), and
+# the minimum carried back. A list of one theta, or an empty list when no such column falls off
+# zero or the deviance function does not reproduce the fit's criterion.
+maihda_lmer_zero_column_start <- function(model, optimiser = lme4::nloptwrap) {
+  re <- maihda_lmer_reexpressed(model)
+  if (is.null(re)) {
+    return(list())
+  }
+  phi <- re$phi
+  at <- re$criterion(phi)
+  moved <- FALSE
+  # The diagonal entry of each block's last column, in theta order.
+  for (j in cumsum(lengths(re$cnms) * (lengths(re$cnms) + 1) / 2)) {
+    along <- function(t) {
+      p <- phi
+      p[j] <- t
+      re$criterion(p)
+    }
+    if (abs(phi[j]) >= 1e-3 || !isTRUE(along(1e-3) < at)) {
+      next
+    }
+    grid <- 10^seq(-4, 1, length.out = 21)
+    values <- vapply(grid, along, numeric(1))
+    k <- which.min(values)
+    line <- stats::optimize(along, grid[c(max(1L, k - 1L), min(length(grid), k + 1L))])
+    phi[j] <- if (isTRUE(line$objective < values[k])) line$minimum else grid[k]
+    at <- re$criterion(phi)
+    moved <- TRUE
+  }
+  if (!moved) {
+    return(list())
+  }
+  best <- maihda_lmer_minimise(re$criterion, phi, re$cnms, re$lower, optimiser)
+  back <- re$carry(best$par)
+  if (is.null(back)) list() else list(back)
+}
+
+# The starts maihda_fit_lmer_slopes() refits the lmer fit `model` from: its theta taken across
+# a bound it stopped at (maihda_lmer_across_bound()), and the start of
+# maihda_lmer_standardised_start(). A start that cannot be made is left out.
+maihda_lmer_refit_starts <- function(model) {
+  theta <- unname(lme4::getME(model, "theta"))
+  cnms <- lme4::getME(model, "cnms")
+  Filter(Negate(is.null),
+         c(list(maihda_lmer_across_bound(theta, cnms)),
+           tryCatch(maihda_lmer_standardised_start(model), error = function(e) list())))
+}
+
+# Fit an lmer model that is not a growth model (`fit_call`, evaluated in `fit_env`), refit it
+# from each start of maihda_lmer_refit_starts() and keep the fit with the lowest criterion
+# (maihda_pick_lowest()); then refit once more from a variance at zero where the criterion falls
+# off zero (maihda_lmer_zero_column_start()), from the kept fit and from lmer's own, each refit
+# kept on the same terms. The start that a refit leads to can stop where the criterion no
+# longer falls off its zero, while lmer's own fit still shows the way. Only the kept fit's
+# warnings and messages are signalled. A refit that fails is passed over.
+maihda_fit_lmer_slopes <- function(fit_call, fit_env, tol = 1e-4) {
+  refit_from <- function(start) {
+    restart_call <- fit_call
+    restart_call$start <- start
+    tryCatch(maihda_eval_holding_conditions(restart_call, fit_env), error = function(e) NULL)
+  }
+  criterion_of <- function(fits) {
+    vapply(fits, function(f) {
+      if (is.null(f)) NA_real_ else tryCatch(maihda_lmer_criterion(f$value),
+                                             error = function(e) NA_real_)
+    }, numeric(1))
+  }
+  first <- maihda_eval_holding_conditions(fit_call, fit_env)
+  fits <- list(first)
+  starts <- tryCatch(maihda_lmer_refit_starts(first$value), error = function(e) list())
+  for (start in starts) {
+    fits[[length(fits) + 1L]] <- refit_from(start)
+  }
+  k <- maihda_pick_lowest(criterion_of(fits), tol)
+  kept <- fits[[k]]
+  for (from in if (k == 1L) list(first) else list(kept, first)) {
+    zero <- tryCatch(maihda_lmer_zero_column_start(from$value), error = function(e) list())
+    if (length(zero)) {
+      pair <- list(kept, refit_from(zero[[1L]]))
+      kept <- pair[[maihda_pick_lowest(criterion_of(pair), tol)]]
+    }
+  }
+  maihda_signal_conditions(kept$conditions)
+  kept$value
 }
 
 # Posterior-mean ordered covariance block of a grouping factor (brms), for the
-# point-estimate PCV / components table. Built from the SD and correlation draws
+# components table and the blocks a longitudinal PCV stores. The PCV itself does not
+# read its variances off this block: it compares per-draw posterior medians (see
+# maihda_longitudinal_pcv_variances()). Built from the SD and correlation draws
 # (maihda_re_cov_draws_brms), avoiding any dependence on the dimension order of
 # brms::VarCorr()'s $cov array. The brms longitudinal engine is restricted to
 # linear growth (time_degree 1), so the block is the 2x2 (intercept, slope).
 maihda_re_block_brms <- function(model, group, time, time_degree) {
-  if (time_degree != 1L) {
+  if (time_degree > 1L) {
     stop("The brms longitudinal engine supports linear growth only ",
          "(time_degree = 1).", call. = FALSE)
   }
   draws <- maihda_posterior_draws_brms(model)
-  blk <- maihda_re_cov_draws_brms(draws, group, time)
+  blk <- maihda_re_cov_draws_brms(draws, group, time, time_degree = time_degree)
+  if (time_degree < 1L) {
+    # Intercept-only level (stratum_slope = FALSE): a 1x1 block, so a(t)'Sigma a(t)
+    # is the intercept variance at every t.
+    return(matrix(mean(blk$v0), nrow = 1,
+                  dimnames = list("(Intercept)", "(Intercept)")))
+  }
   v0 <- mean(blk$v0); v1 <- mean(blk$v1); cv <- mean(blk$cov)
   matrix(c(v0, cv, cv, v1), nrow = 2,
          dimnames = list(c("(Intercept)", time), c("(Intercept)", time)))
 }
 
 # Engine-agnostic ordered covariance block (point estimate) for a maihda_model.
-# The block is in the model's coefficient coordinates -- CENTERED time when the
-# fit used the internal centering -- so evaluations at an original-scale time t
-# must subtract maihda_lng_time_center() first.
+# The block is in CENTERED user units -- centered time when the fit used the internal
+# centering, and converted back from an lme4 fit's internal time scale -- so
+# evaluations at an original-scale time t must subtract maihda_lng_time_center() first.
 maihda_re_block <- function(object, group) {
   lng <- object$longitudinal_info
   time_term <- maihda_lng_time_term(lng)
+  # The stratum level carries fewer growth terms than the person level under
+  # stratum_slope = FALSE (a random intercept only, degree 0).
+  deg <- if (identical(group, "stratum")) {
+    maihda_lng_stratum_degree(lng)
+  } else {
+    lng$time_degree
+  }
   if (identical(object$engine, "lme4")) {
-    maihda_re_block_lme4(object$model, group, time_term, lng$time_degree)
+    maihda_re_block_lme4(object$model, group, time_term, deg,
+                         scale = maihda_lng_time_scale(lng))
   } else if (identical(object$engine, "brms")) {
-    maihda_re_block_brms(object$model, group, time_term, lng$time_degree)
+    maihda_re_block_brms(object$model, group, time_term, deg)
   } else {
     stop("Longitudinal MAIHDA is supported only for lme4/brms.", call. = FALSE)
   }
@@ -358,8 +2020,8 @@ maihda_re_block <- function(object, group) {
 
 # Between-level variance implied by a covariance block at time(s) t:
 # a(t)' Sigma a(t) with a(t) = (1, t, t^2, ...). Vectorised over t. t must be on
-# the block's own coefficient scale: for a fit on internally centered time,
-# convert an original-scale time first (t - maihda_lng_time_center(lng)).
+# the block's own coefficient scale: for a block from maihda_re_block() (centered
+# user units), convert an original-scale time first (t - maihda_lng_time_center(lng)).
 maihda_var_at_time <- function(Sigma, t) {
   degree <- nrow(Sigma) - 1L
   vapply(t, function(ti) {
@@ -388,12 +2050,119 @@ maihda_slope_var_at_time <- function(Sigma, t) {
 # is a TRAJECTORY (random intercept + slope(s)), so collapsing it to one number
 # produces a cross-sectional-looking result that is not the right quantity. Point
 # the user to the trajectory tools instead.
-maihda_stop_longitudinal_scalar <- function(what) {
+# Whether a maihda_model / maihda_analysis was fit with a stratum-level random
+# slope. TRUE for anything non-longitudinal or stored before stratum_slope existed,
+# so the callers' messages default to the historical wording.
+maihda_object_stratum_slope <- function(object) {
+  lng <- object$longitudinal_info
+  if (is.null(lng) && !is.null(object$model)) {
+    lng <- object$model$longitudinal_info   # a maihda_analysis holds the fit in $model
+  }
+  !isFALSE(lng$stratum_slope)
+}
+
+maihda_stop_longitudinal_scalar <- function(what, stratum_slope = TRUE) {
+  # Under stratum_slope = FALSE the stratum effect IS a single number (a constant
+  # deviation), so the "each stratum is a trajectory" rationale does not apply and
+  # must not be asserted. The tool is still unavailable -- the cross-sectional
+  # ranking/BLUP paths are not wired for a growth fit's person-level slopes -- but
+  # say why truthfully, and point at the route that does produce the per-stratum
+  # values.
+  if (isFALSE(stratum_slope)) {
+    stop(what, " is not available for a longitudinal MAIHDA. The stratum level was ",
+         "fit with a random intercept only (stratum_slope = FALSE), so each stratum ",
+         "does have a single deviation: read it with predict(type = \"strata\") ",
+         "($baseline), which is the per-stratum value the cross-sectional tools ",
+         "would rank.", call. = FALSE)
+  }
   stop(what, " is not defined for a longitudinal MAIHDA: each stratum is a ",
        "trajectory (random intercept + slope), not a single value. Use ",
        "predict(type = \"strata\") for the per-stratum intercept and slope, ",
        "plot(type = \"trajectories\") for the stratum mean trajectories, or ",
-       "plot(type = \"vpc_trajectory\") for the time-varying VPC.", call. = FALSE)
+       "plot(type = \"vpc_trajectory\") for the time-varying VPC. Fitting with ",
+       "stratum_slope = FALSE gives a time-constant between-stratum variance ",
+       "instead.", call. = FALSE)
+}
+
+# The intercept and slope VPCs of Bell, Evans, Holman & Leckie (2024), equation
+# (5): the between-stratum share of the between-INDIVIDUAL variance in each growth
+# parameter,
+#
+#   VPC_intercept = Var_S(t0) / (Var_S(t0) + Var_I(t0)),
+#   VPC_slope     = SlopeVar_S(t0) / (SlopeVar_S(t0) + SlopeVar_I(t0)),
+#
+# with the level-1 (occasion) residual deliberately ABSENT from both denominators.
+# This is a different estimand from the package's headline VPC(t), which keeps the
+# residual and so answers the discriminatory-accuracy question -- how much of an
+# observed measurement a stratum explains. These two answer how intersectionally
+# patterned people's trajectories are, and are unaffected by measurement noise.
+#
+
+maihda_longitudinal_trajectory_vpc <- function(Sigma_s, Sigma_i, ref_c) {
+  share <- function(vs, vi) {
+    tot <- vs + vi
+    if (!is.finite(tot) || tot <= 0) NA_real_ else vs / tot
+  }
+  # No stratum slope block (stratum_slope = FALSE) means there is no between-stratum
+  # slope variance to take a share OF -- NA, not the 0 the arithmetic would return.
+  has_slope <- nrow(Sigma_s) >= 2 && nrow(Sigma_i) >= 2
+  list(
+    vpc_intercept = share(maihda_var_at_time(Sigma_s, ref_c),
+                          maihda_var_at_time(Sigma_i, ref_c)),
+    vpc_slope = if (has_slope) {
+      share(maihda_slope_var_at_time(Sigma_s, ref_c),
+            maihda_slope_var_at_time(Sigma_i, ref_c))
+    } else {
+      NA_real_
+    }
+  )
+}
+
+# The same two trajectory VPCs computed PER POSTERIOR DRAW rather than from the
+# posterior-mean covariance blocks. A ratio of posterior means is a different
+# estimator from the posterior median of the ratio: the between-stratum variance
+# posterior is right-skewed whenever the strata are few (the usual MAIHDA case),
+# so its mean sits above its median while the much better identified
+# between-individual variance is near-symmetric, and the plug-in ratio runs high.
+# Measured on maihda_long_data (150 ids, 12 strata, 2000 draws, max Rhat 1.007):
+# the plug-in gives 0.6145 where the posterior median of the ratio is 0.5765, a
+# 6.6% overstatement -- and the honest 95% credible interval on it runs
+# [0.336, 0.823], half the unit interval, which was not reported at all. The gap
+# tracks the skew of the stratum variance posterior (mean/median 1.20, against
+# 1.02 for the far better identified individual variance) and so widens as the
+# strata get fewer. Reporting the median of the ratio also keeps these two
+# consistent with vpc_t and with the contextual brms partition, which are already
+# summarised per draw.
+#
+# `sig_s` / `sig_i` are the per-draw growth blocks from maihda_re_cov_draws_brms()
+# (v0 = intercept variance, v1 = slope variance, cov = their covariance). The brms
+# longitudinal engine is restricted to linear growth, so the instantaneous-slope
+# variance b(t)'Sigma b(t) is Sigma[2, 2] = v1 at every t -- the draw-wise
+# counterpart of maihda_slope_var_at_time() on a 2x2 block.
+maihda_longitudinal_trajectory_vpc_draws <- function(sig_s, sig_i, ref_c,
+                                                     has_slope,
+                                                     conf_level = 0.95) {
+  a <- 1 - conf_level
+  none <- list(estimate = NA_real_, ci = c(NA_real_, NA_real_))
+  summ <- function(vs, vi) {
+    tot <- vs + vi
+    # Draw-wise version of share()'s guard: a draw with no total variance has no
+    # defined share, so it is dropped rather than counted as 0.
+    r <- ifelse(is.finite(tot) & tot > 0, vs / tot, NA_real_)
+    r <- r[is.finite(r)]
+    if (!length(r)) return(none)
+    list(estimate = stats::median(r),
+         ci = stats::quantile(r, c(a / 2, 1 - a / 2), names = FALSE))
+  }
+  var_at <- function(b, t) b$v0 + 2 * t * b$cov + t^2 * b$v1
+  int <- summ(var_at(sig_s, ref_c), var_at(sig_i, ref_c))
+  # As in the point-estimate sibling: with no stratum slope block there is no
+  # between-stratum slope variance to take a share OF. maihda_re_cov_draws_brms()
+  # reports that level as a DEGENERATE block with v1 = 0 rather than a shorter one,
+  # so the arithmetic would silently return 0 -- has_slope must be passed in.
+  slp <- if (isTRUE(has_slope)) summ(sig_s$v1, sig_i$v1) else none
+  list(vpc_intercept = int$estimate, vpc_intercept_ci = int$ci,
+       vpc_slope = slp$estimate, vpc_slope_ci = slp$ci)
 }
 
 # A time grid for reporting VPC(t): the observed unique times when few, else a
@@ -406,7 +2175,147 @@ maihda_longitudinal_time_grid <- function(time_values) {
   seq(min(u), max(u), length.out = 25L)
 }
 
+# Move a reporting frame to a single time, setting EVERY column the model reads as
+# time -- the centered term the growth block is fit on AND the user's original time
+# column.
+#
+# Under internal centering the two are different columns, and the original one does
+# not simply disappear from the fixed part: maihda_longitudinal_formula() drops
+# only the BARE raw-time polynomial that the centered terms replace, so anything
+# else the user wrote on the raw axis survives into the fitted model -- a covariate
+# interaction (x:wave), a transformation (poly(wave, 2), log(wave)), or a formula
+# offset. Moving only the centered column leaves those terms evaluated at each
+# row's OWN observed time while the result is reported as "at time t", which biases
+# any quantity built from the linear predictor on the grid (the count VPC's
+# marginal lambda). The columns must move together, so this is the one place that
+# does it. `t_c` is a centered time in the user's units; the internal column holds it
+# divided by the fit's time scale (maihda_lng_time_scale()).
+maihda_longitudinal_set_time <- function(newdata, time_term, t_c,
+                                         orig_time = time_term, center = 0,
+                                         scale = 1) {
+  newdata[[time_term]] <- if (scale == 1) t_c else t_c / scale
+  if (!identical(orig_time, time_term)) {
+    # Assigned unconditionally, not only when the column is already present: a
+    # formula offset such as offset(0.5 * wave) is re-evaluated against this frame
+    # and needs the raw time even when the model frame carries only the derived
+    # 'offset(...)' column.
+    newdata[[orig_time]] <- t_c + center
+  }
+  newdata
+}
+
+# Level-1 (residual) variance of a longitudinal VPC evaluated on a time grid
+# (lme4). For Gaussian and binomial families the level-1 variance is a constant
+# (attr(sc)^2, pi^2/3, or 1), so the single maihda_residual_variance_lme4() value
+# is recycled to length(t_c) and the trajectory is unaffected. For Poisson /
+# negative-binomial the latent-scale level-1 variance log1p(1/lambda[ + 1/theta])
+# depends on the MARGINAL expected count lambda, which changes with time in a
+# growth model, so a single sample-wide average reused at every time point biases
+# VPC(t). Evaluate it at each grid time instead: set the model's time term to that
+# value (averaging the per-row marginal counts over the observed covariate rows
+# before the transform, as the cross-sectional path averages over the sample --
+# see maihda_count_level1_variance()) and apply the
+# log-normal mean correction v(t)/2 from the total growth-block variance v_t at
+# that time. `t_c` is a centered time in the user's units (divided by `scale`, the
+# fit's internal time scale, where it enters the frame); `v_t` is VarStratum(t) +
+# VarId(t) at the same times, aligned to `t_c`.
+maihda_longitudinal_resid_grid_lme4 <- function(model, time_term, t_c, v_t,
+                                                orig_time = time_term, center = 0,
+                                                approximation = "lognormal",
+                                                scale = 1) {
+  fam <- maihda_family(model)
+  is_count <- !is.null(fam) && identical(fam$link, "log") &&
+    fam$family %in% c("poisson", "negbinomial")
+  if (!is_count) {
+    return(rep(maihda_residual_variance_lme4(model,
+                                             approximation = approximation),
+               length(t_c)))
+  }
+  theta <- if (identical(fam$family, "negbinomial")) {
+    maihda_negbin_theta_lme4(model)
+  } else {
+    Inf
+  }
+  w <- maihda_fit_prior_weights(model)
+  frame <- maihda_model_frame(model)
+  # Offset on the modified-time frame. predict.merMod here would DROP an external offset=
+  # (biasing the marginal count lambda, hence VPC(t)) and ERROR on a formula offset()
+  # term, so build the fixed-effects linear predictor directly. A FORMULA offset such as
+  # offset(0.5 * time) is RE-EVALUATED at each grid time -- it shifts the marginal count
+  # and must track the modified time -- whereas an EXTERNAL offset= vector has no
+  # expression to re-evaluate and is kept per fitted row (a fixed per-row exposure). Under
+  # internal time centering both the offset AND any surviving raw-time fixed term
+  # reference the ORIGINAL time column, so maihda_longitudinal_set_time() moves it in
+  # lockstep with the centered term. off_ext is NULL for a fit with no external
+  # offset; a no-offset fit reproduces predict(re.form = NA).
+  off_ext <- maihda_fitted_offset_external(model)
+  has_formula_off <- !is.null(
+    attr(stats::terms(maihda_nobars(stats::formula(model))), "offset"))
+  vapply(seq_along(t_c), function(j) {
+    nd <- maihda_longitudinal_set_time(frame, time_term, t_c[j],
+                                       orig_time = orig_time, center = center,
+                                       scale = scale)
+    off_j <- off_ext
+    if (has_formula_off) {
+      fo <- maihda_lme4_formula_offset_at(model, nd)
+      off_j <- if (is.null(off_j)) fo else off_j + fo
+    }
+    eta <- maihda_lme4_fixed_link(model, nd, offset = off_j)
+    mu <- pmax(exp(eta + v_t[j] / 2), .Machine$double.eps)
+    maihda_count_level1_variance(mu, theta = theta, w = w,
+                                 approximation = approximation)
+  }, numeric(1))
+}
+
+# Level-1 (residual) variance of a longitudinal count VPC at a SINGLE time `t_c`
+# (brms). The brms analogue of the count branch of maihda_longitudinal_resid_grid_lme4:
+# the marginal expected count lambda is the posterior-mean plug-in exp(eta(t) +
+# v(t)/2) with eta the posterior-mean fixed-part linear predictor at time `t_c`
+# (marginalized over the observed covariate rows) -- matching the "lambda held at
+# its posterior mean" treatment the per-draw residual path documents
+# (maihda_residual_variance_draws_brms). Returns a scalar for Poisson; for the
+# negative binomial the 'shape' (theta) draws are propagated per draw exactly as in
+# that path, so the return is a per-draw vector. `v_t` is VarStratum(t) + VarId(t)
+# (posterior-mean) at `t_c`. Only called for count families.
+maihda_longitudinal_resid_at_brms <- function(model, draws, time_term, t_c, v_t,
+                                              orig_time = time_term, center = 0,
+                                              approximation = "lognormal") {
+  nd <- maihda_longitudinal_set_time(model$data, time_term, t_c,
+                                     orig_time = orig_time, center = center)
+  eta <- maihda_brms_linpred_mean(model, newdata = nd, re_formula = NA)
+  mu <- pmax(exp(eta + v_t / 2), .Machine$double.eps)
+  w <- maihda_fit_prior_weights(model)
+  fam <- maihda_family(model)
+  if (identical(fam$family, "negbinomial")) {
+    if (!"shape" %in% names(draws)) {
+      stop("Could not extract the negative-binomial 'shape' (theta) draws from ",
+           "the brms posterior.", call. = FALSE)
+    }
+    shape_d <- as.numeric(draws[["shape"]])
+    return(vapply(shape_d,
+                  function(s) maihda_count_level1_variance(
+                    mu, theta = s, w = w, approximation = approximation),
+                  numeric(1)))
+  }
+  maihda_count_level1_variance(mu, w = w, approximation = approximation)
+}
+
 # ---- time-varying VPC summary -----------------------------------------------
+
+# Percentile band for one grid time's bootstrap VPC column. Applies the same
+# absolute floor (10) AND majority-of-eligible rule as maihda_bootstrap_ci() so a
+# time whose refits mostly produced non-finite VPCs yields NA rather than a band from
+# a biased handful of survivors. No draws are legitimately excluded per time, so the
+# eligible count is n_boot; a failing time returns NA (soft) rather than erroring the
+# whole trajectory the way maihda_bootstrap_ci() does for the headline interval.
+maihda_longitudinal_vpc_band <- function(col, n_boot, conf_level) {
+  col <- col[is.finite(col)]
+  if (length(col) < 10L || length(col) < ceiling(0.5 * n_boot)) {
+    return(c(NA_real_, NA_real_))
+  }
+  a <- 1 - conf_level
+  stats::quantile(col, c(a / 2, 1 - a / 2), names = FALSE)
+}
 
 #' Time-varying VPC summary for a longitudinal MAIHDA (lme4)
 #'
@@ -423,52 +2332,98 @@ maihda_longitudinal_summary_lme4 <- function(object, bootstrap = FALSE,
   model <- object$model
   time_term <- maihda_lng_time_term(lng)
   center <- maihda_lng_time_center(lng)
-  Sigma_s <- maihda_re_block_lme4(model, "stratum", time_term, lng$time_degree)
-  Sigma_i <- maihda_re_block_lme4(model, lng$id, time_term, lng$time_degree)
-  var_resid <- maihda_residual_variance_lme4(model)
+  scale <- maihda_lng_time_scale(lng)
+  # Degree 0 at the stratum level under stratum_slope = FALSE: a 1x1 block, so
+  # a(t)'Sigma_s a(t) is constant and VPC(t) moves only through Var_I(t)/residual.
+  stratum_deg <- maihda_lng_stratum_degree(lng)
+  Sigma_s <- maihda_re_block_lme4(model, "stratum", time_term, stratum_deg, scale = scale)
+  Sigma_i <- maihda_re_block_lme4(model, lng$id, time_term, lng$time_degree, scale = scale)
 
   grid <- maihda_longitudinal_time_grid(object$data[[lng$time]])
   ref_time <- lng$ref_time
-  # Times are user-facing (original scale); the covariance blocks are in the
-  # (possibly centered) coefficient coordinates, so every a(t)' Sigma a(t)
-  # evaluation subtracts the centering offset first.
+  # Times are user-facing (original scale); the covariance blocks are in centered
+  # user units (converted back from the internal time scale), so every
+  # a(t)' Sigma a(t) evaluation subtracts the centering offset first.
   grid_c <- grid - center
   ref_c <- ref_time - center
 
-  vpc_fun <- function(Ss, Si, t_c) {
-    vs <- maihda_var_at_time(Ss, t_c)
-    vi <- maihda_var_at_time(Si, t_c)
-    vs / (vs + vi + var_resid)
-  }
-  vpc_t_est <- vpc_fun(Sigma_s, Sigma_i, grid_c)
-  ref_vpc <- vpc_fun(Sigma_s, Sigma_i, ref_c)
+  # Between-level variances on the grid, and the level-1 residual evaluated AT
+  # each grid time. For Gaussian/binomial the residual is constant; for count
+  # families it tracks the time-varying marginal mean, so it is a vector, not one
+  # sample-wide average reused at every time (see maihda_longitudinal_resid_grid_lme4).
+  var_s_grid <- maihda_var_at_time(Sigma_s, grid_c)
+  var_i_grid <- maihda_var_at_time(Sigma_i, grid_c)
+  var_s_ref <- maihda_var_at_time(Sigma_s, ref_c)
+  var_i_ref <- maihda_var_at_time(Sigma_i, ref_c)
+  count_approx <- maihda_count_approximation(object)
+  resid_grid <- maihda_longitudinal_resid_grid_lme4(model, time_term, grid_c,
+                                                    var_s_grid + var_i_grid,
+                                                    orig_time = lng$time, center = center,
+                                                    approximation = count_approx,
+                                                    scale = scale)
+  resid_ref <- maihda_longitudinal_resid_grid_lme4(model, time_term, ref_c,
+                                                   var_s_ref + var_i_ref,
+                                                   orig_time = lng$time, center = center,
+                                                   approximation = count_approx,
+                                                   scale = scale)
+  # Scalar residual for the components table / headline: the reference-time value
+  # (a single latent-scale number that the trajectory generalises over time).
+  var_resid <- as.numeric(resid_ref)
+
+  vpc_t_est <- var_s_grid / (var_s_grid + var_i_grid + resid_grid)
+  ref_vpc <- as.numeric(var_s_ref / (var_s_ref + var_i_ref + resid_ref))
 
   vpc_lower <- rep(NA_real_, length(grid))
   vpc_upper <- rep(NA_real_, length(grid))
   ref_ci <- NULL
+  # Count contributing bootstrap draws whose refit optimiser did not converge, so the
+  # reported n_boot_ok does not silently imply convergence (see bootstrap_vpc()).
+  n_nonconv <- 0L
+  # Bootstrap replicates of the two trajectory VPCs. They come free with the refits
+  # the VPC(t) band already pays for -- no extra simulate()/refit() -- so the
+  # trajectory VPCs are not left as the only bare numbers in a bootstrapped summary.
+  traj_int_boot <- rep(NA_real_, n_boot)
+  traj_slope_boot <- rep(NA_real_, n_boot)
   if (bootstrap) {
     boot <- matrix(NA_real_, nrow = n_boot, ncol = length(grid))
     ref_boot <- rep(NA_real_, n_boot)
-    sim <- stats::simulate(model, nsim = n_boot)
+    sim <- maihda_simulate_lme4(model, nsim = n_boot)
+    # Each draw is refitted as fit_maihda() fits the model (maihda_refit_growth_draw()).
+    spec <- maihda_lme4_growth_spec(model, lng)
     for (i in seq_len(n_boot)) {
       tryCatch({
-        bm <- lme4::refit(model, newresp = sim[[i]])
-        Ss <- maihda_re_block_lme4(bm, "stratum", time_term, lng$time_degree)
-        Si <- maihda_re_block_lme4(bm, lng$id, time_term, lng$time_degree)
-        vr <- maihda_residual_variance_lme4(bm)
+        bm <- maihda_refit_growth_draw(model, sim[[i]], spec)
+        Ss <- maihda_re_block_lme4(bm, "stratum", time_term, stratum_deg, scale = scale)
+        Si <- maihda_re_block_lme4(bm, lng$id, time_term, lng$time_degree, scale = scale)
         vs <- maihda_var_at_time(Ss, grid_c); vi <- maihda_var_at_time(Si, grid_c)
-        boot[i, ] <- vs / (vs + vi + vr)
+        vr_grid <- maihda_longitudinal_resid_grid_lme4(bm, time_term, grid_c, vs + vi,
+                                                       orig_time = lng$time, center = center,
+                                                       approximation = count_approx,
+                                                       scale = scale)
+        boot[i, ] <- vs / (vs + vi + vr_grid)
         rs <- maihda_var_at_time(Ss, ref_c); ri <- maihda_var_at_time(Si, ref_c)
-        ref_boot[i] <- rs / (rs + ri + vr)
+        vr_ref <- maihda_longitudinal_resid_grid_lme4(bm, time_term, ref_c, rs + ri,
+                                                      orig_time = lng$time, center = center,
+                                                      approximation = count_approx,
+                                                      scale = scale)
+        ref_boot[i] <- rs / (rs + ri + vr_ref)
+        # Same helper as the point estimate below, so the replicates cannot drift
+        # from the quantity the interval is meant to cover (and the 1x1 stratum
+        # block keeps returning NA for the slope rather than 0).
+        tv_b <- maihda_longitudinal_trajectory_vpc(Ss, Si, ref_c)
+        traj_int_boot[i] <- tv_b$vpc_intercept
+        traj_slope_boot[i] <- tv_b$vpc_slope
+        if (maihda_lme4_optimizer_failed(bm)) n_nonconv <- n_nonconv + 1L
       }, error = function(e) NULL)
     }
-    a <- 1 - conf_level
+    # Non-converged draws are retained but reported, and above a documented share the
+    # interval is flagged unreliable (see maihda_report_nonconvergence()).
+    reliable_lng <- maihda_report_nonconvergence(
+      n_nonconv, sum(is.finite(ref_boot)), "longitudinal VPC")
     for (j in seq_along(grid)) {
-      col <- boot[, j][is.finite(boot[, j])]
-      if (length(col) >= 10L) {
-        vpc_lower[j] <- stats::quantile(col, a / 2, names = FALSE)
-        vpc_upper[j] <- stats::quantile(col, 1 - a / 2, names = FALSE)
-      }
+      band <- maihda_longitudinal_vpc_band(boot[, j], n_boot, conf_level)
+      vpc_lower[j] <- band[1]
+      vpc_upper[j] <- band[2]
     }
     ref_ci <- maihda_bootstrap_ci(ref_boot, n_boot, conf_level, "VPC")
   }
@@ -477,17 +2432,46 @@ maihda_longitudinal_summary_lme4 <- function(object, bootstrap = FALSE,
     list(estimate = ref_vpc, ci_lower = ref_ci[1], ci_upper = ref_ci[2],
          conf_level = conf_level, bootstrap = TRUE, method = "bootstrap",
          ref_time = ref_time, n_boot_ok = attr(ref_ci, "n_ok"),
+         n_boot_nonconverged = n_nonconv,
+         interval_reliable = reliable_lng,
          mc_se = attr(ref_ci, "mc_se"))
   } else {
     list(estimate = ref_vpc, bootstrap = FALSE, ref_time = ref_time)
   }
 
+  # Bell et al. (2024) eq. (5) intercept/slope VPCs -- a different denominator from
+  # vpc_t above (no occasion-level residual); see maihda_longitudinal_trajectory_vpc.
+  # The POINT estimates stay the plug-in from the fitted (REML) blocks, as for every
+  # other lme4 quantity; the bootstrap adds only intervals. On the brms path the
+  # point estimates are instead posterior medians of the per-draw ratios, because
+  # there a ratio of posterior means is a different estimator (see
+  # maihda_longitudinal_trajectory_vpc_draws).
+  traj_vpc <- maihda_longitudinal_trajectory_vpc(Sigma_s, Sigma_i, ref_c)
+  traj_int_ci <- if (bootstrap) {
+    maihda_longitudinal_vpc_band(traj_int_boot, n_boot, conf_level)
+  } else {
+    c(NA_real_, NA_real_)
+  }
+  # A model with no stratum slope has an all-NA slope replicate vector, which the
+  # band helper turns into NA rather than a spurious degenerate interval.
+  traj_slope_ci <- if (bootstrap) {
+    maihda_longitudinal_vpc_band(traj_slope_boot, n_boot, conf_level)
+  } else {
+    c(NA_real_, NA_real_)
+  }
+
   longitudinal <- list(
     vpc_t = data.frame(time = grid, estimate = vpc_t_est,
                        lower = vpc_lower, upper = vpc_upper),
-    var_stratum_t = maihda_var_at_time(Sigma_s, grid_c),
-    var_id_t = maihda_var_at_time(Sigma_i, grid_c),
+    vpc_intercept = traj_vpc$vpc_intercept,
+    vpc_intercept_ci = traj_int_ci,
+    vpc_slope = traj_vpc$vpc_slope,
+    vpc_slope_ci = traj_slope_ci,
+    trajectory_vpc_method = if (bootstrap) "bootstrap" else NA_character_,
+    var_stratum_t = var_s_grid,
+    var_id_t = var_i_grid,
     var_resid = var_resid,
+    var_resid_t = as.numeric(resid_grid),
     Sigma_stratum = Sigma_s,
     Sigma_id = Sigma_i,
     time_grid = grid,
@@ -495,6 +2479,7 @@ maihda_longitudinal_summary_lme4 <- function(object, bootstrap = FALSE,
     time = lng$time,
     time_term = time_term,
     time_center = center,
+    time_scale = scale,
     time_degree = lng$time_degree,
     id = lng$id,
     bootstrap = isTRUE(bootstrap),
@@ -521,14 +2506,84 @@ maihda_longitudinal_summary_brms <- function(object, conf_level = 0.95) {
   }
   lng <- object$longitudinal_info
   model <- object$model
+  count_approx <- maihda_count_approximation(object)
   time_term <- maihda_lng_time_term(lng)
   center <- maihda_lng_time_center(lng)
   draws <- maihda_posterior_draws_brms(model)
-  sig_s <- maihda_re_cov_draws_brms(draws, "stratum", time_term)
-  sig_i <- maihda_re_cov_draws_brms(draws, lng$id, time_term)
-  var_resid_draws <- maihda_residual_variance_draws_brms(model, draws)
-  if (length(var_resid_draws) == 1L) {
-    var_resid_draws <- rep(var_resid_draws, length(sig_s$v0))
+  # As on the lme4 path: degree 0 at the stratum level under stratum_slope = FALSE.
+  # The draws helper reports that as v1 = cov = 0, so var_at() below reduces to the
+  # constant intercept variance with no separate branch.
+  stratum_deg <- maihda_lng_stratum_degree(lng)
+  sig_s <- maihda_re_cov_draws_brms(draws, "stratum", time_term,
+                                    time_degree = stratum_deg)
+  sig_i <- maihda_re_cov_draws_brms(draws, lng$id, time_term,
+                                    time_degree = lng$time_degree)
+
+  # Posterior-mean covariance blocks (components table, and the log-normal mean
+  # correction v(t)/2 in the count residual below).
+  Sigma_s <- maihda_re_block_brms(model, "stratum", time_term, stratum_deg)
+  Sigma_i <- maihda_re_block_brms(model, lng$id, time_term, lng$time_degree)
+
+  # Per-draw VarS(t) / VarI(t) for the linear growth block:
+  # a(t)' Sigma a(t) = v0 + 2 t cov + t^2 v1, t on the coefficient scale. Defined
+  # ahead of the residual so the count residual reuses the SAME per-draw
+  # random-effect variance for its log-normal mean correction.
+  var_at <- function(blk, t_c) blk$v0 + 2 * t_c * blk$cov + t_c^2 * blk$v1
+
+  # Level-1 residual as a function of time. For count families it tracks the
+  # time-varying marginal mean instead of one own-time average reused at every time
+  # (which would bias VPC(t)); for other families it is the per-draw
+  # var_resid_draws, constant over time.
+  fam <- maihda_family(model)
+  is_count <- !is.null(fam) && identical(fam$link, "log") &&
+    fam$family %in% c("poisson", "negbinomial")
+  resid_at <- if (is_count) {
+    # Count residual computed DRAW-BY-DRAW rather than from posterior-mean
+    # predictors: the per-draw fixed-effect eta at each time and the per-draw total
+    # random-effect variance both feed the observation-level variance
+    # E_i[log1p(1 / lambda_i(t))], so its posterior uncertainty propagates into the
+    # VPC band. This matches the cross-sectional count VPC
+    # (maihda_count_resid_var_from_linpred(), reused here) and no longer understates
+    # the band for low or strongly time-varying counts. Falls back to the documented
+    # posterior-mean plug-in only if the posterior_linpred draw axis cannot be
+    # aligned with the SD draws.
+    nb_extra <- NULL
+    if (identical(fam$family, "negbinomial")) {
+      if (!"shape" %in% names(draws)) {
+        stop("Could not extract the negative-binomial 'shape' (theta) draws from ",
+             "the brms posterior.", call. = FALSE)
+      }
+      nb_extra <- 1 / as.numeric(draws[["shape"]])
+    }
+    resid_w <- maihda_fit_prior_weights(model)
+    n_draws <- length(sig_s$v0)
+    function(t_c) {
+      v_t_draws <- var_at(sig_s, t_c) + var_at(sig_i, t_c)
+      nd <- maihda_longitudinal_set_time(model$data, time_term, t_c,
+                                         orig_time = lng$time, center = center)
+      eta_link <- tryCatch(
+        as.matrix(brms::posterior_linpred(model, newdata = nd, re_formula = NA)),
+        error = function(e) NULL)
+      if (!is.null(eta_link) && length(dim(eta_link)) == 2L &&
+          nrow(eta_link) == n_draws && length(v_t_draws) == n_draws) {
+        maihda_count_resid_var_from_linpred(eta_link, v_t_draws, w = resid_w,
+                                            extra = nb_extra,
+                                            approximation = count_approx)
+      } else {
+        v_t_mean <- maihda_var_at_time(Sigma_s, t_c) +
+          maihda_var_at_time(Sigma_i, t_c)
+        maihda_longitudinal_resid_at_brms(model, draws, time_term, t_c, v_t_mean,
+                                          orig_time = lng$time, center = center,
+                                          approximation = count_approx)
+      }
+    }
+  } else {
+    var_resid_draws <- maihda_residual_variance_draws_brms(
+      model, draws, approximation = count_approx)
+    if (length(var_resid_draws) == 1L) {
+      var_resid_draws <- rep(var_resid_draws, length(sig_s$v0))
+    }
+    function(t_c) var_resid_draws
   }
 
   grid <- maihda_longitudinal_time_grid(object$data[[lng$time]])
@@ -539,12 +2594,14 @@ maihda_longitudinal_summary_brms <- function(object, conf_level = 0.95) {
   ref_c <- ref_time - center
   a <- 1 - conf_level
 
-  # Per-draw VarS(t) / VarI(t) for the linear block:
-  # a(t)'Sigma a(t) = v0 + 2 t cov + t^2 v1, t on the coefficient scale.
-  var_at <- function(blk, t_c) blk$v0 + 2 * t_c * blk$cov + t_c^2 * blk$v1
-  vpc_draws_at <- function(t_c) {
+  # Level-1 residual evaluated once per reporting time (a scalar or a per-draw
+  # vector), reused for both the VPC bands and the components-table scalar.
+  resid_grid_draws <- lapply(grid_c, resid_at)
+  resid_ref_draws <- resid_at(ref_c)
+
+  vpc_draws_at <- function(t_c, resid) {
     vs <- var_at(sig_s, t_c); vi <- var_at(sig_i, t_c)
-    vs / (vs + vi + var_resid_draws)
+    vs / (vs + vi + resid)
   }
 
   summ <- function(v) {
@@ -553,23 +2610,42 @@ maihda_longitudinal_summary_brms <- function(object, conf_level = 0.95) {
     c(stats::median(v), stats::quantile(v, a / 2, names = FALSE),
       stats::quantile(v, 1 - a / 2, names = FALSE))
   }
-  mat <- vapply(grid_c, function(t_c) summ(vpc_draws_at(t_c)), numeric(3))
-  ref <- summ(vpc_draws_at(ref_c))
+  mat <- vapply(seq_along(grid_c),
+                function(j) summ(vpc_draws_at(grid_c[j], resid_grid_draws[[j]])),
+                numeric(3))
+  ref <- summ(vpc_draws_at(ref_c, resid_ref_draws))
 
   vpc_result <- list(estimate = ref[1], ci_lower = ref[2], ci_upper = ref[3],
                      conf_level = conf_level, bootstrap = FALSE,
                      method = "posterior", ref_time = ref_time)
 
-  Sigma_s <- maihda_re_block_brms(model, "stratum", time_term, lng$time_degree)
-  Sigma_i <- maihda_re_block_brms(model, lng$id, time_term, lng$time_degree)
-  var_resid <- mean(var_resid_draws)
+  # Scalar residual for the components table: the reference-time value (mean over
+  # draws), matching mean(var_resid_draws) for the non-count families.
+  var_resid <- mean(resid_ref_draws)
+  resid_grid <- vapply(resid_grid_draws, mean, numeric(1))
+
+  # Bell et al. (2024) eq. (5), summarised PER DRAW from the same sig_s / sig_i
+  # blocks that produced the VPC(t) band above -- NOT a ratio of the posterior-mean
+  # blocks, which is a different estimator and runs high (see
+  # maihda_longitudinal_trajectory_vpc_draws). has_slope mirrors the point-estimate
+  # sibling's nrow(Sigma) >= 2 test on the degrees the draws were built at.
+  traj_vpc <- maihda_longitudinal_trajectory_vpc_draws(
+    sig_s, sig_i, ref_c,
+    has_slope = stratum_deg >= 1L && lng$time_degree >= 1L,
+    conf_level = conf_level)
 
   longitudinal <- list(
     vpc_t = data.frame(time = grid, estimate = mat[1, ],
                        lower = mat[2, ], upper = mat[3, ]),
+    vpc_intercept = traj_vpc$vpc_intercept,
+    vpc_intercept_ci = traj_vpc$vpc_intercept_ci,
+    vpc_slope = traj_vpc$vpc_slope,
+    vpc_slope_ci = traj_vpc$vpc_slope_ci,
+    trajectory_vpc_method = "posterior",
     var_stratum_t = maihda_var_at_time(Sigma_s, grid_c),
     var_id_t = maihda_var_at_time(Sigma_i, grid_c),
     var_resid = var_resid,
+    var_resid_t = resid_grid,
     Sigma_stratum = Sigma_s,
     Sigma_id = Sigma_i,
     time_grid = grid,
@@ -593,8 +2669,21 @@ maihda_longitudinal_summary_brms <- function(object, conf_level = 0.95) {
 
 # Per-draw 2x2 covariance pieces (v0 = intercept var, v1 = slope var,
 # cov = intercept-slope covariance) of a group's linear growth block (brms).
-maihda_re_cov_draws_brms <- function(draws, group, time) {
+maihda_re_cov_draws_brms <- function(draws, group, time, time_degree = 1L) {
   sd0 <- draws[[paste0("sd_", group, "__Intercept")]]
+  if (time_degree < 1L) {
+    # Intercept-only level (stratum_slope = FALSE). Reported as a degenerate growth
+    # block with a zero slope variance and covariance, so every a(t)'Sigma a(t)
+    # consumer (var_at(), the VPC bands) reduces to the constant intercept variance
+    # without a separate code path.
+    if (is.null(sd0)) {
+      stop("Could not find the intercept SD draws for the '", group,
+           "' random effect in the brms posterior (expected sd_", group,
+           "__Intercept).", call. = FALSE)
+    }
+    sd0 <- as.numeric(sd0)
+    return(list(v0 = sd0^2, v1 = rep(0, length(sd0)), cov = rep(0, length(sd0))))
+  }
   sd1 <- draws[[paste0("sd_", group, "__", time)]]
   cor01 <- draws[[paste0("cor_", group, "__Intercept__", time)]]
   if (is.null(sd0) || is.null(sd1) || is.null(cor01)) {
@@ -661,19 +2750,16 @@ maihda_longitudinal_components_table <- function(Sigma_s, Sigma_i, var_resid,
 
 # ---- proportional change in variance (additive vs multiplicative) -----------
 
-# REML lmer between-stratum (co)variance estimates are not comparable across
-# models with different fixed effects -- exactly the longitudinal null-vs-adjusted
-# pair, where the adjusted growth model adds the dimensions' main effects and
-# their dim:time interactions. This applies maihda_pcv_refit_ml()'s rule (see
-# calculate_pcv.R) to the growth models that helper deliberately skips: refit a
-# REML lmer growth fit with ML (lme4::refitML) before maihda_longitudinal_pcv()
-# reads its stratum covariance block. Left on REML, the comparison biases both
-# PCVs downward (overstating the multiplicative/interaction share) and can flip
-# their sign outright with few strata. glmer (GLMM) fits and the brms engine are
-# already on the ML / posterior scale and are returned unchanged, as is a fit
-# whose stratum growth block sits on the boundary (see below). The single-model
-# summaries (the time-varying VPC, the components table) deliberately keep their
-# REML fit, exactly like the cross-sectional VPC/ICC summaries.
+# estimation = "ML" for the growth pair. maihda_pcv_refit_ml() (calculate_pcv.R)
+# deliberately skips growth fits; this applies its rule to them: refit a REML lmer
+# growth fit with ML (lme4::refitML) before maihda_longitudinal_pcv() reads its
+# stratum covariance block. ML shrinks the adjusted block by more than the null one
+# and so overstates both PCVs with few strata (see ?calculate_pcv), which is why it
+# is not the default. glmer (GLMM) fits and the brms engine are already on the ML /
+# posterior scale and are returned unchanged, as is a fit whose stratum growth block
+# sits on the boundary (see below). The single-model summaries (the time-varying
+# VPC, the components table) deliberately keep their REML fit, exactly like the
+# cross-sectional VPC/ICC summaries.
 maihda_longitudinal_refit_ml <- function(model) {
   if (!inherits(model, "maihda_model") || !identical(model$engine, "lme4") ||
       is.null(model$longitudinal_info)) {
@@ -689,7 +2775,19 @@ maihda_longitudinal_refit_ml <- function(model) {
   # refitML() itself fails, the tryCatch below keeps the original (REML) fit.
   if (maihda_stratum_growth_at_boundary_lme4(model$model)) return(model)
   refit <- tryCatch(lme4::refitML(model$model), error = function(e) NULL)
-  if (!is.null(refit)) model$model <- refit
+  if (!is.null(refit)) {
+    model$model <- refit
+  } else {
+    # The ML refit was warranted (a non-boundary REML growth fit) but failed: keep the
+    # REML fit and SAY SO, rather than silently leaving a REML block the comparison would
+    # otherwise present as ML. maihda_longitudinal_pcv() then sees the fit is still REML
+    # and sets ml_refit = FALSE, so its print method makes no ML claim -- but without this
+    # warning the user is never told the requested ML basis could not be applied.
+    warning("estimation = \"ML\" was requested, but lme4::refitML() failed for a ",
+            "longitudinal growth model; its REML fit is used instead, so this is not a ",
+            "pure ML-basis comparison. Compare against estimation = \"fitted\".",
+            call. = FALSE)
+  }
   model
 }
 
@@ -720,6 +2818,50 @@ maihda_stratum_growth_at_boundary_lme4 <- function(model, tol = 1e-4) {
   all(sqrt(pmax(d, 0)) / sigma_resid < tol)
 }
 
+# The between-stratum variances one growth model contributes to the longitudinal
+# PCV: at the baseline, of the instantaneous slope at the baseline, and at each
+# reporting time. `ref_c` and `t_c` are on the model's (possibly centered)
+# coefficient scale; `Sigma` is the model's stratum block from maihda_re_block().
+#
+# lme4: quadratic forms of the fitted block (maihda_var_at_time(),
+# maihda_slope_var_at_time()).
+#
+# brms: the posterior MEDIAN of each variance computed draw by draw -- v0 + 2 t cov +
+# t^2 v1 at time t, and v1 for the slope (the brms growth engine is linear) -- not a
+# quadratic form of `Sigma`, which holds posterior means. The posterior of a
+# between-stratum variance is right-skewed when strata are few, and the adjusted
+# model's more than the null's, so its mean sits further above its centre in the
+# adjusted model and one minus a ratio of posterior means understates the PCV; a
+# ratio of medians does so by less. The median is taken of the variance at each time
+# separately: the medians of the three cells of the block are not the median of
+# a(t)' Sigma a(t), and need not form a covariance matrix.
+#
+# `has_slope` says whether a slope variance is reported at all. It is the NULL
+# model's for both models of a pair, as the slope PCV is defined by the null block.
+maihda_longitudinal_pcv_variances <- function(object, Sigma, ref_c, t_c, has_slope) {
+  if (identical(object$engine, "brms")) {
+    lng <- object$longitudinal_info
+    blk <- maihda_re_cov_draws_brms(maihda_posterior_draws_brms(object$model),
+                                    "stratum", maihda_lng_time_term(lng),
+                                    time_degree = maihda_lng_stratum_degree(lng))
+    med <- function(v) {
+      v <- v[is.finite(v)]
+      if (length(v)) stats::median(v) else NA_real_
+    }
+    at <- function(t) med(blk$v0 + 2 * t * blk$cov + t^2 * blk$v1)
+    return(list(baseline = at(ref_c),
+                slope = if (has_slope) med(blk$v1) else NA_real_,
+                at_t = vapply(t_c, at, numeric(1)),
+                summary = "posterior median",
+                Sigma_summary = "posterior mean"))
+  }
+  list(baseline = maihda_var_at_time(Sigma, ref_c),
+       slope = if (has_slope) maihda_slope_var_at_time(Sigma, ref_c) else NA_real_,
+       at_t = maihda_var_at_time(Sigma, t_c),
+       summary = "estimate",
+       Sigma_summary = "estimate")
+}
+
 #' Longitudinal MAIHDA proportional change in variance (PCV)
 #'
 #' Compares the stratum-level random-effect covariance block of the null growth
@@ -732,23 +2874,58 @@ maihda_stratum_growth_at_boundary_lme4 <- function(model, tol = 1e-4) {
 #' invariant to how the time axis is coded (for linear growth the slope variance
 #' is the same at every time, so this reduces to the slope-variance cell).
 #'
-#' As in \code{\link{calculate_pcv}}, REML \code{lmer} growth fits are refitted
-#' with maximum likelihood (\code{\link[lme4]{refitML}}) before the comparison:
-#' the null and adjusted models differ in fixed effects (the dimensions' main
-#' effects and their \code{dim:time} interactions), across which REML variance
-#' estimates are not comparable -- using them biases both PCVs downward,
-#' overstating the multiplicative/interaction share. The stored models (and the
-#' single-model summaries computed from them, e.g. the time-varying VPC) keep
-#' their REML fit; \code{ml_refit} on the result records whether the refit
-#' applied. glmer (GLMM) and brms fits are already on the ML / posterior scale.
+#' As in \code{\link{calculate_pcv}}, the \code{estimation} argument selects the
+#' variance-estimation basis. With \code{estimation = "fitted"} (the default) each
+#' fit's own REML covariance block is used, matching the single-model summaries. With
+#' \code{estimation = "ML"}, REML \code{lmer} growth fits are refitted with maximum
+#' likelihood (\code{\link[lme4]{refitML}}) before the comparison, which overstates
+#' both PCVs when strata are few. The stored models (and the single-model summaries
+#' computed from them, e.g. the time-varying VPC) always keep their REML fit;
+#' \code{ml_refit} on the result records
+#' whether an ML refit fully applied, and \code{estimation_used} records the basis
+#' ACTUALLY used -- \code{"fitted"}, \code{"ML"}, or \code{"mixed"} when an ML refit
+#' was requested but a model kept its REML fit (a boundary skip or a failed refit),
+#' so a mixed REML/ML comparison is not mistaken for a clean one. glmer (GLMM) and
+#' brms fits are already on the ML / posterior scale, so the choice does not affect
+#' them.
+#'
+#' A variance estimate cannot fall below zero. When the strata differ little after
+#' adjustment next to the precision of one stratum's own baseline or slope, the
+#' adjusted model's variance is too large on average and the null model's is not, so
+#' the PCV is understated on average and single values can be far too low or negative.
+#' This affects the slope first, where strata usually differ least, and eases with
+#' more strata, larger strata and more measurement occasions.
+#'
+#' For a \code{brms} pair every variance compared is the posterior median of its
+#' per-draw value: the between-stratum variance \eqn{a(t)' \Sigma a(t)} at the
+#' baseline and at each reporting time, and the slope variance. The stored blocks
+#' \code{Sigma_stratum_null} and \code{Sigma_stratum_adjusted} are the posterior
+#' means \code{summary()} tabulates, so those variances are not quadratic forms of
+#' them. The posterior of a between-stratum variance is right-skewed when strata are
+#' few, and more so in the adjusted model, so the PCV of a \code{brms} pair is
+#' understated on average with few strata -- by more when the additive share is
+#' moderate, when the strata are small, or, for the slope, when the strata differ
+#' little in slope next to the precision of a stratum's slope -- and can be negative
+#' where the true value is positive. The \code{lme4} (REML) decomposition is less
+#' biased then; neither is precise with so few strata.
 #'
 #' @param null_model,adjusted_model Longitudinal \code{maihda_model}s from a
 #'   \code{maihda(decomposition = "longitudinal")} pair.
 #' @param times Optional numeric times for the time-specific PCV; defaults to the
 #'   null model's reporting grid.
-#' @return An object of class \code{maihda_long_pcv}.
+#' @param estimation Variance-estimation basis, \code{"fitted"} (default) or
+#'   \code{"ML"}; see \code{\link{calculate_pcv}}.
+#' @return An object of class \code{maihda_long_pcv}. \code{variance_summary} names
+#'   what \code{var_baseline_*}, \code{var_slope_*} and the variances in \code{pcv_t}
+#'   are (\code{"estimate"} for lme4, \code{"posterior median"} for brms), and
+#'   \code{Sigma_summary} what the two stored blocks are (\code{"estimate"} or
+#'   \code{"posterior mean"}). \code{ml_variances} is \code{TRUE} when the compared
+#'   variances are maximum-likelihood estimates: a \code{glmer} growth pair, or
+#'   \code{lmer} growth fits made or refitted by maximum likelihood.
 #' @keywords internal
-maihda_longitudinal_pcv <- function(null_model, adjusted_model, times = NULL) {
+maihda_longitudinal_pcv <- function(null_model, adjusted_model, times = NULL,
+                                    estimation = c("fitted", "ML")) {
+  estimation <- match.arg(estimation)
   lng <- null_model$longitudinal_info
   center <- maihda_lng_time_center(lng)
   adj_center <- maihda_lng_time_center(adjusted_model$longitudinal_info)
@@ -759,28 +2936,97 @@ maihda_longitudinal_pcv <- function(null_model, adjusted_model, times = NULL) {
          call. = FALSE)
   }
 
-  # REML vs ML: the two growth models differ in fixed effects, so their REML
-  # between-stratum covariance blocks are not comparable (see calculate_pcv()).
-  # Refit REML lmer fits with ML before reading the blocks; the caller's stored
-  # models are untouched (copy semantics), so summary()'s time-varying VPC keeps
-  # each fit's own REML estimate. ml_refit records whether the comparison is on
-  # the ML scale -- FALSE also when a boundary skip or a failed refitML() left a
-  # REML fit in place (the print method then makes no ML claim).
+  # REML vs ML basis (see calculate_pcv()'s `estimation` argument). With
+  # estimation = "ML" the two growth models are refit with ML before their
+  # between-stratum covariance blocks are read; with "fitted" (default) each fit's
+  # own REML block is used. Either way the caller's stored models are untouched (copy
+  # semantics), so summary()'s time-varying VPC keeps each fit's own REML estimate.
+  # ml_refit records whether the comparison is on the ML scale -- FALSE for "fitted",
+  # and also when a boundary skip or a failed refitML() left a REML fit in place (the
+  # print method then makes no ML claim).
   is_reml_lng <- function(m) {
     identical(m$engine, "lme4") &&
       tryCatch(isTRUE(lme4::isREML(m$model)), error = function(e) FALSE)
   }
-  refit_needed <- is_reml_lng(null_model) || is_reml_lng(adjusted_model)
-  null_model <- maihda_longitudinal_refit_ml(null_model)
-  adjusted_model <- maihda_longitudinal_refit_ml(adjusted_model)
-  ml_refit <- refit_needed &&
-    !(is_reml_lng(null_model) || is_reml_lng(adjusted_model))
+  do_ml <- identical(estimation, "ML")
+  null_was_reml <- is_reml_lng(null_model)
+  adj_was_reml  <- is_reml_lng(adjusted_model)
+  refit_needed <- do_ml && (null_was_reml || adj_was_reml)
+  if (do_ml) {
+    null_model <- maihda_longitudinal_refit_ml(null_model)
+    adjusted_model <- maihda_longitudinal_refit_ml(adjusted_model)
+  }
+  # A model we WANTED on ML that is STILL REML after the refit -- a boundary skip
+  # (maihda_longitudinal_refit_ml()'s guard) or a failed refitML() -- makes the
+  # comparison MIXED: one covariance block on ML, the other on REML, which is
+  # neither of the two bases a user can ask for.
+  # `ml_refit` alone cannot record this (it is FALSE for a plain fitted/REML
+  # request too), so it silently read as a clean fitted comparison. Track the basis
+  # ACTUALLY used ("fitted"/"ML"/"mixed") on the result, mirroring calculate_pcv().
+  still_reml <- is_reml_lng(null_model) || is_reml_lng(adjusted_model)
+  ml_incomplete <- refit_needed && still_reml
+  # ml_refit stays TRUE only for a fully-applied ML refit (kept for backward
+  # compatibility with objects/tests that read it); estimation_used carries the
+  # three-way basis and is what print() keys on.
+  ml_refit <- refit_needed && !still_reml
+  estimation_used <- maihda_pcv_estimation_used(estimation, ml_incomplete,
+                                                engine = null_model$engine)
 
   Sn <- maihda_re_block(null_model, "stratum")
   Sa <- maihda_re_block(adjusted_model, "stratum")
   deg <- nrow(Sn) - 1L
 
-  pcv_cell <- function(vn, va) if (is.finite(vn) && vn > 0) (vn - va) / vn else NA_real_
+  # A between-stratum variance a(t)' Sn a(t) that is only boundary-level positive --
+  # e.g. 2.5e-13 from a singular null growth fit with no stratum trajectory signal --
+  # passes a plain > 0 test yet makes the PCV ratio explode (PCV(t) in the hundreds
+  # or thousands, with the wrong sign). Gate every denominator with the SAME relative
+  # singularity tolerance calculate_pcv() / stepwise_pcv() apply
+  # (maihda_variance_at_boundary(): sqrt(var) / sqrt(resid) < 1e-4), scaling the null
+  # between-stratum variance against the null model's own residual/latent variance; a
+  # boundary-level denominator yields NA rather than a spurious ratio. For lme4 this is
+  # sigma^2 (Gaussian) or the latent-scale constant; where it is unavailable (e.g. brms)
+  # the helper falls back to an absolute near-zero test.
+  resid_var_null <- tryCatch(
+    if (identical(null_model$engine, "lme4"))
+      maihda_residual_variance_lme4(
+        null_model$model,
+        approximation = maihda_count_approximation(null_model)) else NA_real_,
+    error = function(e) NA_real_)
+  denom_at_boundary <- function(v) maihda_variance_at_boundary(v, resid_var_null)
+  # TRUE when the WHOLE null stratum growth block is degenerate (every variance on the
+  # boundary): a(t)' Sn a(t) is then ~0 at every t, so no PCV cell is defined and all
+  # are NA below. Recorded on the result (and surfaced by print()) so the all-NA output
+  # reads as an honest "no between-stratum trajectory variance to explain", not a silent
+  # gap -- the longitudinal analogue of calculate_pcv()'s degenerate-null guard.
+  null_at_boundary <- identical(null_model$engine, "lme4") &&
+    isTRUE(tryCatch(maihda_stratum_growth_at_boundary_lme4(null_model$model),
+                    error = function(e) FALSE))
+  # The ADJUSTED model's stratum block on the boundary pins the PCV near 100% as an
+  # optimizer artefact rather than as evidence of additivity -- the same caveat
+  # calculate_pcv() attaches to a boundary model2, which the longitudinal path was
+  # missing entirely (it flagged only the null). Both are surfaced by print().
+  adjusted_at_boundary <- identical(adjusted_model$engine, "lme4") &&
+    isTRUE(tryCatch(maihda_stratum_growth_at_boundary_lme4(adjusted_model$model),
+                    error = function(e) FALSE))
+  # Rank-deficient (perfectly correlated intercept-slope) stratum blocks. Neither
+  # boundary test above sees these -- every variance is nonzero and a(t)'Sigma a(t)
+  # is positive at all but one time -- yet the slope variance is not separately
+  # identified, so PCV_slope is a ratio of two boundary artefacts. Only meaningful
+  # when there IS a slope (stratum_slope = FALSE gives a 1x1 block, for which rank
+  # deficiency would just be a zero variance, already covered by *_at_boundary).
+  has_stratum_slope <- nrow(Sn) >= 2
+  null_rank_deficient <- has_stratum_slope &&
+    maihda_stratum_growth_rank_deficient(null_model)
+  adjusted_rank_deficient <- has_stratum_slope &&
+    maihda_stratum_growth_rank_deficient(adjusted_model)
+  # The narrower question the slope PCV actually turns on: is the LINEAR TIME
+  # component of the null block at the boundary? For a linear (2x2) block this is
+  # implied by rank deficiency; for a quadratic block it is not (see
+  # maihda_stratum_slope_at_boundary_lme4).
+  null_slope_at_boundary <- has_stratum_slope &&
+    maihda_stratum_slope_at_boundary(null_model)
+
+  pcv_cell <- function(vn, va) if (!denom_at_boundary(vn)) (vn - va) / vn else NA_real_
 
   # The "baseline" PCV is the proportional change in the between-stratum variance
   # at the OBSERVED baseline time (lng$ref_time = min(time)), not the raw
@@ -791,24 +3037,63 @@ maihda_longitudinal_pcv <- function(null_model, adjusted_model, times = NULL) {
   # VPC summary reports its baseline.
   ref_time <- lng$ref_time
   ref_c <- ref_time - center
-  var_baseline_null <- maihda_var_at_time(Sn, ref_c)
-  var_baseline_adjusted <- maihda_var_at_time(Sa, ref_c)
+  if (is.null(times)) {
+    times <- maihda_longitudinal_time_grid(null_model$data[[lng$time]])
+  }
+  # Every variance the PCV compares, per model: quadratic forms of the fitted block
+  # for lme4, per-draw posterior medians for brms (see
+  # maihda_longitudinal_pcv_variances()). Sn and Sa are stored on the result as they
+  # are; for a brms pair they are posterior means and so NOT what the PCV is built on.
+  vars_null <- maihda_longitudinal_pcv_variances(null_model, Sn, ref_c, times - center,
+                                                 has_slope = deg >= 1)
+  vars_adj <- maihda_longitudinal_pcv_variances(adjusted_model, Sa, ref_c,
+                                                times - center, has_slope = deg >= 1)
+  var_baseline_null <- vars_null$baseline
+  var_baseline_adjusted <- vars_adj$baseline
   pcv_intercept <- pcv_cell(var_baseline_null, var_baseline_adjusted)
   # The slope PCV compares the INSTANTANEOUS-slope variance at the baseline,
   # b(t)'Sigma b(t) with b = da/dt -- not the raw Sn[2, 2] cell, which is the
   # slope variance at the coefficient origin and is NOT invariant to where time
   # is zeroed once time_degree >= 2 (for linear growth the two coincide at every
   # t, so this reduces to Sn[2, 2] there).
-  var_slope_null <- if (deg >= 1) maihda_slope_var_at_time(Sn, ref_c) else NA_real_
-  var_slope_adjusted <- if (deg >= 1) maihda_slope_var_at_time(Sa, ref_c) else NA_real_
-  pcv_slope <- if (deg >= 1) pcv_cell(var_slope_null, var_slope_adjusted) else NA_real_
-
-  if (is.null(times)) {
-    times <- maihda_longitudinal_time_grid(null_model$data[[lng$time]])
+  var_slope_null <- vars_null$slope
+  var_slope_adjusted <- vars_adj$slope
+  # A null slope component at the BOUNDARY makes PCV_slope undefined, not merely
+  # uncertain. Its Cholesky diagonal is 0, so the stratum slope variance conditional
+  # on the stratum intercept is zero: the stratum variation has collapsed onto a
+  # subspace, sigma^2_u1 is whatever that collapse direction implies rather than a
+  # free parameter, and the adjusted fit can collapse onto a DIFFERENT direction --
+  # so the ratio does not compare the same quantity before and after adjustment.
+  # Empirically it is not just fragile but explosive: across 30 replicates of an
+  # irregular design with no true stratum slope variance, such fits gave PCV_slope
+  # from -196 to +1.0 (sd 59) against -0.65 to +0.94 for healthy blocks.
+  #
+  # The magnitude guard below cannot catch this: maihda_variance_at_boundary()
+  # scales sqrt(var) against the RESIDUAL sd, and a slope variance is in
+  # outcome-units^2 per time-unit^2, so its 1e-4 relative threshold has no fixed
+  # meaning for this cell -- a denominator of 1.3e-06 that sends the ratio to -196
+  # still tests 17x above the threshold. Identifiability, not magnitude, is the
+  # right question: for a linear block, the slope's SD conditional on the intercept
+  # against its own SD (maihda_linear_block_boundary()), which does not depend on the
+  # unit of time; for larger blocks, lme4's own tolerance.
+  #
+  # PCV_intercept and PCV(t) are NOT gated on rank deficiency. A rank-deficient linear
+  # block is rank 1, so its variance a(t)' Sn a(t) is a perfect square with one zero
+  # (maihda_long_pcv_zero_time()). Far from that time the intercept variance carries
+  # the PCV; close to it the denominator is what the collapse leaves over, not an
+  # estimate of the between-stratum variance at that time, and the ratio can be far
+  # below zero. No cut-off separates the two, so the values are returned and print()
+  # names the time.
+  pcv_slope <- if (deg < 1 || isTRUE(null_slope_at_boundary)) {
+    NA_real_
+  } else {
+    pcv_cell(var_slope_null, var_slope_adjusted)
   }
-  vn_t <- maihda_var_at_time(Sn, times - center)
-  va_t <- maihda_var_at_time(Sa, times - center)
-  pcv_t <- ifelse(vn_t > 0, (vn_t - va_t) / vn_t, NA_real_)
+
+  vn_t <- vars_null$at_t
+  va_t <- vars_adj$at_t
+  pcv_t <- ifelse(vapply(vn_t, denom_at_boundary, logical(1)), NA_real_,
+                  (vn_t - va_t) / vn_t)
 
   structure(
     list(
@@ -826,7 +3111,26 @@ maihda_longitudinal_pcv <- function(null_model, adjusted_model, times = NULL) {
       Sigma_stratum_adjusted = Sa,
       time = lng$time,
       time_degree = lng$time_degree,
-      ml_refit = ml_refit
+      ml_refit = ml_refit,
+      estimation = estimation,
+      estimation_used = estimation_used,
+      ml_variances = maihda_pcv_ml_variances(null_model, adjusted_model),
+      null_at_boundary = null_at_boundary,
+      adjusted_at_boundary = adjusted_at_boundary,
+      null_rank_deficient = null_rank_deficient,
+      null_slope_at_boundary = null_slope_at_boundary,
+      adjusted_rank_deficient = adjusted_rank_deficient,
+      stratum_slope = has_stratum_slope,
+      variance_summary = if (identical(vars_null$summary, vars_adj$summary)) {
+        vars_null$summary
+      } else {
+        "mixed"
+      },
+      Sigma_summary = if (identical(vars_null$Sigma_summary, vars_adj$Sigma_summary)) {
+        vars_null$Sigma_summary
+      } else {
+        "mixed"
+      }
     ),
     class = "maihda_long_pcv"
   )
@@ -856,7 +3160,11 @@ maihda_longitudinal_pcv <- function(null_model, adjusted_model, times = NULL) {
 maihda_longitudinal_strata_predictions <- function(object) {
   re <- maihda_longitudinal_stratum_re(object)
   lng <- object$longitudinal_info
-  deg <- lng$time_degree
+  # The STRATUM block's degree, not the growth curve's: under stratum_slope = FALSE
+  # the level-3 coefficients are intercepts only, and padding them out to
+  # time_degree + 1 columns would leave an all-NA slope column and turn every
+  # `baseline` (a' coef) into NA.
+  deg <- maihda_lng_stratum_degree(lng)
   # The coefficients are in the model's (possibly centered) coordinates, so the
   # baseline deviation is evaluated at ref_time - center.
   ref_c <- lng$ref_time - maihda_lng_time_center(lng)
@@ -877,6 +3185,82 @@ maihda_longitudinal_strata_predictions <- function(object) {
   cbind(df, as.data.frame(mat, stringsAsFactors = FALSE))
 }
 
+# The time, on the user's time scale, at which a rank-deficient LINEAR (2 x 2) stratum
+# block has no between-stratum variance. Such a block is rank 1, so a(t)' Sigma a(t)
+# is the perfect square (s1 + s2 t)^2, zero at t = -Sigma[1, 2] / Sigma[2, 2] in the
+# block's own coordinates; `center` (the fit's internal time centering) moves that
+# back to the user's scale. NA for a block of any other size, for one without slope
+# variance (its between-stratum variance is the same at every time) and when the
+# centering is unknown.
+maihda_long_pcv_zero_time <- function(Sigma, center = 0) {
+  if (!is.matrix(Sigma) || !identical(dim(Sigma), c(2L, 2L)) ||
+      length(center) != 1L || !is.finite(center)) {
+    return(NA_real_)
+  }
+  v1 <- Sigma[2, 2]
+  cv <- Sigma[1, 2]
+  if (!is.finite(v1) || !is.finite(cv) || v1 <= 0) {
+    return(NA_real_)
+  }
+  as.numeric(center - cv / v1)
+}
+
+# What print.maihda_long_pcv() says about PCV_intercept and PCV(t) under a
+# rank-deficient stratum block; both are reported whatever the blocks' rank.
+# `zero_null` / `zero_adjusted` are the times from maihda_long_pcv_zero_time(), NA for
+# a model whose block is not a rank-deficient linear one, and `times` the reporting
+# times. Near the null model's time the PCV divides by a variance next to zero; at the
+# adjusted model's it is 1 whatever the strata do. One unwrapped string.
+maihda_long_pcv_zero_note <- function(time, zero_null, zero_adjusted, times) {
+  has_null <- length(zero_null) == 1L && is.finite(zero_null)
+  has_adj <- length(zero_adjusted) == 1L && is.finite(zero_adjusted)
+  if (!has_null && !has_adj) {
+    return(paste0("PCV_intercept and PCV(", time, ") are still reported: they are ",
+                  "carried by the intercept variance, which stays estimable."))
+  }
+  times <- times[is.finite(times)]
+  span <- if (length(times)) diff(range(times)) else NA_real_
+  # Two decimals over a span of 1 to 10 time units, more for a shorter span, fewer for
+  # a longer one.
+  digits <- if (is.finite(span) && span > 0) max(0, 2 - floor(log10(span))) else 2
+  at <- function(v) paste0(time, " = ", formatC(v, digits = digits, format = "f"))
+  where <- if (length(times)) {
+    sprintf(" (%s to %s)", format(min(times)), format(max(times)))
+  } else {
+    ""
+  }
+  open <- paste0("PCV_intercept and PCV(", time, ") are still reported. A ",
+                 "rank-deficient linear block has no between-stratum variance at one ",
+                 "time")
+  if (has_null && has_adj) {
+    paste0(open, " -- ", at(zero_null), " for the null model, ", at(zero_adjusted),
+           " for the adjusted model -- and the PCV is not interpretable near either: ",
+           "it divides by almost nothing near the null model's, and is 100% at the ",
+           "adjusted model's. The further both lie from the reported times", where,
+           ", the more the PCV is carried by the intercept variance, which stays ",
+           "estimable.")
+  } else {
+    paste0(open, ", ", if (has_null) at(zero_null) else at(zero_adjusted), " for the ",
+           if (has_null) "null" else "adjusted", " model, and the PCV is not ",
+           "interpretable near it: it ",
+           if (has_null) "divides by almost nothing" else "is 100%", " there. The ",
+           "further that time lies from the reported times", where, ", the more the ",
+           "PCV is carried by the intercept variance, which stays estimable.")
+  }
+}
+
+# Render a variance for print.maihda_long_pcv(): four decimals, or four significant
+# digits for one that is not zero and below 1e-4, which four decimals would show as
+# 0.0000. A slope variance is per unit of time squared, so with time in days it is of
+# the order of 1e-7.
+maihda_format_variance <- function(v) {
+  v <- as.numeric(v)
+  out <- sprintf("%.4f", v)
+  small <- is.finite(v) & v != 0 & abs(v) < 1e-4
+  out[small] <- sprintf("%.3e", v[small])
+  out
+}
+
 #' Print a longitudinal MAIHDA PCV
 #'
 #' @param x A \code{maihda_long_pcv} object.
@@ -891,36 +3275,161 @@ print.maihda_long_pcv <- function(x, ...) {
   # Baseline = the between-stratum variance at the observed baseline time
   # (ref_time), evaluated in the model's (possibly centered) coefficient
   # coordinates (see maihda_longitudinal_pcv).
-  cat(sprintf("Baseline (%s = %g) variance: %.4f (null) -> %.4f (adjusted)\n",
-              x$time, x$ref_time, x$var_baseline_null, x$var_baseline_adjusted))
+  cat(sprintf("Baseline (%s = %g) variance: %s (null) -> %s (adjusted)\n",
+              x$time, x$ref_time, maihda_format_variance(x$var_baseline_null),
+              maihda_format_variance(x$var_baseline_adjusted)))
   cat(sprintf("  PCV_intercept: %s of the baseline between-stratum inequality is additive.\n",
               fmt(x$pcv_intercept)))
-  if (nrow(x$Sigma_stratum_null) >= 2) {
+  has_slope <- nrow(x$Sigma_stratum_null) >= 2
+  if (has_slope) {
     # Instantaneous-slope variance at the baseline (see maihda_slope_var_at_time);
     # objects stored by older package versions carry no var_slope_* fields, so
     # fall back to the slope-variance cell they reported.
     vsn <- if (!is.null(x$var_slope_null)) x$var_slope_null else x$Sigma_stratum_null[2, 2]
     vsa <- if (!is.null(x$var_slope_adjusted)) x$var_slope_adjusted else x$Sigma_stratum_adjusted[2, 2]
-    cat(sprintf("Slope (%s) variance at baseline: %.4f (null) -> %.4f (adjusted)\n",
-                x$time, vsn, vsa))
+    cat(sprintf("Slope (%s) variance at baseline: %s (null) -> %s (adjusted)\n",
+                x$time, maihda_format_variance(vsn), maihda_format_variance(vsa)))
     cat(sprintf("  PCV_slope:     %s of the *trajectory* between-stratum inequality is additive\n",
                 fmt(x$pcv_slope)))
     cat("                 (the remainder is the multiplicative/interaction part).\n")
   }
-  cat(pal$muted(paste0(
+  # The basis in calculate_pcv()'s words, unless a note below names it: the mixed and
+  # ML-refit notes, and the brms note (a brms object stored without variance_summary
+  # holds posterior means, which the posterior label would misname). An object stored
+  # without estimation_used does not record its basis.
+  if (!is.null(x$estimation_used) && !isTRUE(x$ml_refit) &&
+      !isTRUE(x$estimation_used %in% c("mixed", "posterior"))) {
+    cat(pal$muted(maihda_pcv_basis_line(maihda_pcv_result_basis_label(x))))
+  }
+  if (!has_slope && isFALSE(x$stratum_slope)) {
+    # stratum_slope = FALSE: the level-3 block is a random intercept only, so the
+    # between-stratum variance does not vary with time and there is no trajectory
+    # inequality to decompose. Say so rather than silently omitting the slope lines.
+    cat(pal$muted(paste0(
+        "\nThe stratum level was fit with a random intercept only (stratum_slope = FALSE),\n",
+        "so the between-stratum variance is constant over ", x$time, " and there is no\n",
+        "PCV_slope: strata differ in level, not in trajectory, by construction.\n")))
+  }
+  # The closing explanation tracks whether a slope decomposition was actually
+  # reported: promising that "a high PCV_slope means ..." under an intercept-only
+  # stratum block points at a number that is not on the page.
+  cat(pal$muted(if (nrow(x$Sigma_stratum_null) >= 2) {
+    paste0(
       "\nThe PCV is the share of the null model's between-stratum (trajectory) variance\n",
       "explained by the dimensions' additive main effects and their time interactions;\n",
-      "a high PCV_slope means trajectory inequalities are 'mostly additive'.\n")))
-  if (isTRUE(x$ml_refit)) {
+      "a high PCV_slope means trajectory inequalities are 'mostly additive'.\n")
+  } else {
+    paste0(
+      "\nThe PCV is the share of the null model's between-stratum variance explained by\n",
+      "the dimensions' additive main effects and their time interactions.\n")
+  }))
+  if (isTRUE(x$null_rank_deficient) || isTRUE(x$adjusted_rank_deficient)) {
+    # A stratum growth block that has lost a dimension: lme4 has pinned one of the
+    # block's Cholesky diagonals at 0, so the stratum variation lies in a subspace of
+    # (intercept, slope, ...) rather than filling it. For the linear 2x2 block that is
+    # a perfect intercept-slope correlation. Every VARIANCE stays nonzero and
+    # a(t)'Sigma a(t) is positive at all but one time, so neither the magnitude guard
+    # above nor lme4's own reporting distinguishes this from a well-estimated block --
+    # which is exactly why it has to be said out loud.
+    which_fit <- if (isTRUE(x$null_rank_deficient) && isTRUE(x$adjusted_rank_deficient)) {
+      "Both the null and the adjusted"
+    } else if (isTRUE(x$null_rank_deficient)) {
+      "The null"
+    } else {
+      "The adjusted"
+    }
+    # Where each rank-deficient linear block has no between-stratum variance; NA for a
+    # model whose block is full rank, not linear, or without slope variance. A block
+    # with every variance at the boundary has none at ANY time (its own note below
+    # says so), so it is given no such time.
+    zero_null <- if (isTRUE(x$null_rank_deficient) && !isTRUE(x$null_at_boundary)) {
+      maihda_long_pcv_zero_time(x$Sigma_stratum_null, x$time_center)
+    } else {
+      NA_real_
+    }
+    zero_adjusted <- if (isTRUE(x$adjusted_rank_deficient) &&
+                         !isTRUE(x$adjusted_at_boundary)) {
+      maihda_long_pcv_zero_time(x$Sigma_stratum_adjusted, x$time_center)
+    } else {
+      NA_real_
+    }
+    cat(pal$warn(paste0(
+        "\nNote: ", which_fit, " model's between-stratum block is RANK-DEFICIENT --\n",
+        "one of its dimensions is at the boundary (for a linear growth block, a perfect\n",
+        "intercept-slope correlation), i.e. a singular fit at the stratum level. The\n",
+        "stratum variation has collapsed onto a subspace, and the null and adjusted fits\n",
+        "need not have collapsed onto the SAME one.\n",
+        if (isTRUE(x$null_slope_at_boundary)) paste0(
+        "The null model's SLOPE component is one of those at the boundary, so PCV_slope is\n",
+        "reported as NA: it would not compare the same quantity before and after\n",
+        "adjustment (in simulation such ratios ranged from -196 to +1).\n") else paste0(
+        "The slope component itself is still estimable, so PCV_slope is reported -- but\n",
+        "read it alongside this caveat.\n"),
+        paste(strwrap(paste(
+          maihda_long_pcv_zero_note(x$time, zero_null, zero_adjusted, x$pcv_t$time),
+          "A rank-deficient block is common with few strata even when the strata",
+          "diverge over time, so it does not show that they do not; it is rarer with",
+          "more strata, more people per stratum or more measurement occasions.",
+          "stratum_slope = FALSE models a time-constant between-stratum variance;",
+          "where the strata do diverge, it moves their slope differences to the",
+          "person level."), width = 80),
+          collapse = "\n"), "\n")))
+  }
+  if (isTRUE(x$null_at_boundary)) {
+    # The null growth model's between-stratum block sits on the singularity boundary
+    # (effectively no stratum trajectory variance), so every PCV is a 0/0 ratio and is
+    # reported as NA rather than an exploded value from a near-zero denominator. Say so,
+    # mirroring calculate_pcv()'s boundary caveat.
+    cat(pal$warn(paste0(
+        "\nNote: the null model's between-stratum (trajectory) variance is at the singularity\n",
+        "boundary (a singular fit -- effectively no between-stratum trajectory variation to\n",
+        "explain), so the PCV is undefined (0/0) and reported as NA. This is consistent with\n",
+        "genuinely additive strata as well as a degenerate fit; the two cannot be told apart.\n")))
+  }
+  if (isTRUE(x$adjusted_at_boundary)) {
+    # The longitudinal counterpart of calculate_pcv()'s model2 boundary note, which
+    # this print method was missing: the adjusted growth model's stratum block is at
+    # the singularity boundary, so the numerator is (null - ~0) and every PCV cell is
+    # pinned near 100% by the fit, not by the additive main effects.
+    cat(pal$warn(paste0(
+        "\nNote: the ADJUSTED model's between-stratum (trajectory) variance is at the\n",
+        "singularity boundary, so the PCV above is pinned near 100% as an artefact of that\n",
+        "fit rather than as evidence that the strata are additive. A singular adjusted fit\n",
+        "and genuinely additive strata produce the same number and cannot be told apart.\n")))
+  }
+  if (identical(x$estimation_used, "mixed")) {
+    # estimation = "ML" was requested, but a growth model kept its REML fit (a
+    # between-stratum trajectory variance at the singularity boundary, or a failed
+    # refitML()), so the comparison mixes an ML block with a REML one -- NOT the
+    # pure ML basis requested. Surface it, mirroring
+    # calculate_pcv()'s "mixed" basis note, so the output is not mistaken for a
+    # clean fitted (REML) comparison.
+    cat(pal$warn(paste0(
+        "\nNote: estimation = \"ML\" was requested, but a growth model kept its REML fit\n",
+        "(a between-stratum trajectory variance at the singularity boundary, or a failed\n",
+        "refitML()), so this compares an ML variance block against a REML one -- not the\n",
+        "pure ML basis requested. Compare against estimation = \"fitted\".\n",
+        "See ?calculate_pcv.\n")))
+  } else if (isTRUE(x$ml_refit)) {
     # REML growth fits were ML-refitted for this comparison (see
     # maihda_longitudinal_pcv), so the variances above are on the ML scale while
     # summary()'s time-varying VPC keeps each fit's own REML estimate -- say so,
     # mirroring maihda_table()'s basis note for the cross-sectional PCV.
     cat(pal$muted(paste0(
-        "(REML growth fits were refitted with maximum likelihood for this comparison --\n",
-        "REML variances are not comparable across the null vs. adjusted fixed effects --\n",
-        "so these variances are on the ML scale; summary()'s time-varying VPC keeps\n",
-        "each fit's own REML estimate. See ?calculate_pcv.)\n")))
+        "(REML growth fits were refitted with maximum likelihood for this comparison,\n",
+        "as estimation = \"ML\" requests, so these variances are on the ML scale;\n",
+        "summary()'s time-varying VPC keeps each fit's own REML estimate. See\n",
+        "?calculate_pcv on how the ML basis differs from the default.)\n")))
+  }
+  if (identical(x$variance_summary, "posterior median")) {
+    # A brms pair: the variances printed above are posterior medians while summary()
+    # tabulates the posterior-mean blocks, so the two differ by design. Keyed on the
+    # field the result carries, never on the engine: an object stored without it
+    # holds posterior-mean variances and must not be described as medians.
+    cat(pal$muted(paste0(
+        "(brms fits: each variance above is the posterior median of its per-draw value;\n",
+        "summary() tabulates the posterior means of the covariance blocks. With few\n",
+        "strata this PCV runs low on average.)\n")))
   }
   invisible(x)
 }

@@ -61,10 +61,12 @@ test_that("binomial fallback residuals stay on the deviance scale", {
     obs
   )
 
+  # A row without a finite probability cannot be scored. It is NA, so a stratum mean
+  # leaves it out; it was 0, which counted it as a perfect fit (audit 2026-09-27b).
   expected <- c(
     sqrt(-2 * log1p(-0.2)),
     sqrt(-2 * log(0.8)),
-    0,
+    NA_real_,
     sqrt(-2 * log1p(-0.5))
   )
   expect_equal(resids, expected)
@@ -188,6 +190,73 @@ test_that("ordinal stratum surprise averages per-observation surprise (log loss)
   # The mean-of-logs differs from the (incorrect) log-of-mean it replaced.
   expect_false(isTRUE(all.equal(as.numeric(m_plot[common]),
                                 as.numeric(-log(p_mean[common])))))
+})
+
+test_that("maihda_stratum_interval_from_epred aggregates draws then takes quantiles", {
+  # 4 posterior draws x 4 observations; two strata of two rows each. The correct
+  # stratum interval aggregates predictions WITHIN each draw, then takes posterior
+  # quantiles -- it is not a function of any row-level SE.
+  ep <- rbind(
+    c(0.10, 0.20, 0.60, 0.80),
+    c(0.15, 0.25, 0.55, 0.85),
+    c(0.20, 0.10, 0.65, 0.75),
+    c(0.05, 0.30, 0.50, 0.90)
+  )
+  strat <- c("A", "A", "B", "B")
+
+  out <- MAIHDA:::maihda_stratum_interval_from_epred(ep, strat, level = 0.5)
+  expect_equal(out$stratum, c("A", "B"))
+
+  mA <- rowMeans(ep[, 1:2])
+  mB <- rowMeans(ep[, 3:4])
+  expect_equal(out$fitted, c(mean(mA), mean(mB)))
+  qA <- stats::quantile(mA, c(0.25, 0.75), names = FALSE)
+  qB <- stats::quantile(mB, c(0.25, 0.75), names = FALSE)
+  expect_equal(out$ci_lower, c(qA[1], qB[1]))
+  expect_equal(out$ci_upper, c(qA[2], qB[2]))
+
+  # Weights bias the per-draw stratum mean (a weighted mean over the stratum rows).
+  w <- c(3, 1, 1, 1)
+  outw <- MAIHDA:::maihda_stratum_interval_from_epred(ep, strat, w = w, level = 0.5)
+  mAw <- as.vector(ep[, 1:2] %*% (c(3, 1) / 4))
+  expect_equal(outw$fitted[1], mean(mAw))
+
+  expect_error(MAIHDA:::maihda_stratum_interval_from_epred(ep, strat[1:3]),
+               "one label per column")
+})
+
+test_that("frequentist (lme4) stratum panels draw joint-covariance bars, never averaged SEs", {
+  set.seed(404)
+  n <- 900
+  d <- data.frame(
+    gender = sample(c("F", "M"), n, replace = TRUE),
+    race   = sample(c("A", "B", "C"), n, replace = TRUE)
+  )
+  sk <- interaction(d$gender, d$race, drop = TRUE)
+  d$y  <- stats::rbinom(n, 1, stats::plogis(stats::rnorm(nlevels(sk), sd = 0.8)[sk]))
+  d$yc <- stats::rnorm(n, stats::rnorm(nlevels(sk), sd = 0.8)[sk])
+  strata <- make_strata(d, vars = c("gender", "race"))
+  d$stratum <- strata$data$stratum
+
+  mb <- suppressWarnings(suppressMessages(
+    fit_maihda(y ~ (1 | stratum), data = d, family = "binomial")))
+  # The row-level SEs are NOT aggregated into a (statistically invalid) stratum SE:
+  # the stratum interval comes from the joint covariance of the fixed and random
+  # effects (test-lme4-deviation-panel-intervals.R checks it against its definition),
+  # and lme4's own se.fit, with its "approximation" warning, is never asked for.
+  pb <- plot_prediction_deviation_panels(mb, type = "binomial")
+  expect_s3_class(pb, "patchwork")
+  pdb <- pb[[2]]$data
+  expect_true(all(is.finite(pdb$ci_lower) & is.finite(pdb$ci_upper)))
+  expect_true(all(pdb$ci_lower > 0 & pdb$ci_lower < pdb$fitted &
+                    pdb$fitted < pdb$ci_upper & pdb$ci_upper < 1))
+
+  mg <- suppressWarnings(suppressMessages(
+    fit_maihda(yc ~ (1 | stratum), data = d, family = "gaussian")))
+  pg <- plot_prediction_deviation_panels(mg, type = "gaussian")
+  pdg <- pg[[2]]$data
+  expect_true(all(is.finite(pdg$ci_lower) & is.finite(pdg$ci_upper)))
+  expect_true(all(pdg$ci_lower < pdg$fitted & pdg$fitted < pdg$ci_upper))
 })
 
 test_that("Poisson prediction panels use response-scale (count) fitted values", {

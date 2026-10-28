@@ -15,7 +15,7 @@
   highlight_by = c("flag", "rope"),
   rope = NULL,
   select = c("order", "deviation"),
-  order_by = c("predicted_desc", "stratum", "predicted_asc", "deviation"),
+  order_by = c("predicted_desc", "stratum", "predicted_asc", "deviation", "size"),
   quantity = c("predicted", "interaction"),
   ...
 )
@@ -31,20 +31,41 @@
     covariate-adjusted model the distance from the diagonal reflects both
     shrinkage \emph{and} covariate adjustment, not shrinkage alone; it is a
     pure shrinkage view only for an intercept-only (null) model
-  \item "predicted": Predicted values for each stratum with confidence
-    intervals. By default the strata are ordered highest-to-lowest predicted
-    value (a ranked caterpillar plot); see \code{order_by} to change or
-    disable the ordering
+  \item "predicted": Predicted values for each stratum with
+    \strong{conditional} (random-effect) intervals: the stratum random
+    effect's own interval -- a Wald interval on the conditional SD of the
+    BLUP for the likelihood engines, the posterior interval of \eqn{u_j}
+    for brms -- shifted onto the outcome scale by the fixed-effect
+    prediction, which is held at its point estimate. They answer
+    \dQuote{does this stratum depart from the dashed across-strata
+    reference?}, which is what a caterpillar plot is read for; they are
+    \emph{not} intervals for the predicted value itself. Holding the fixed
+    effects at a point estimate stops the fixed-effect uncertainty carried
+    inside the random-effect interval from cancelling against the random
+    effect it is correlated with, so these intervals are \emph{wider} than
+    a full interval for the stratum's predicted outcome, markedly so when
+    there are few strata. By default the strata are ordered
+    highest-to-lowest predicted value (a ranked caterpillar plot); see
+    \code{order_by} to change or disable the ordering
   \item "upset": UpSet-style alternative to \code{"predicted"} -- an
     intersection-size bar, a category matrix encoding each stratum's level on
     every dimension, and the predicted-value panel, all sharing one column
     order. Replaces the long intersectional axis labels with the matrix.
     Binary 0/1 dimensions show as a single present/absent row; multi-level
-    factors get one row per level
-  \item "effect_decomp": Visualizes additive vs intersectional deviation from global mean
+    factors get one row per level. Columns are ordered by intersection size
+    (largest first) by default; \code{order_by = "predicted_desc"} gives the
+    ranked caterpillar of \code{"predicted"} with the matrix in place of the
+    text labels
+  \item "effect_decomp": Visualizes additive vs intersectional deviation from global mean.
+    Only the stratum random effect and, for a crossed-dimensions fit, the dimension
+    random effects enter; a contextual random effect, or any other grouping, belongs to
+    neither component and is left out of the deviations and the global mean, as it is
+    from the \code{"predicted"} values
   \item "prediction_deviation": Detailed deviation panels for individuals or strata
   \item "context_vpc": Stratum vs. context variance bars for a contextual
-    cross-classified fit (\code{fit_maihda(context = )}); errors otherwise
+    cross-classified fit (\code{fit_maihda(context = )}); errors otherwise. For a
+    crossed-dimensions fit with a context the between-stratum variance is drawn
+    as its additive dimension and interaction bars
   \item "vpc_trajectory": Time-varying VPC/ICC curve for a \strong{longitudinal}
     fit (\code{fit_maihda(id =, time =)}); errors otherwise. For a longitudinal
     model \code{"vpc"} and \code{"all"} also route here
@@ -93,7 +114,7 @@ stratum is kept and the remaining slots are filled according to \code{select}.}
 
 \item{highlight_by}{Which interaction-screen column defines the highlighted
 strata: \code{"flag"} (default) uses the zero-centred \code{flagged} column
-(credibly non-zero interaction), preserving the historical behaviour;
+(credibly non-zero interaction);
 \code{"rope"} uses the equivalence \code{decision} column, highlighting the
 strata classified \code{"relevant"} (interaction interval entirely outside the
 region of practical equivalence). \code{"rope"} requires a screen carrying a
@@ -111,8 +132,8 @@ object already carries a \code{decision} column. Ignored when a precomputed
 \code{maihda_interactions} object is passed (its own \code{rope} is used).}
 
 \item{select}{When the \code{n_strata} cap must drop strata, which to keep:
-\code{"order"} (default; the first n_strata in stratum order, the historical
-behaviour) or \code{"deviation"} (the n_strata furthest from the reference
+\code{"order"} (default; the first n_strata in stratum order) or
+\code{"deviation"} (the n_strata furthest from the reference
 line -- largest \code{|predicted - reference|}, so the most extreme strata in
 \emph{both} directions). Applies to \code{"predicted"} and, for a longitudinal
 fit, \code{"trajectories"} (where it keeps the strata whose trajectories swing
@@ -121,16 +142,25 @@ governs the fill and the unflagged case. \code{select} changes \emph{which}
 strata appear; their left-to-right display order is a separate choice governed
 by \code{order_by}.}
 
-\item{order_by}{For \code{type = "predicted"}, how to order the strata that are
-displayed (\strong{display-only} -- it does not change \emph{which} strata are
-shown, that is \code{n_strata}/\code{select}, nor the predicted values,
-intervals, reference line, or highlighted set): \code{"predicted_desc"}
-(default) orders labels from the highest predicted value to the lowest,
-\code{"stratum"} keeps the native stratum order (the previous behaviour),
-\code{"predicted_asc"} orders from lowest to highest, and \code{"deviation"}
-orders by largest absolute deviation from the reference line
-(\code{|predicted - reference|}). Ignored by the other plot types
-(\code{"upset"} orders by intersection size).}
+\item{order_by}{For \code{type = "predicted"} and \code{type = "upset"}, how to
+order the strata that are displayed (\strong{display-only} -- it does not
+change \emph{which} strata are shown, that is \code{n_strata}/\code{select},
+nor the predicted values, intervals, reference line, or highlighted set):
+\code{"predicted_desc"} orders from the highest predicted value to the lowest,
+\code{"stratum"} keeps the native stratum order, \code{"predicted_asc"} orders
+from lowest to highest, \code{"deviation"} orders by largest absolute deviation
+from the reference line (\code{|predicted - reference|}), and \code{"size"}
+orders by intersection (stratum) size, largest first. The default is
+\strong{per view}: \code{"predicted_desc"} for \code{"predicted"} (labels run
+from the highest predicted value down) and \code{"size"} for \code{"upset"}
+(the UpSet convention, which also makes its intersection-size bar monotone).
+On the \code{"upset"} view the three value-based orders sort on the quantity
+the bottom panel actually shows, so they follow \code{quantity} -- with
+\code{quantity = "interaction"} they order by the stratum random effect and
+\code{"deviation"} measures the distance from zero. Combining
+\code{order_by = "predicted_desc"} with \code{type = "upset"} gives the
+ranked caterpillar of the \code{"predicted"} view drawn against the UpSet
+category matrix instead of long text labels. Ignored by the other plot types.}
 
 \item{quantity}{For \code{type = "upset"}, which quantity the bottom panel
 shows: \code{"predicted"} (default) the stratum's predicted value (fixed +
@@ -145,15 +175,16 @@ intersectional interaction when the dimension main effects are in the model
 \value{
 For a single \code{type}, a \pkg{ggplot2} object that you can extend
   with the usual \code{+} grammar (themes, \code{\link[ggplot2]{labs}()},
-  added layers, or a replacement fill/colour scale). Two types return a richer
-  object: \code{"prediction_deviation"} returns a \pkg{patchwork} of two
-  panels (theme every panel at once with \code{& theme_*()}).
+  added layers, or a replacement fill/colour scale). Some types return a
+  richer object: \code{"prediction_deviation"} returns a \pkg{patchwork} of
+  two panels and \code{"upset"} a \pkg{patchwork} of three panels (theme
+  every panel at once with \code{& theme_*()}).
   \code{type = "all"} returns a named list of ggplot2 objects.
 }
 \description{
 Creates various plots for visualizing MAIHDA model results including
 variance partition coefficient comparisons, observed vs. shrunken estimates,
-and predicted subgroup values with confidence intervals.
+and predicted subgroup values with conditional intervals.
 }
 \examples{
 \donttest{

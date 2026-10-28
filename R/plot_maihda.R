@@ -2,7 +2,7 @@
 #'
 #' Creates various plots for visualizing MAIHDA model results including
 #' variance partition coefficient comparisons, observed vs. shrunken estimates,
-#' and predicted subgroup values with confidence intervals.
+#' and predicted subgroup values with conditional intervals.
 #'
 #' @param x A maihda_model object from \code{fit_maihda()}.
 #' @param type Character string specifying plot type:
@@ -13,20 +13,41 @@
 #'       covariate-adjusted model the distance from the diagonal reflects both
 #'       shrinkage \emph{and} covariate adjustment, not shrinkage alone; it is a
 #'       pure shrinkage view only for an intercept-only (null) model
-#'     \item "predicted": Predicted values for each stratum with confidence
-#'       intervals. By default the strata are ordered highest-to-lowest predicted
-#'       value (a ranked caterpillar plot); see \code{order_by} to change or
-#'       disable the ordering
+#'     \item "predicted": Predicted values for each stratum with
+#'       \strong{conditional} (random-effect) intervals: the stratum random
+#'       effect's own interval -- a Wald interval on the conditional SD of the
+#'       BLUP for the likelihood engines, the posterior interval of \eqn{u_j}
+#'       for brms -- shifted onto the outcome scale by the fixed-effect
+#'       prediction, which is held at its point estimate. They answer
+#'       \dQuote{does this stratum depart from the dashed across-strata
+#'       reference?}, which is what a caterpillar plot is read for; they are
+#'       \emph{not} intervals for the predicted value itself. Holding the fixed
+#'       effects at a point estimate stops the fixed-effect uncertainty carried
+#'       inside the random-effect interval from cancelling against the random
+#'       effect it is correlated with, so these intervals are \emph{wider} than
+#'       a full interval for the stratum's predicted outcome, markedly so when
+#'       there are few strata. By default the strata are ordered
+#'       highest-to-lowest predicted value (a ranked caterpillar plot); see
+#'       \code{order_by} to change or disable the ordering
 #'     \item "upset": UpSet-style alternative to \code{"predicted"} -- an
 #'       intersection-size bar, a category matrix encoding each stratum's level on
 #'       every dimension, and the predicted-value panel, all sharing one column
 #'       order. Replaces the long intersectional axis labels with the matrix.
 #'       Binary 0/1 dimensions show as a single present/absent row; multi-level
-#'       factors get one row per level
-#'     \item "effect_decomp": Visualizes additive vs intersectional deviation from global mean
+#'       factors get one row per level. Columns are ordered by intersection size
+#'       (largest first) by default; \code{order_by = "predicted_desc"} gives the
+#'       ranked caterpillar of \code{"predicted"} with the matrix in place of the
+#'       text labels
+#'     \item "effect_decomp": Visualizes additive vs intersectional deviation from global mean.
+#'       Only the stratum random effect and, for a crossed-dimensions fit, the dimension
+#'       random effects enter; a contextual random effect, or any other grouping, belongs to
+#'       neither component and is left out of the deviations and the global mean, as it is
+#'       from the \code{"predicted"} values
 #'     \item "prediction_deviation": Detailed deviation panels for individuals or strata
 #'     \item "context_vpc": Stratum vs. context variance bars for a contextual
-#'       cross-classified fit (\code{fit_maihda(context = )}); errors otherwise
+#'       cross-classified fit (\code{fit_maihda(context = )}); errors otherwise. For a
+#'       crossed-dimensions fit with a context the between-stratum variance is drawn
+#'       as its additive dimension and interaction bars
 #'     \item "vpc_trajectory": Time-varying VPC/ICC curve for a \strong{longitudinal}
 #'       fit (\code{fit_maihda(id =, time =)}); errors otherwise. For a longitudinal
 #'       model \code{"vpc"} and \code{"all"} also route here
@@ -54,7 +75,7 @@
 #'   highlight set is governed by \code{highlight_by}.
 #' @param highlight_by Which interaction-screen column defines the highlighted
 #'   strata: \code{"flag"} (default) uses the zero-centred \code{flagged} column
-#'   (credibly non-zero interaction), preserving the historical behaviour;
+#'   (credibly non-zero interaction);
 #'   \code{"rope"} uses the equivalence \code{decision} column, highlighting the
 #'   strata classified \code{"relevant"} (interaction interval entirely outside the
 #'   region of practical equivalence). \code{"rope"} requires a screen carrying a
@@ -86,8 +107,8 @@
 #'   \code{n_strata} cap on \code{"predicted"} becomes flag-aware: every flagged
 #'   stratum is kept and the remaining slots are filled according to \code{select}.
 #' @param select When the \code{n_strata} cap must drop strata, which to keep:
-#'   \code{"order"} (default; the first n_strata in stratum order, the historical
-#'   behaviour) or \code{"deviation"} (the n_strata furthest from the reference
+#'   \code{"order"} (default; the first n_strata in stratum order) or
+#'   \code{"deviation"} (the n_strata furthest from the reference
 #'   line -- largest \code{|predicted - reference|}, so the most extreme strata in
 #'   \emph{both} directions). Applies to \code{"predicted"} and, for a longitudinal
 #'   fit, \code{"trajectories"} (where it keeps the strata whose trajectories swing
@@ -95,16 +116,25 @@
 #'   governs the fill and the unflagged case. \code{select} changes \emph{which}
 #'   strata appear; their left-to-right display order is a separate choice governed
 #'   by \code{order_by}.
-#' @param order_by For \code{type = "predicted"}, how to order the strata that are
-#'   displayed (\strong{display-only} -- it does not change \emph{which} strata are
-#'   shown, that is \code{n_strata}/\code{select}, nor the predicted values,
-#'   intervals, reference line, or highlighted set): \code{"predicted_desc"}
-#'   (default) orders labels from the highest predicted value to the lowest,
-#'   \code{"stratum"} keeps the native stratum order (the previous behaviour),
-#'   \code{"predicted_asc"} orders from lowest to highest, and \code{"deviation"}
-#'   orders by largest absolute deviation from the reference line
-#'   (\code{|predicted - reference|}). Ignored by the other plot types
-#'   (\code{"upset"} orders by intersection size).
+#' @param order_by For \code{type = "predicted"} and \code{type = "upset"}, how to
+#'   order the strata that are displayed (\strong{display-only} -- it does not
+#'   change \emph{which} strata are shown, that is \code{n_strata}/\code{select},
+#'   nor the predicted values, intervals, reference line, or highlighted set):
+#'   \code{"predicted_desc"} orders from the highest predicted value to the lowest,
+#'   \code{"stratum"} keeps the native stratum order, \code{"predicted_asc"} orders
+#'   from lowest to highest, \code{"deviation"} orders by largest absolute deviation
+#'   from the reference line (\code{|predicted - reference|}), and \code{"size"}
+#'   orders by intersection (stratum) size, largest first. The default is
+#'   \strong{per view}: \code{"predicted_desc"} for \code{"predicted"} (labels run
+#'   from the highest predicted value down) and \code{"size"} for \code{"upset"}
+#'   (the UpSet convention, which also makes its intersection-size bar monotone).
+#'   On the \code{"upset"} view the three value-based orders sort on the quantity
+#'   the bottom panel actually shows, so they follow \code{quantity} -- with
+#'   \code{quantity = "interaction"} they order by the stratum random effect and
+#'   \code{"deviation"} measures the distance from zero. Combining
+#'   \code{order_by = "predicted_desc"} with \code{type = "upset"} gives the
+#'   ranked caterpillar of the \code{"predicted"} view drawn against the UpSet
+#'   category matrix instead of long text labels. Ignored by the other plot types.
 #' @param quantity For \code{type = "upset"}, which quantity the bottom panel
 #'   shows: \code{"predicted"} (default) the stratum's predicted value (fixed +
 #'   random effect) against the across-strata reference line, or
@@ -116,9 +146,10 @@
 #'
 #' @return For a single \code{type}, a \pkg{ggplot2} object that you can extend
 #'   with the usual \code{+} grammar (themes, \code{\link[ggplot2]{labs}()},
-#'   added layers, or a replacement fill/colour scale). Two types return a richer
-#'   object: \code{"prediction_deviation"} returns a \pkg{patchwork} of two
-#'   panels (theme every panel at once with \code{& theme_*()}).
+#'   added layers, or a replacement fill/colour scale). Some types return a
+#'   richer object: \code{"prediction_deviation"} returns a \pkg{patchwork} of
+#'   two panels and \code{"upset"} a \pkg{patchwork} of three panels (theme
+#'   every panel at once with \code{& theme_*()}).
 #'   \code{type = "all"} returns a named list of ggplot2 objects.
 #'
 #' @examples
@@ -143,7 +174,7 @@
 #' @import ggplot2
 #' @importFrom dplyr arrange
 plot.maihda_model <- function(x, type = c("all", "vpc", "obs_vs_shrunken", "predicted", "upset", "effect_decomp", "prediction_deviation", "context_vpc", "vpc_trajectory", "trajectories"),
-                       summary_obj = NULL, n_strata = 50, highlight_interactions = FALSE, only_flagged = FALSE, highlight_by = c("flag", "rope"), rope = NULL, select = c("order", "deviation"), order_by = c("predicted_desc", "stratum", "predicted_asc", "deviation"), quantity = c("predicted", "interaction"), ...) {
+                       summary_obj = NULL, n_strata = 50, highlight_interactions = FALSE, only_flagged = FALSE, highlight_by = c("flag", "rope"), rope = NULL, select = c("order", "deviation"), order_by = c("predicted_desc", "stratum", "predicted_asc", "deviation", "size"), quantity = c("predicted", "interaction"), ...) {
   if (!inherits(x, "maihda_model")) {
     stop("'x' must be a maihda_model object from fit_maihda()")
   }
@@ -162,9 +193,16 @@ plot.maihda_model <- function(x, type = c("all", "vpc", "obs_vs_shrunken", "pred
   highlight_by <- match.arg(highlight_by)
   # Which strata survive the n_strata cap on the predicted / trajectory views.
   select <- match.arg(select)
-  # How the predicted view orders the strata it displays (display-only; does not
-  # change which strata are shown -- that is n_strata / select).
-  order_by <- match.arg(order_by)
+  # How the stratum views order the strata they display (display-only; does not
+  # change which strata are shown -- that is n_strata / select). The two views
+  # have DIFFERENT sensible defaults (highest predicted first for "predicted";
+  # largest intersection first for "upset", the UpSet convention its size bar
+  # relies on), so an unsupplied order_by forwards as NULL -- "let the view
+  # choose" -- rather than as this formal's first choice. NULL also arrives from
+  # plot.maihda_analysis(), which forwards the same sentinel; a supplied value is
+  # still validated here so a typo errors at the entry point.
+  order_by_supplied <- !missing(order_by) && !is.null(order_by)
+  order_by <- if (order_by_supplied) match.arg(order_by) else NULL
   # Which quantity the upset view's estimate panel shows: the predicted value or
   # the stratum random effect (interaction).
   quantity <- match.arg(quantity)
@@ -213,7 +251,9 @@ plot.maihda_model <- function(x, type = c("all", "vpc", "obs_vs_shrunken", "pred
     # prediction_deviation) is a cross-sectional BLUP scalar per stratum, which
     # misrepresents a growth model's trajectory estimand. Refuse them and point
     # to the trajectory views above.
-    maihda_stop_longitudinal_scalar(paste0("plot(type = \"", type, "\")"))
+    maihda_stop_longitudinal_scalar(
+      paste0("plot(type = \"", type, "\")"),
+      stratum_slope = maihda_object_stratum_slope(object))
   } else if (type %in% c("vpc_trajectory", "trajectories")) {
     stop("type = \"", type, "\" is only available for a longitudinal MAIHDA ",
          "(fit_maihda(id = , time = )).", call. = FALSE)
@@ -224,20 +264,22 @@ plot.maihda_model <- function(x, type = c("all", "vpc", "obs_vs_shrunken", "pred
 
     plots$vpc <- plot_vpc(summary_obj)
 
-    # Try obs_vs_shrunken
+    # Try obs_vs_shrunken. A panel that cannot be built for this model degrades
+    # to NULL (the montage still prints the rest) but warns with the underlying
+    # reason, so a silently missing panel is never mistaken for a complete set.
     if ("stratum" %in% names(object$data)) {
-      plots$obs_vs_shrunken <- tryCatch(plot_obs_vs_shrunken(object, summary_obj, highlight = highlight_ids, only_flagged = only_flagged), error = function(e) NULL)
+      plots$obs_vs_shrunken <- maihda_try_optional(plot_obs_vs_shrunken(object, summary_obj, highlight = highlight_ids, only_flagged = only_flagged), "Plot panel 'obs_vs_shrunken'")
     }
 
-    plots$predicted <- tryCatch(plot_predicted_strata(object, summary_obj, n_strata, highlight = highlight_ids, only_flagged = only_flagged, select = select, order_by = order_by), error = function(e) NULL)
+    plots$predicted <- maihda_try_optional(plot_predicted_strata(object, summary_obj, n_strata, highlight = highlight_ids, only_flagged = only_flagged, select = select, order_by = order_by), "Plot panel 'predicted'")
 
     top_n_labels <- if (is.null(n_strata)) 10 else min(10, n_strata)
-    plots$effect_decomp <- tryCatch(plot_effect_decomposition(object, summary_obj, top_n_labels, highlight = highlight_ids), error = function(e) NULL)
+    plots$effect_decomp <- maihda_try_optional(plot_effect_decomposition(object, summary_obj, top_n_labels, highlight = highlight_ids), "Plot panel 'effect_decomp'")
 
-    plots$prediction_deviation <- tryCatch(plot_prediction_deviation_panels(object, type = "auto"), error = function(e) NULL)
+    plots$prediction_deviation <- maihda_try_optional(plot_prediction_deviation_panels(object, type = "auto"), "Plot panel 'prediction_deviation'")
 
     if (!is.null(object$context_info)) {
-      plots$context_vpc <- tryCatch(plot_context_vpc(summary_obj), error = function(e) NULL)
+      plots$context_vpc <- maihda_try_optional(plot_context_vpc(summary_obj), "Plot panel 'context_vpc'")
     }
 
     # print them
@@ -253,7 +295,7 @@ plot.maihda_model <- function(x, type = c("all", "vpc", "obs_vs_shrunken", "pred
     } else if (type == "predicted") {
       plot <- plot_predicted_strata(object, summary_obj, n_strata, highlight = highlight_ids, only_flagged = only_flagged, select = select, order_by = order_by)
     } else if (type == "upset") {
-      plot <- plot_upset_strata(object, summary_obj, n_strata, highlight = highlight_ids, only_flagged = only_flagged, select = select, quantity = quantity)
+      plot <- plot_upset_strata(object, summary_obj, n_strata, highlight = highlight_ids, only_flagged = only_flagged, select = select, order_by = order_by, quantity = quantity)
     } else if (type == "effect_decomp") {
       # The waterfall's value IS the full-distribution context, so filtering it
       # away defeats the view; keep it highlighted and say so rather than no-op.
@@ -385,8 +427,15 @@ maihda_highlight_screen_label <- function(highlight) {
     } else {
       sprintf("interval outside [%g, %g]", rope[1], rope[2])
     }
-    return(sprintf("%s on the latent (link) scale, %.0f%% interval",
-                   region, conf_pct))
+    # The region is read on whichever scale the screen was built on -- a
+    # maihda_interactions(scale = "response") object carries a ROPE in outcome
+    # units (probability points for a logistic fit), not log-odds.
+    scale_txt <- if (identical(attr(highlight, "scale"), "response")) {
+      "the response (outcome) scale"
+    } else {
+      "the latent (link) scale"
+    }
+    return(sprintf("%s on %s, %.0f%% interval", region, scale_txt, conf_pct))
   }
 
   adjust <- attr(highlight, "adjust")
@@ -476,27 +525,9 @@ plot_vpc <- function(summary_obj) {
 
   if (is_cc) {
     # Crossed-dimensions split: one slice per dimension (additive), one for the
-    # interaction, any contextual random intercepts, then the residual. Colour the
-    # additive dimensions from a qualitative palette, the interaction in orange (it
-    # is the "new between"), contexts in green, the residual in blue. The component
+    # interaction, any contextual random intercepts, then the residual. The component
     # order in the table drives the stack.
-    add_comps <- vpc_data$component[grepl("^Additive: ", vpc_data$component)]
-    ctx_comps <- vpc_data$component[grepl("^Context: ", vpc_data$component)]
-    dim_palette <- c("#CC79A7", "#009E73", "#0072B2", "#D55E00", "#117733",
-                     "#882255", "#44AA99", "#332288")
-    component_colors <- stats::setNames(rep("#999999", nrow(vpc_data)),
-                                        vpc_data$component)
-    if (length(add_comps) > 0) {
-      component_colors[add_comps] <-
-        dim_palette[((seq_along(add_comps) - 1) %% length(dim_palette)) + 1]
-    }
-    if (length(ctx_comps) > 0) {
-      ctx_palette <- c("#117733", "#44AA99", "#999933", "#DDCC77")
-      component_colors[ctx_comps] <-
-        ctx_palette[((seq_along(ctx_comps) - 1) %% length(ctx_palette)) + 1]
-    }
-    component_colors["Intersectional interaction"] <- "#E69F00"
-    component_colors["Within-stratum (residual)"] <- "#56B4E9"
+    component_colors <- maihda_cc_component_colors(vpc_data$component)
     plot_title <- sprintf("Variance Partition (crossed-dimensions), VPC/ICC = %.3f",
                           summary_obj$vpc$estimate)
     # Keep the table's component ordering (additive dims, interaction, residual).
@@ -539,6 +570,32 @@ plot_vpc <- function(summary_obj) {
               color = "white", fontface = "bold", size = 5)
 
   return(p)
+}
+
+# Fill colours for a crossed-dimensions variance table, shared by the stacked VPC bar
+# (plot_vpc) and the stratum-vs-context bars (plot_context_vpc) so the two views
+# never drift: the additive dimensions from a qualitative palette, the interaction in
+# orange (it is the "new between"), any contexts in green, the residual in blue, and
+# anything else grey.
+maihda_cc_component_colors <- function(components) {
+  components <- as.character(components)
+  add_comps <- components[grepl("^Additive: ", components)]
+  ctx_comps <- components[grepl("^Context: ", components)]
+  dim_palette <- c("#CC79A7", "#009E73", "#0072B2", "#D55E00", "#117733",
+                   "#882255", "#44AA99", "#332288")
+  component_colors <- stats::setNames(rep("#999999", length(components)), components)
+  if (length(add_comps) > 0) {
+    component_colors[add_comps] <-
+      dim_palette[((seq_along(add_comps) - 1) %% length(dim_palette)) + 1]
+  }
+  if (length(ctx_comps) > 0) {
+    ctx_palette <- c("#117733", "#44AA99", "#999933", "#DDCC77")
+    component_colors[ctx_comps] <-
+      ctx_palette[((seq_along(ctx_comps) - 1) %% length(ctx_palette)) + 1]
+  }
+  component_colors["Intersectional interaction"] <- "#E69F00"
+  component_colors["Within-stratum (residual)"] <- "#56B4E9"
+  component_colors
 }
 
 # Map a set of variance-partition component names to fill colours, shared by the
@@ -686,16 +743,26 @@ plot_vpc_trajectory_change <- function(null_summary, adjusted_summary) {
 #' variance, each context's variance, any other random effects, and the residual
 #' -- on the variance scale, with each component's share of the total printed
 #' above its bar. Complements \code{plot_vpc()}'s stacked proportion bar by
-#' showing the \emph{magnitudes} the shares are computed from.
+#' showing the \emph{magnitudes} the shares are computed from. For a
+#' crossed-dimensions fit with a context the between-stratum variance is drawn as
+#' its additive dimension and interaction components.
 #'
 #' @param summary_obj A \code{maihda_summary} from a contextual
-#'   cross-classified fit (\code{fit_maihda(context = )}).
+#'   cross-classified fit (\code{fit_maihda(context = )}), including a
+#'   crossed-dimensions one.
 #' @return A ggplot2 object.
 #' @keywords internal
 #' @import ggplot2
 plot_context_vpc <- function(summary_obj) {
   vc <- summary_obj$variance_components
-  if (!identical(attr(vc, "kind"), "contextual") || is.null(summary_obj$context)) {
+  # A crossed-dimensions fit with a context is contextual too: its table splits the
+  # between-stratum variance into the additive dimension rows and the interaction,
+  # beside the same "Context: <var>" rows, and its summary carries the same $context
+  # partition. Without a context row it has nothing to set the strata against.
+  is_cc <- identical(attr(vc, "kind"), "cross_classified") &&
+    any(grepl("^Context: ", vc$component))
+  if (!(identical(attr(vc, "kind"), "contextual") || is_cc) ||
+      is.null(summary_obj$context)) {
     stop("No contextual partition is available. Fit the model with ",
          "fit_maihda(context = ) (or maihda(context = )) to plot the stratum ",
          "vs. context variances.", call. = FALSE)
@@ -704,24 +771,34 @@ plot_context_vpc <- function(summary_obj) {
   bar_data <- vc[vc$component != "Total", , drop = FALSE]
   bar_data$component <- factor(bar_data$component, levels = bar_data$component)
 
-  ctx_comps <- levels(bar_data$component)[grepl("^Context: ", levels(bar_data$component))]
-  component_colors <- stats::setNames(rep("#999999", nrow(bar_data)),
-                                      levels(bar_data$component))
-  component_colors["Between-stratum (random)"] <- "#E69F00"
-  if (length(ctx_comps) > 0) {
-    ctx_palette <- c("#117733", "#44AA99", "#999933", "#DDCC77")
-    component_colors[ctx_comps] <-
-      ctx_palette[((seq_along(ctx_comps) - 1) %% length(ctx_palette)) + 1]
-  }
-  component_colors["Other random effects"] <- "#009E73"
-  component_colors["Within-stratum (residual)"] <- "#56B4E9"
+  if (is_cc) {
+    component_colors <- maihda_cc_component_colors(levels(bar_data$component))
+    caption <- paste(
+      "Crossed-dimensions contextual MAIHDA: the between-stratum variance is split into",
+      "the additive dimension variances and the intersectional interaction, both",
+      "conditional on the context random effect(s); the context variance is the",
+      "between-context component of unexplained variance.",
+      sep = "\n")
+  } else {
+    ctx_comps <- levels(bar_data$component)[grepl("^Context: ", levels(bar_data$component))]
+    component_colors <- stats::setNames(rep("#999999", nrow(bar_data)),
+                                        levels(bar_data$component))
+    component_colors["Between-stratum (random)"] <- "#E69F00"
+    if (length(ctx_comps) > 0) {
+      ctx_palette <- c("#117733", "#44AA99", "#999933", "#DDCC77")
+      component_colors[ctx_comps] <-
+        ctx_palette[((seq_along(ctx_comps) - 1) %% length(ctx_palette)) + 1]
+    }
+    component_colors["Other random effects"] <- "#009E73"
+    component_colors["Within-stratum (residual)"] <- "#56B4E9"
 
-  caption <- paste(
-    "Contextual cross-classified MAIHDA: individuals are cross-classified by their",
-    "intersectional stratum and the higher-level context(s).",
-    "The between-stratum variance is conditional on the context random effect(s);",
-    "the context variance is the between-context component of unexplained variance.",
-    sep = "\n")
+    caption <- paste(
+      "Contextual cross-classified MAIHDA: individuals are cross-classified by their",
+      "intersectional stratum and the higher-level context(s).",
+      "The between-stratum variance is conditional on the context random effect(s);",
+      "the context variance is the between-context component of unexplained variance.",
+      sep = "\n")
+  }
 
   ggplot(bar_data, aes(x = .data$component, y = .data$variance,
                        fill = .data$component)) +
@@ -749,6 +826,11 @@ plot_context_vpc <- function(summary_obj) {
 #'
 #' @details The x-axis is each stratum's raw observed mean; the y-axis is the
 #'   model-based stratum estimate, which includes the fixed-effect contribution.
+#'   Both are on the scale the response was \emph{fitted} on, which is what makes
+#'   the \eqn{y = x} diagonal meaningful: for a transformed response such as
+#'   \code{log(y) ~ x} the observed values are stratum means of \code{log(y)}, not
+#'   of \code{y}. To read the panel on the original scale, fit the model on that
+#'   scale; back-transforming only one axis would not give comparable quantities.
 #'   For an intercept-only (null) model the vertical distance from the diagonal is
 #'   pure shrinkage toward the grand mean. For a covariate-adjusted model the model
 #'   estimate also moves with the stratum's covariate profile, so distance from the
@@ -775,7 +857,13 @@ plot_obs_vs_shrunken <- function(object, summary_obj, highlight = NULL, only_fla
     stop("'stratum' variable not found in data. Make sure to use data from make_strata()")
   }
 
-  observed_outcome <- maihda_observed_outcome_for_plot(observed_response, object$family)
+  # An aggregated-binomial `y | trials(n)` fit keeps its denominator in the
+  # trials() addition term, not in the response, so hand the trial counts to the
+  # extractor -- otherwise the x-axis would be each stratum's mean success COUNT
+  # while the y-axis is a per-trial probability.
+  observed_outcome <- maihda_observed_outcome_for_plot(
+    observed_response, object$family,
+    trials = maihda_trials_from_formula(object$formula, data))
 
   # Calculate observed stratum means
   obs_data <- data
@@ -878,18 +966,13 @@ plot_obs_vs_shrunken <- function(object, summary_obj, highlight = NULL, only_fla
   }
 }
 
+# The observed response for the observed-vs-shrunken panel. ONE implementation,
+# shared with the discriminatory-accuracy reader: see maihda_response_from_frame()
+# in R/utils_maihda.R. This entry point fixes the plot path's STRICT contract -- a
+# response it cannot resolve is an error the user reads, not a NULL the caller must
+# interpret -- and keeps the name the panel and its tests already use.
 maihda_observed_response_from_model_frame <- function(data, formula_obj) {
-  response <- tryCatch(stats::model.response(data), error = function(e) NULL)
-  if (!is.null(response)) {
-    return(response)
-  }
-
-  outcome_var <- all.vars(formula_obj)[1]
-  if (!outcome_var %in% names(data)) {
-    stop("Outcome variable not found in data")
-  }
-
-  data[[outcome_var]]
+  maihda_response_from_frame(data, formula_obj, strict = TRUE)
 }
 
 maihda_observed_plot_values <- function(numerator, denominator = NULL) {
@@ -915,10 +998,7 @@ maihda_observed_weighted_mean <- function(numerator, denominator, w = NULL) {
 
   # Incorporate the model's prior/precision weights so the observed stratum mean is
   # on the same weighted footing as the weighted shrunken estimate. These are lme4
-  # prior/precision weights, not a complex survey design -- no design-based
-  # (e.g. Taylor-linearised) variance is computed -- so results are not
-  # survey-representative. With unit weights this is the previous
-  # sum(numerator)/sum(denominator).
+  # prior/precision weights, not a complex survey design 
   if (is.null(w)) {
     w <- rep(1, length(numerator))
   }
@@ -937,7 +1017,52 @@ maihda_observed_sample_size <- function(numerator, denominator) {
   sum(denominator[keep])
 }
 
-maihda_observed_outcome_for_plot <- function(x, family = NULL) {
+# Numerator/denominator for an aggregated binomial whose denominator arrives
+# SEPARATELY from the response -- a brms `y | trials(n)` outcome, whose response is
+# a plain vector of success counts. The lme4 cbind(success, failure) form carries
+# both columns in the response itself and is handled structurally by the matrix
+# branch below; this is its addition-term twin, and produces the same contract
+# (successes / trials), so both engines summarise and plot an aggregated binomial
+# on the proportion scale.
+#
+# Rows whose trial count is missing or non-positive carry no observed outcome and
+# are marked NA -- the same rule the matrix branch applies to a non-finite or
+# zero row total. brms refuses to fit successes outside [0, trials] ("Number of
+# trials is smaller than the number of events"), so a fitted model cannot reach
+# that state; the pre-fit maihda_describe(formula, data) path can, and warns and
+# drops those rows rather than reporting a proportion above 1 (or below 0).
+maihda_observed_trials_values <- function(successes, trials) {
+  if (!is.numeric(successes) && !is.logical(successes)) {
+    stop("An aggregated binomial `trials()` outcome must be numeric success counts.",
+         call. = FALSE)
+  }
+  successes <- as.numeric(successes)
+  trials <- as.numeric(trials)
+  if (length(trials) != length(successes)) {
+    stop("The `trials()` term does not have one trial count per observation.",
+         call. = FALSE)
+  }
+
+  usable <- is.finite(trials) & trials > 0
+  malformed <- usable & is.finite(successes) & (successes < 0 | successes > trials)
+  if (any(malformed)) {
+    bad <- which(malformed)
+    warning("Aggregated binomial outcome: ", length(bad),
+            " row(s) have successes outside [0, trials] (row",
+            if (length(bad) > 1) "s " else " ",
+            paste(utils::head(bad, 5), collapse = ", "),
+            if (length(bad) > 5) ", ..." else "",
+            "); excluded from the observed summary. brms will not fit such rows.",
+            call. = FALSE)
+    successes[malformed] <- NA_real_
+    trials[malformed] <- NA_real_
+  }
+  successes[!usable] <- NA_real_
+
+  maihda_observed_plot_values(successes, trials)
+}
+
+maihda_observed_outcome_for_plot <- function(x, family = NULL, trials = NULL) {
   fam_name <- if (!is.null(family) && !is.null(family$family)) family$family else NULL
   is_binomial <- !is.null(fam_name) && fam_name %in% c("binomial", "quasibinomial")
 
@@ -951,6 +1076,14 @@ maihda_observed_outcome_for_plot <- function(x, family = NULL) {
     numerator <- x_mat[, 1]
     numerator[!is.finite(totals) | totals <= 0] <- NA_real_
     return(maihda_observed_plot_values(numerator, totals))
+  }
+
+  # A brms `y | trials(n)` response: success counts in `x`, the denominator in the
+  # separately supplied trial counts. Without them the numeric branch below would
+  # take the denominator to be 1 and report a mean success COUNT where the model
+  # (and the cbind() form) report a proportion.
+  if (!is.null(trials) && is_binomial) {
+    return(maihda_observed_trials_values(x, trials))
   }
 
   if (is.numeric(x)) {
@@ -1006,14 +1139,18 @@ maihda_observed_outcome_for_plot <- function(x, family = NULL) {
 #'   not change which strata are shown -- that is \code{n_strata}/\code{select} --
 #'   nor the predicted values, intervals, or reference line): \code{"predicted_desc"}
 #'   (default) highest predicted at the top, \code{"stratum"} native stratum order,
-#'   \code{"predicted_asc"} lowest at the top, or \code{"deviation"} largest
-#'   \code{|predicted - reference|} at the top.
+#'   \code{"predicted_asc"} lowest at the top, \code{"deviation"} largest
+#'   \code{|predicted - reference|} at the top, or \code{"size"} largest stratum
+#'   first. \code{NULL} means the caller expressed no preference and takes this
+#'   view's default (\code{"predicted_desc"}).
 #' @return A ggplot2 object
 #' @keywords internal
 #' @import ggplot2
 #' @importFrom dplyr arrange slice
-plot_predicted_strata <- function(object, summary_obj, n_strata, scale = c("response", "link"), highlight = NULL, only_flagged = FALSE, select = c("order", "deviation"), order_by = c("predicted_desc", "stratum", "predicted_asc", "deviation")) {
-  order_by <- match.arg(order_by)
+plot_predicted_strata <- function(object, summary_obj, n_strata, scale = c("response", "link"), highlight = NULL, only_flagged = FALSE, select = c("order", "deviation"), order_by = c("predicted_desc", "stratum", "predicted_asc", "deviation", "size")) {
+  # NULL is the "no explicit order asked for" sentinel the dispatchers forward;
+  # this view's default is the ranked caterpillar (highest predicted at the top).
+  order_by <- if (is.null(order_by)) "predicted_desc" else match.arg(order_by)
   prep <- maihda_prepare_predicted_strata(
     object, summary_obj, n_strata, scale = scale,
     highlight = highlight, only_flagged = only_flagged, select = select)
@@ -1036,7 +1173,8 @@ plot_predicted_strata <- function(object, summary_obj, n_strata, scale = c("resp
     stratum        = seq_len(nrow(stratum_est)),
     predicted_desc = order(stratum_est$predicted, decreasing = TRUE),
     predicted_asc  = order(stratum_est$predicted, decreasing = FALSE),
-    deviation      = order(abs(stratum_est$predicted - fixed_reference), decreasing = TRUE))
+    deviation      = order(abs(stratum_est$predicted - fixed_reference), decreasing = TRUE),
+    size           = order(stratum_est$n, decreasing = TRUE))
   stratum_est <- stratum_est[ord, , drop = FALSE]
 
   # Create factor to preserve order for plotting. Levels are reversed so that
@@ -1250,21 +1388,34 @@ maihda_prepare_predicted_strata <- function(object, summary_obj, n_strata,
 #' matrix. Three panels share one column order: a top bar of intersection
 #' (stratum) sizes, a middle matrix encoding each stratum's category on every
 #' dimension, and a bottom panel of predicted values with conditional intervals.
-#' Columns are ordered by intersection size (largest first). Binary 0/1 (or
-#' logical) dimensions collapse to a single present/absent row; multi-level
-#' factors get one row per level, and each column lights exactly one dot per
-#' dimension.
+#' Columns are ordered by intersection size (largest first) by default, or by any
+#' other \code{order_by} rule -- \code{"predicted_desc"} turns the view into the
+#' ranked caterpillar of \code{plot_predicted_strata()} drawn against the category
+#' matrix instead of long text labels. Binary 0/1 (or logical) dimensions collapse
+#' to a single present/absent row; multi-level factors get one row per level, and
+#' each column lights exactly one dot per dimension.
 #'
 #' @inheritParams plot_predicted_strata
+#' @param order_by Left-to-right column order (\strong{display-only}; does not
+#'   change which strata are shown, nor any value): \code{"size"} (default,
+#'   largest intersection first -- the UpSet convention), \code{"stratum"} native
+#'   stratum order, or \code{"predicted_desc"} / \code{"predicted_asc"} /
+#'   \code{"deviation"}, which sort on the quantity the estimate panel actually
+#'   shows and so follow \code{quantity}. \code{NULL} takes this view's default.
 #' @return A \pkg{patchwork} object stacking the three panels.
 #' @keywords internal
 #' @import ggplot2
 plot_upset_strata <- function(object, summary_obj, n_strata, scale = c("response", "link"),
                               highlight = NULL, only_flagged = FALSE,
                               select = c("order", "deviation"),
+                              order_by = c("size", "predicted_desc", "stratum",
+                                           "predicted_asc", "deviation"),
                               quantity = c("predicted", "interaction")) {
   scale <- match.arg(scale)
   select <- match.arg(select)
+  # NULL is the "no explicit order asked for" sentinel the dispatchers forward;
+  # this view's default is the UpSet convention, largest intersection first.
+  order_by <- if (is.null(order_by)) "size" else match.arg(order_by)
   quantity <- match.arg(quantity)
   is_interaction <- quantity == "interaction"
   plot_title <- if (is_interaction) {
@@ -1306,11 +1457,30 @@ plot_upset_strata <- function(object, summary_obj, n_strata, scale = c("response
          call. = FALSE)
   }
 
-  # Order the kept strata by intersection size (largest first) -- the UpSet
-  # convention, and the most useful here since the largest strata carry the most
-  # reliably estimated effects. `select` already chose WHICH strata survive the
-  # cap; this governs only their left-to-right order.
-  ord <- order(stratum_est$n, decreasing = TRUE)
+  # Which column the estimate panel shows: the predicted value against the
+  # across-strata reference, or the random effect (interaction) against zero.
+  # Resolved HERE, above the ordering, because the value-based orders sort on the
+  # quantity actually plotted -- ordering by `predicted` while drawing the random
+  # effect would render as an unsorted panel.
+  est_y   <- if (is_interaction) "random_effect" else "predicted"
+  est_lo  <- if (is_interaction) "lower_95" else "lower"
+  est_hi  <- if (is_interaction) "upper_95" else "upper"
+  est_ref <- if (is_interaction) 0 else fixed_reference
+  est_ylab <- if (is_interaction) "Stratum random effect" else "Predicted Value"
+
+  # Left-to-right order of the kept strata. Purely cosmetic: `select` already
+  # chose WHICH strata survive the cap and the reference line was fixed from ALL
+  # strata, so this changes neither the shown set nor any value. The default is
+  # intersection size (largest first) -- the UpSet convention, the most useful
+  # here since the largest strata carry the most reliably estimated effects, and
+  # the only order under which the top size bar decreases monotonically.
+  # order() sinks any NA estimates to the right-hand end.
+  ord <- switch(order_by,
+    size           = order(stratum_est$n, decreasing = TRUE),
+    stratum        = seq_len(nrow(stratum_est)),
+    predicted_desc = order(stratum_est[[est_y]], decreasing = TRUE),
+    predicted_asc  = order(stratum_est[[est_y]], decreasing = FALSE),
+    deviation      = order(abs(stratum_est[[est_y]] - est_ref), decreasing = TRUE))
   stratum_est <- stratum_est[ord, , drop = FALSE]
   stratum_est$rank <- seq_len(nrow(stratum_est))
   k <- nrow(stratum_est)
@@ -1405,15 +1575,8 @@ plot_upset_strata <- function(object, summary_obj, n_strata, scale = c("response
     base_theme +
     theme(panel.grid.major.y = element_blank())
 
-  # Panel 3: the per-stratum estimate (inherits the highlight). `quantity` picks
-  # the column shown: the predicted value against the across-strata reference, or
-  # the random effect (interaction) against zero.
-  est_y   <- if (is_interaction) "random_effect" else "predicted"
-  est_lo  <- if (is_interaction) "lower_95" else "lower"
-  est_hi  <- if (is_interaction) "upper_95" else "upper"
-  est_ref <- if (is_interaction) 0 else fixed_reference
-  est_ylab <- if (is_interaction) "Stratum random effect" else "Predicted Value"
-
+  # Panel 3: the per-stratum estimate (inherits the highlight). The column shown
+  # was resolved from `quantity` above, alongside the display order.
   has_hl <- any(stratum_est$.maihda_flag)
   est_layers <- if (has_hl) {
     list(
@@ -1429,8 +1592,19 @@ plot_upset_strata <- function(object, summary_obj, n_strata, scale = c("response
                     width = 0.25, alpha = 0.5, color = "#0072B2")
     )
   }
+  # The caption states the order actually drawn -- it is no longer fixed, and a
+  # figure that misreports its own column order is worse than one that omits it.
+  est_word <- if (is_interaction) "stratum random effect" else "predicted value"
+  order_note <- switch(order_by,
+    size           = "intersection size (largest first)",
+    stratum        = "stratum order",
+    predicted_desc = paste0(est_word, " (highest first)"),
+    predicted_asc  = paste0(est_word, " (lowest first)"),
+    deviation      = paste0("absolute deviation from ",
+                            if (is_interaction) "zero" else "the reference",
+                            " (largest first)"))
   note <- paste0("Dark dot = the stratum's category on each dimension; columns ",
-                 "ordered by intersection size (largest first).")
+                 "ordered by ", order_note, ".")
   if (is_interaction) {
     note <- paste0(note, "\nLower panel: stratum random effect on the link scale ",
                    "(deviation from the model's fixed prediction; the pure ",
@@ -1528,6 +1702,10 @@ maihda_upset_size <- function(object, n_strata = 50) {
 #' Decomposes the total deviation from the overall mean into the additive (fixed) component
 #' and the intersectional (random) component for each stratum.
 #'
+#' Only the intersectional random effects enter the deviations and the overall mean: the
+#' stratum effect and, for a crossed-dimensions fit, the dimension effects. A contextual
+#' random effect, or any other grouping, is part of neither component and is excluded.
+#'
 #' @param object A maihda_model object
 #' @param summary_obj A maihda_summary object
 #' @param top_n_labels Number of most extreme strata to label
@@ -1553,18 +1731,44 @@ plot_effect_decomposition <- function(object, summary_obj, top_n_labels = 10, hi
   # the fixed-only prediction.
   cc_mode <- !is.null(object$cc_info)
 
-  # Compute full and fixed-only predictions on the LINK scale. The additive
-  # decomposition (total = additive + intersectional) is only exact on the model
-  # scale: eta = X*beta + u_stratum. On the response scale, for non-identity links
-  # (logit/log) the split is not additive. For Gaussian/identity the link scale
-  # equals the response scale, so this is unchanged there.
+  # The decomposition covers the INTERSECTIONAL random effects only: the stratum
+  # interaction plus, in crossed-dimensions mode, the additive dimension REs. Any
+  # other grouping -- a contextual (1 | school) from context =, or an explicit
+  # (1 | site) -- belongs to neither component. Left in the total prediction it
+  # would enter the crossed-dimensions additive component as each stratum's context
+  # composition, and, in both modes, the global mean as the row-weighted mean of the
+  # context effects, shifting every bar by that amount. So the total prediction (and
+  # the global mean taken from it) is scoped to the intersectional groups, as the
+  # stratum predictions (maihda_stratum_predictions_lme4()) and the
+  # intersectional-scope AUC already are.
+  # Without another grouping re_scope stays NULL -- every random effect, the
+  # engines' default -- so those fits are unchanged; the wemix and ordinal engines
+  # fit the canonical single (1 | stratum) structure only and never carry one.
+  scopes <- maihda_da_re_scopes(object)
+  re_scope <- if (length(scopes$other) > 0) {
+    maihda_re_form_for_groups(object$formula, scopes$intersectional)
+  } else {
+    NULL
+  }
+
+  # Compute total (intersectional-scope) and fixed-only predictions on the LINK
+  # scale. The additive decomposition (total = additive + intersectional) is only
+  # exact on the model scale: eta = X*beta + u_stratum. On the response scale, for
+  # non-identity links (logit/log) the split is not additive. For Gaussian/identity
+  # the link scale equals the response scale, so this is unchanged there.
   if (object$engine == "lme4") {
-    preds_total <- tryCatch(predict(object$model, type = "link"), error = function(e) rep(NA, nrow(data)))
-    preds_fixed <- tryCatch(predict(object$model, type = "link", re.form = NA), error = function(e) rep(NA, nrow(data)))
+    preds_total <- tryCatch(maihda_fit_rows_predict(object$model, type = "link",
+                                                    re.form = re_scope),
+                            error = function(e) rep(NA, nrow(data)))
+    preds_fixed <- tryCatch(maihda_fit_rows_predict(object$model, type = "link",
+                                                    re.form = NA),
+                            error = function(e) rep(NA, nrow(data)))
   } else if (object$engine == "brms") {
-    preds_total <- tryCatch(maihda_brms_linpred_mean(object$model), error = function(e) rep(NA, nrow(data)))
+    preds_total <- tryCatch(maihda_brms_linpred_mean(object$model, re_formula = re_scope), error = function(e) rep(NA, nrow(data)))
     preds_fixed <- tryCatch(maihda_brms_linpred_mean(object$model, re_formula = NA), error = function(e) rep(NA, nrow(data)))
   } else if (object$engine == "wemix") {
+    # Refused before the tryCatch below, which would turn it into NA points.
+    maihda_wemix_refuse_centred(object)
     preds_total <- tryCatch(maihda_wemix_linpred(object, include_re = TRUE), error = function(e) rep(NA, nrow(data)))
     preds_fixed <- tryCatch(maihda_wemix_linpred(object, include_re = FALSE), error = function(e) rep(NA, nrow(data)))
   } else if (object$engine == "ordinal") {
@@ -1625,8 +1829,9 @@ plot_effect_decomposition <- function(object, summary_obj, top_n_labels = 10, hi
   # Two-model: the additive part is the fixed-effect deviation (mean_fixed - global).
   # Cross-classified: the dimension main effects are random, so the additive part is
   # the total stratum deviation (mean_total - global) net of the interaction RE; this
-  # absorbs the dimension REs (plus any covariate deviation), keeping
-  # total = additive + interaction in both modes.
+  # absorbs the dimension REs (plus any covariate deviation) -- and no context RE,
+  # which the scoped total above excludes -- keeping total = additive + interaction
+  # in both modes.
   stratum_means <- stratum_means |>
     dplyr::mutate(
       additive_dev = if (cc_mode) {
@@ -1791,10 +1996,18 @@ plot_vpc_trajectory <- function(summary_obj) {
 
 #' Stratum mean-trajectory plot (longitudinal MAIHDA)
 #'
-#' One predicted line per stratum over time -- the fixed-part trajectory plus each
-#' stratum's random intercept and slope (BLUPs) -- the longitudinal analogue of the
+#' One predicted line per stratum over time -- that stratum's fixed-part trajectory
+#' plus its own random intercept and slope (BLUPs) -- the longitudinal analogue of the
 #' predicted-strata caterpillar. Shows how the intersectional groups fan out (or
 #' converge) over time.
+#'
+#' The fixed part varies with the stratum drawn: the stratum-defining dimensions take
+#' that stratum's values, so an adjusted growth model's dimension main effects and
+#' \code{dim:time} interactions are included, while every \emph{other} covariate is
+#' held at a shared reference profile (mean for a numeric, modal level for a factor).
+#' The lines are therefore predicted stratum trajectories net of covariate composition,
+#' excluding the individual-level random effects. For a null growth model the fixed
+#' part carries no dimension terms and every line shares the one population trajectory.
 #'
 #' @param object A longitudinal \code{maihda_model}.
 #' @param summary_obj Its \code{maihda_summary}.
@@ -1802,8 +2015,10 @@ plot_vpc_trajectory <- function(summary_obj) {
 #'   caption.
 #' @param select When the cap drops strata, which to keep: \code{"order"}
 #'   (default) the first n_strata in stratum order, or \code{"deviation"} the
-#'   n_strata whose trajectory swings furthest from the population curve (largest
-#'   peak \code{|random deviation|} over the time grid, either direction).
+#'   n_strata with the largest peak \code{|random deviation|} over the time grid,
+#'   either direction. For a null model that is the departure from the population
+#'   curve; for an adjusted model it is the departure from the stratum's own additive
+#'   prediction, i.e. the strongest intersectional interactions.
 #' @return A ggplot2 object.
 #' @keywords internal
 #' @import ggplot2
@@ -1826,7 +2041,7 @@ plot_stratum_trajectories <- function(object, summary_obj, n_strata = 50, select
     omitted <- length(strata) - n_strata
     keep_rows <- if (identical(select, "deviation")) {
       # Peak absolute random deviation over the grid -- max_t |sum_j coef_j t^j|,
-      # the stratum's own departure from the fixed trajectory -- so the strata whose
+      # the stratum's own departure from ITS fixed trajectory -- so the strata whose
       # trajectories diverge most (either direction) survive the cap, not the first
       # by stratum id. A scalar BLUP would miss a small-intercept/large-slope fan-out.
       mag <- vapply(seq_len(nrow(re)), function(i) {
@@ -1842,16 +2057,19 @@ plot_stratum_trajectories <- function(object, summary_obj, n_strata = 50, select
     strata <- re$stratum
   }
 
-  # Fixed-part trajectory at the population mean covariate profile: predict on a
-  # one-row-per-grid-time frame holding covariates at the data means, RE excluded.
-  eta_fixed <- maihda_longitudinal_fixed_trajectory(object, grid)
+  # Fixed-part trajectory PER STRATUM (RE excluded), one column per drawn stratum:
+  # the stratum's own dimension values -- whose main effects and dim:time interactions
+  # belong to its prediction in an adjusted growth model -- with every other covariate
+  # held at the shared mean/modal reference profile. For a null growth model the fixed
+  # part carries no dimension terms, so all columns are the one population trajectory.
+  eta_fixed <- maihda_longitudinal_fixed_trajectory(object, grid, strata = re$stratum)
 
   rows <- do.call(rbind, lapply(seq_len(nrow(re)), function(i) {
     a <- vapply(grid_c, function(t) sum(re$coef[[i]] * t^(0:(length(re$coef[[i]]) - 1))),
                 numeric(1))
     data.frame(stratum = re$stratum[i],
                label = if (!is.null(re$label)) re$label[i] else re$stratum[i],
-               time = grid, value = eta_fixed + a, stringsAsFactors = FALSE)
+               time = grid, value = eta_fixed[, i] + a, stringsAsFactors = FALSE)
   }))
 
   cap <- if (omitted > 0) {
@@ -1866,7 +2084,8 @@ plot_stratum_trajectories <- function(object, summary_obj, n_strata = 50, select
     geom_line(alpha = 0.8, linewidth = 0.7) +
     labs(
       title = "Predicted stratum trajectories",
-      subtitle = "Fixed-part trajectory + each stratum's random intercept & slope",
+      subtitle = paste("Each stratum's own fixed-part trajectory + its random intercept & slope;",
+                       "other covariates at the reference profile", sep = "\n"),
       x = lng$time, y = "Predicted outcome (link scale)", color = "Stratum",
       caption = cap
     ) +
@@ -1907,12 +2126,17 @@ plot_pcv_trajectory <- function(pcv) {
 # Per-stratum random-effect coefficient vector (intercept, slope, ...) for the
 # stratum grouping of a longitudinal fit, as a data frame with a list-column
 # `coef`. Used by plot_stratum_trajectories(). Engine-aware (lme4 ranef /
-# brms ranef posterior means).
+# brms ranef posterior means). The coefficients are in centered user units: an lme4
+# fit's coefficient of internal time to the power d is divided by its time scale^d.
 maihda_longitudinal_stratum_re <- function(object) {
   lng <- object$longitudinal_info
   if (identical(object$engine, "lme4")) {
     re <- lme4::ranef(object$model)[["stratum"]]
-    coefs <- lapply(seq_len(nrow(re)), function(i) as.numeric(re[i, ]))
+    scale <- maihda_lng_time_scale(lng)
+    coefs <- lapply(seq_len(nrow(re)), function(i) {
+      co <- as.numeric(re[i, ])
+      if (scale == 1) co else co / scale^(seq_along(co) - 1L)
+    })
     ids <- rownames(re)
   } else if (identical(object$engine, "brms")) {
     arr <- brms::ranef(object$model)[["stratum"]]
@@ -1932,35 +2156,166 @@ maihda_longitudinal_stratum_re <- function(object) {
   out
 }
 
-# Fixed-part trajectory (NO random effects, re.form = NA) at the mean covariate
-# profile, over a time grid. Builds a prediction frame holding every non-time
-# covariate at its mean (numeric) or modal (factor) value and varying only time.
-maihda_longitudinal_fixed_trajectory <- function(object, grid) {
+# Fixed-part trajectory (NO random effects, re.form = NA) over a time grid, holding
+# every non-time covariate at its mean (numeric) or modal (factor) value.
+#
+# `strata = NULL` gives the single population trajectory at that reference profile.
+# Passing stratum ids instead returns one trajectory PER STRATUM as a
+# length(grid) x length(strata) matrix, in which the stratum-defining DIMENSIONS take
+# each stratum's own values while every other covariate stays at the shared reference
+# profile. That distinction matters for an adjusted growth model, whose fixed part
+# carries the dimension main effects and their dim:time interactions: those are part
+# of the plotted stratum's own prediction, so freezing them at the modal profile draws
+# every stratum on one common fixed trajectory and suppresses exactly the additive
+# between-stratum differences the view reports. A null model (no dimension fixed
+# effects) and a purely covariate-adjusted model are unaffected -- their dimension
+# column set is empty, so both branches coincide.
+maihda_longitudinal_fixed_trajectory <- function(object, grid, strata = NULL) {
   lng <- object$longitudinal_info
   time_term <- maihda_lng_time_term(lng)
   data <- object$data
-  fixed_vars <- all.vars(reformulas::nobars(object$formula))[-1]
-  nd <- data[rep(1L, length(grid)), , drop = FALSE]
-  for (v in intersect(fixed_vars, names(nd))) {
-    if (v %in% c(lng$time, time_term)) next
+  # RHS vars only: an addition-term response (y | trials(n)) would leave its
+  # trials/weights variable in an all.vars(formula)[-1] extraction.
+  fixed_vars <- all.vars(maihda_nobars(object$formula)[[3]])
+  # Which fixed-effect columns are stratum-defining rather than covariates. Empty for
+  # the population branch, which keeps the dimensions at the reference profile like any
+  # other covariate.
+  dim_cols <- if (is.null(strata)) {
+    character(0)
+  } else {
+    maihda_longitudinal_dimension_columns(object, fixed_vars, names(data),
+                                          exclude = c(lng$time, time_term))
+  }
+  # One block of grid rows per stratum, each seeded from one of that stratum's own
+  # fitted rows so its dimension columns (constant within a stratum by construction)
+  # come along with the right type and factor levels.
+  seed <- if (is.null(strata)) 1L else maihda_stratum_seed_rows(data, strata)
+  nd <- data[rep(seed, each = length(grid)), , drop = FALSE]
+  hold <- setdiff(intersect(fixed_vars, names(nd)),
+                  c(lng$time, time_term, dim_cols))
+  for (v in hold) {
     col <- data[[v]]
     nd[[v]] <- if (is.numeric(col)) mean(col, na.rm = TRUE) else {
       tb <- sort(table(col), decreasing = TRUE)
-      rep(names(tb)[1], length(grid))
+      rep(names(tb)[1], nrow(nd))
     }
   }
-  nd[[lng$time]] <- grid
-  # A centered fit's formula references the derived centered column, not the
+  # A NUMERIC dimension column is held at the stratum's OWN mean rather than the seed
+  # row's value: it is constant within a stratum when the dimension is used directly
+  # (mean = that constant), and when it is the raw column of an auto-binned dimension
+  # -- which a hand-written adjusted formula may enter as a linear term -- the stratum
+  # mean is the representative value, where a single seed row would be arbitrary.
+  for (v in dim_cols) {
+    col <- data[[v]]
+    if (is.numeric(col)) {
+      mj <- tapply(col, as.character(data$stratum), mean, na.rm = TRUE)
+      nd[[v]] <- rep(as.numeric(mj[as.character(strata)]), each = length(grid))
+    }
+  }
+  nd[[lng$time]] <- rep(grid, times = length(seed))
+  # A centered or scaled fit's formula references the derived internal column, not the
   # original time; keep it aligned with the (original-scale) grid.
   if (!identical(time_term, lng$time)) {
-    nd[[time_term]] <- grid - maihda_lng_time_center(lng)
+    nd[[time_term]] <- maihda_lng_internal_time(lng, nd[[lng$time]])
   }
 
-  if (identical(object$engine, "lme4")) {
-    as.numeric(stats::predict(object$model, newdata = nd, re.form = NA))
+  eta <- if (identical(object$engine, "lme4")) {
+    # predict.merMod(newdata = nd) drops an external offset= and errors on a formula
+    # offset() term, so build the fixed trajectory directly. A FORMULA offset such as
+    # offset(0.5 * time) is RE-EVALUATED on the trajectory grid (nd carries the grid
+    # times, raw and centered), so a time-dependent offset tracks the trajectory instead
+    # of being frozen; an EXTERNAL offset= vector has no expression to re-evaluate and is
+    # held at its mean -- the representative-exposure analogue of holding covariates at
+    # their means. Either part is NULL when absent; a no-offset fit reproduces
+    # predict(re.form = NA) exactly.
+    off_ext <- maihda_fitted_offset_external(object$model)
+    off <- if (is.null(off_ext)) NULL else mean(off_ext, na.rm = TRUE)
+    if (!is.null(attr(stats::terms(maihda_nobars(stats::formula(object$model))),
+                      "offset"))) {
+      # fallback = "mean": an offset term whose raw variable is absent from nd (stored
+      # only as the derived "offset(...)" column, necessarily time-invariant) is held at
+      # its mean, like the external offset above.
+      fo <- maihda_lme4_formula_offset_at(object$model, nd, fallback = "mean")
+      off <- if (is.null(off)) fo else off + fo
+    }
+    # fallback = "mean", matching the offset above and the mean/modal covariate profile
+    # this grid already holds: a fixed term whose raw variable is absent from nd (stored
+    # only as the derived "scale(z)" / "poly(z, 2)" column, and necessarily
+    # time-invariant) is held at a single representative value down the trajectory.
+    as.numeric(maihda_lme4_fixed_link(object$model, nd, offset = off,
+                                      fallback = "mean"))
   } else if (identical(object$engine, "brms")) {
     maihda_brms_linpred_mean(object$model, newdata = nd, re_formula = NA)
   } else {
     stop("Longitudinal trajectories are available for lme4/brms only.", call. = FALSE)
   }
+
+  if (is.null(strata)) {
+    return(eta)
+  }
+  # matrix() would RECYCLE a short/long return into a plausible-looking but silently
+  # mis-paired grid, so require one linear predictor per row of nd before reshaping.
+  if (length(eta) != nrow(nd)) {
+    stop("The fixed-part predictor returned ", length(eta), " value(s) for a ",
+         nrow(nd), "-row per-stratum grid; cannot align them with the strata.",
+         call. = FALSE)
+  }
+  # nd was stacked stratum-major (each = length(grid)), so a column-major fill puts one
+  # stratum's trajectory in each column.
+  matrix(eta, nrow = length(grid), ncol = length(strata),
+         dimnames = list(NULL, as.character(strata)))
+}
+
+# The fixed-effect columns of a longitudinal fit that are stratum-DEFINING, i.e. take a
+# stratum's own value on a per-stratum prediction grid instead of a shared reference
+# value. Both spellings a dimension can reach the fixed part under are recognised: the
+# adjusted model's canonical term (the reserved '.maihda_dim_*' factor for an
+# auto-binned numeric dimension, the variable itself otherwise) and the raw column,
+# which a hand-written adjusted formula may use instead. Empty when the fit records no
+# stratum variables or none of them enters the fixed part -- a null growth model.
+#
+# A dimension a hand-written formula wraps in a function -- factor(gender), not gender --
+# is the one case this cannot make stratum-specific: the fit stores only the derived
+# "factor(gender)" column, so the prediction grid (built from that frame) carries no raw
+# variable to set, and maihda_lme4_fixed_link() falls back to holding the stored column
+# at a representative value. That is a pre-existing property of the model-frame-based
+# grid, not of the per-stratum split, but it leaves that dimension's contribution common
+# to every line, so say so rather than draw it silently.
+maihda_longitudinal_dimension_columns <- function(object, fixed_vars, available,
+                                                  exclude = character(0)) {
+  sv <- object$strata_vars
+  if (is.null(sv) || length(sv) == 0) {
+    return(character(0))
+  }
+  cols <- setdiff(
+    union(sv, maihda_adjusted_term_names(sv, object$strata_autobin_info)), exclude)
+  wanted <- intersect(cols, fixed_vars)
+  frozen <- setdiff(wanted, available)
+  if (length(frozen) > 0) {
+    warning("Stratum dimension(s) ", paste0("'", frozen, "'", collapse = ", "),
+            " enter the fixed part only through a transformed term, whose raw ",
+            "variable the fitted model frame does not store. Their contribution is ",
+            "held at a representative value and is therefore the SAME on every ",
+            "stratum's trajectory. Add the dimension as a bare term (e.g. 'gender' ",
+            "alongside 'factor(gender)') for per-stratum trajectories.",
+            call. = FALSE)
+  }
+  intersect(wanted, available)
+}
+
+# The row index of one fitted row per requested stratum (the first), used to seed a
+# per-stratum prediction grid. Errors rather than silently falling back to a shared
+# reference profile for a stratum with no fitted row, which would reinstate the very
+# suppression the per-stratum grid exists to remove.
+maihda_stratum_seed_rows <- function(data, strata) {
+  if (!"stratum" %in% names(data)) {
+    stop("No 'stratum' column in the fitted data; cannot build a per-stratum ",
+         "prediction grid.", call. = FALSE)
+  }
+  idx <- match(as.character(strata), as.character(data$stratum))
+  if (anyNA(idx)) {
+    stop("No fitted rows for stratum/strata: ",
+         paste(as.character(strata)[is.na(idx)], collapse = ", "), ".", call. = FALSE)
+  }
+  idx
 }

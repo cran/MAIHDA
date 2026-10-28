@@ -21,6 +21,10 @@
 .maihda_wemix_l2_col <- ".maihda_l2wt"
 .maihda_brms_weights_col <- ".maihda_sw"
 
+# Gradient-criterion threshold below which a WeMix fit counts as having reached a
+# maximum; see maihda_wemix_convergence() for how it is calibrated.
+.maihda_wemix_grad_tol <- 1e-2
+
 # Guard a reserved internal weight column against silently overwriting a user
 # variable. The weighted engines write '.maihda_sw' / '.maihda_l2wt' into the
 # analytic data; if the user's data already carries a column of that name AND the
@@ -80,8 +84,9 @@ maihda_validate_sampling_weights <- function(sampling_weights, data) {
 # -- or one weighted and one unweighted fit -- whose variance estimates are not
 # comparable. Unweighted fits map to "none"; a weighted fit is keyed by the weight
 # column name and its values on the analytic rows. The companion to
-# maihda_weight_fingerprint(), which covers lme4 PRECISION weights (and degrades
-# to "unit" for engines whose prior weights are not recoverable, wemix included).
+# maihda_weight_fingerprint(), which covers lme4 PRECISION weights and a brms
+# response's own weights() term -- not the weights(.maihda_sw) this keys -- and
+# degrades to "unit" for engines whose prior weights are not recoverable (wemix).
 maihda_sampling_weight_fingerprint <- function(model) {
   sw <- model$sampling_weights
   if (is.null(sw)) {
@@ -98,8 +103,11 @@ maihda_sampling_weight_fingerprint <- function(model) {
   if (is.null(w)) {
     return(paste0("col:", sw))
   }
+  # Align to the analytic frame's row names so a reordered-but-identical fit gets
+  # the same fingerprint (the values live in model$data, keyed by its row names).
+  w <- maihda_order_by_ids(as.numeric(w), rownames(model$data))
   paste0(sw, ":",
-         paste(formatC(as.numeric(w), format = "g", digits = 12), collapse = "\r"))
+         paste(formatC(w, format = "g", digits = 12), collapse = "\r"))
 }
 
 # Stop early with an installation hint when WeMix is unavailable.
@@ -131,6 +139,55 @@ maihda_wemix_check_formula <- function(formula) {
   invisible(TRUE)
 }
 
+# WeMix::mix() fits no offset. It takes the response from its model frame and the
+# fixed design from lme4's X, and neither its linear nor its adaptive (binomial)
+# likelihood has an offset term -- only the unweighted lmer()/glmer() fit it draws
+# its starting values from sees one. A formula offset() was therefore dropped from
+# the fit without a warning (WeMix 4.0.3: the coefficients and variance components of
+# the model without it) while maihda_wemix_linpred() added it to every prediction.
+# Reject it. The test is the terms() offset attribute model.offset() reads, so it
+# catches exactly the terms the prediction path would add; a formula terms() cannot
+# process passes here and the fit then stops on the same terms() error.
+# `allowDotAsName` keeps a `.` from erroring here, where there is no data.
+maihda_wemix_check_offset <- function(formula) {
+  if (!inherits(formula, "formula")) {
+    return(invisible(TRUE))
+  }
+  tt <- tryCatch(stats::terms(maihda_nobars(formula), allowDotAsName = TRUE),
+                 error = function(e) NULL)
+  idx <- if (!is.null(tt)) attr(tt, "offset")
+  if (length(idx) == 0L) {
+    return(invisible(TRUE))
+  }
+  vars <- as.list(attr(tt, "variables"))[-1L]
+  # backtick = TRUE: a bare non-syntactic name deparses without backticks otherwise.
+  one_line <- function(e) {
+    paste(deparse(e, width.cutoff = 500L, backtick = TRUE), collapse = " ")
+  }
+  terms_txt <- vapply(vars[idx], one_line, character(1))
+  # A malformed offset() without an argument still gets the refusal, not an index error.
+  inner <- lapply(vars[idx], function(v) if (length(v) >= 2L) v[[2L]] else v)
+  off_txt <- paste(vapply(inner, one_line, character(1)), collapse = " + ")
+  # Bracket a sum so `y - (a + b)` subtracts all of it.
+  if (length(inner) > 1L ||
+      (is.call(inner[[1L]]) && (identical(inner[[1L]][[1L]], as.name("+")) ||
+                                identical(inner[[1L]][[1L]], as.name("-"))))) {
+    off_txt <- paste0("(", off_txt, ")")
+  }
+  resp <- if (length(formula) == 3L) formula[[2L]] else as.name("y")
+  adj <- if (is.name(resp)) make.names(paste0(as.character(resp), "_adj")) else "y_adj"
+  stop("engine = \"wemix\" does not support offset() terms (",
+       paste(terms_txt, collapse = ", "), "): WeMix::mix() leaves the offset out of ",
+       "the model it fits, so the coefficients, variance components and VPC would be ",
+       "those of the model without it.\n",
+       "  Gaussian outcome: fit the response minus the offset, which is the same model,\n",
+       "    data$", adj, " <- with(data, ", one_line(resp), " - ", off_txt, ")\n",
+       "  and write ", adj, " ~ ... without the offset() term; add the offset back to ",
+       "its predictions.\n",
+       "  Binary outcome: use engine = \"brms\" with 'sampling_weights', which keeps ",
+       "offset() terms.", call. = FALSE)
+}
+
 # WeMix::mix() supports linear and binomial-logit models; the MAIHDA variance
 # summaries additionally need a defined level-1 variance, so restrict to exactly
 # those two families up front rather than failing inside WeMix.
@@ -160,12 +217,37 @@ maihda_wemix_check_family <- function(family) {
 #' @param family The resolved family object (gaussian-identity or binomial-logit).
 #' @param sampling_weights Name of the level-1 sampling-weight column.
 #' @param dot_vals Named list of evaluated \code{...} arguments forwarded to
-#'   \code{WeMix::mix()} (e.g. \code{nQuad}, \code{verbose}, \code{fast}).
-#' @return A list with \code{model} (the \code{WeMixResults}) and \code{data}
-#'   (the analytic data frame actually fitted, including the weight columns).
+#'   \code{WeMix::mix()} (e.g. \code{nQuad}, \code{verbose}, \code{fast}). They are
+#'   checked under the formal names \code{mix()} binds them to, so a partial name is
+#'   checked too; \code{center_grand} and \code{center_group} are rejected.
+#' @return A list with \code{model} (the \code{WeMixResults}), \code{data}
+#'   (the analytic data frame actually fitted, including the weight columns) and
+#'   \code{coding} (the fit's factor levels and contrast matrices, taken while the
+#'   options that shaped the design are in force; \code{NULL} if they could not be
+#'   read).
 #' @keywords internal
 maihda_fit_wemix <- function(formula, data, family, sampling_weights, dot_vals) {
   maihda_guard_reserved_weight_col(.maihda_wemix_l2_col, data, formula, "wemix")
+
+  # Check the forwarded arguments under the formal names mix() will bind them to --
+  # alongside the formula, data, weights (and a binomial family) passed below -- and
+  # forward them under those names, so what mix() receives is what was checked (see
+  # maihda_resolve_dot_names()).
+  dot_vals <- maihda_resolve_dot_names(
+    dot_vals, WeMix::mix,
+    supplied = c("formula", "data", "weights",
+                 if (family$family == "binomial") "family"))
+  dot_vals <- maihda_validate_wemix_centring(dot_vals, sampling_weights)
+  # WeMix silently returns whatever it has when the Newton loop hits
+  # 'max_iteration' (its own source carries an EMPTY `if (iteration >=
+  # max_iteration) {}` block where a non-convergence warning belongs), and its
+  # loop guard `iteration < max_iteration` accepts anything comparable: 0 and
+  # negative values skip the optimisation entirely and return the starting
+  # values, while a string is compared ALPHABETICALLY. Since the returned object
+  # records no iteration count, a nonsense limit is unrecoverable after the fact
+  # -- so reject it here, where the user can still act on it.
+  dot_vals <- maihda_validate_wemix_max_iteration(dot_vals)
+
   w <- as.numeric(data[[sampling_weights]])
   # Keep exactly the rows WeMix::mix() will fit: the evaluated analytic frame (fixed-
   # effect transformations applied, rows missing AFTER them dropped) intersected with
@@ -207,9 +289,375 @@ maihda_fit_wemix <- function(formula, data, family, sampling_weights, dot_vals) 
   if (family$family == "binomial") {
     args$family <- stats::binomial(link = "logit")
   }
-  model <- do.call(WeMix::mix, c(args, dot_vals))
+  # A binomial fit that ends with the between-stratum variance at zero makes mix() stop
+  # with an error about a matrix, and so does a likelihood evaluation at which more than
+  # half of the stratum effects are exactly zero; say what happened instead (see
+  # maihda_wemix_boundary_error() and maihda_wemix_zero_modes()). Any other error leaves
+  # as WeMix raised it.
+  model <- withCallingHandlers(
+    do.call(WeMix::mix, c(args, dot_vals)),
+    error = function(e) {
+      if (maihda_wemix_boundary_error(e, family)) {
+        stop(maihda_wemix_boundary_message(e), call. = FALSE)
+      }
+      modes <- maihda_wemix_zero_modes(sys.calls(), sys.frames())
+      if (!is.null(modes)) {
+        stop(maihda_wemix_zero_modes_message(e, modes), call. = FALSE)
+      }
+    })
 
-  list(model = model, data = data)
+  # WeMix returns no record of how its (internal lme4) design coded the factors, and
+  # that coding depends on the options in force NOW, so take it here for the
+  # prediction design to reuse (see maihda_engine_fixed_coding()). A failure here
+  # must not break a fit WeMix accepted.
+  coding <- tryCatch(
+    maihda_engine_fixed_coding(model, maihda_nobars(formula), data),
+    error = function(e) NULL)
+
+  list(model = model, data = data, coding = coding)
+}
+
+# TRUE when `e` is the error WeMix::mix() stops with after a binomial fit has ended with
+# the between-stratum variance at zero.
+#
+# mix() optimises that fit in the Cholesky factor and then, for its standard errors,
+# differentiates the likelihood numerically in the VARIANCE, by central differences of
+# half-width (1 + v) * eps^(1/4), about 1.2e-4. For an estimate v below that the lower
+# point is a negative variance, and Matrix::nearPD() stops on a covariance matrix
+# without a positive eigenvalue (WeMix 4.0.3). On the binomial path mix() reaches
+# nearPD() only inside that likelihood, and nearPD() has no other stop(), so the
+# erroring CALL identifies the case; its message is translated and is not read. The
+# linear (Gaussian) path differentiates in the Cholesky factor and returns a
+# zero-variance fit, so a nearPD() error there is something else.
+maihda_wemix_boundary_error <- function(e, family) {
+  if (!identical(family$family, "binomial")) {
+    return(FALSE)
+  }
+  cl <- conditionCall(e)
+  if (!is.call(cl)) {
+    return(FALSE)
+  }
+  fn <- cl[[1L]]
+  # `Matrix::nearPD(...)` as well as a bare `nearPD(...)`.
+  if (is.call(fn) && length(fn) == 3L &&
+      (identical(fn[[1L]], as.name("::")) || identical(fn[[1L]], as.name(":::")))) {
+    fn <- fn[[3L]]
+  }
+  identical(fn, as.name("nearPD"))
+}
+
+# What fit_maihda() says in place of that error. "Below 0.00013" is the half-width
+# above: mix() cannot return a smaller variance.
+maihda_wemix_boundary_message <- function(e) {
+  paste0(
+    "engine = \"wemix\": WeMix::mix() estimated the between-stratum variance of this ",
+    "binomial model at zero (below 0.00013) and cannot return a fit there: it stops ",
+    "while computing its standard errors (\"", conditionMessage(e), "\").\n",
+    "  A between-stratum variance of zero means the fixed part of the model accounts ",
+    "for all differences between strata; for the adjusted model of a two-model MAIHDA ",
+    "that is a PCV of 1.\n",
+    "  engine = \"brms\" with 'sampling_weights' returns a fit for this model.")
+}
+
+# How many stratum effects were exactly zero where WeMix::mix() stopped, as
+# c(zero = , strata = ), when the error being handled is the one mix() raises because
+# more than half of them are; NULL for any other error. `calls` and `frames` are
+# sys.calls() and sys.frames() as the error handler sees them.
+#
+# For a binomial fit with more than one quadrature point, every likelihood evaluation
+# centres the points on the conditional modes of the stratum effects: makeAdaptedPts()
+# wraps the modes with Matrix(), as `muHat2`, and adds that single column to a dense
+# strata x points matrix. Matrix() returns a sparse matrix when more than half of its
+# entries are exact zeros, and a dense and a sparse Matrix are added only when their
+# dimensions agree (WeMix 4.0.3, Matrix 1.7-3). That error carries no call and its
+# message is translated, so the case is told by where mix() was: in makeAdaptedPts(),
+# in that addition, with `muHat2` sparse and more than half of the modes at zero.
+maihda_wemix_zero_modes <- function(calls, frames) {
+  # The function a call names, without its namespace; NULL when it names none.
+  head_of <- function(cl) {
+    if (!is.call(cl)) {
+      return(NULL)
+    }
+    fn <- cl[[1L]]
+    if (is.call(fn) && length(fn) == 3L &&
+        (identical(fn[[1L]], as.name("::")) || identical(fn[[1L]], as.name(":::")))) {
+      fn <- fn[[3L]]
+    }
+    if (is.name(fn)) fn
+  }
+  # This runs while another error is being handled, so it may neither fail nor warn:
+  # whatever it cannot read is an error it does not recognise.
+  tryCatch({
+    heads <- lapply(calls, head_of)
+    at <- which(vapply(heads, identical, logical(1), as.name("makeAdaptedPts")))
+    at <- at[at < length(heads) & at <= length(frames)]
+    if (length(at) == 0L) {
+      return(NULL)
+    }
+    # The innermost one, and the call it had made.
+    at <- max(at)
+    if (!identical(heads[[at + 1L]], as.name("+"))) {
+      return(NULL)
+    }
+    frame <- frames[[at]]
+    if (!is.environment(frame) ||
+        !inherits(get0("muHat2", envir = frame, inherits = FALSE), "sparseMatrix")) {
+      return(NULL)
+    }
+    modes <- get0("muHat", envir = frame, inherits = FALSE)
+    if (!is.numeric(modes)) {
+      return(NULL)
+    }
+    zero <- sum(modes == 0, na.rm = TRUE)
+    if (2L * zero <= length(modes)) {
+      return(NULL)
+    }
+    c(zero = zero, strata = length(modes))
+  }, error = function(e) NULL, warning = function(w) NULL)
+}
+
+# What fit_maihda() says in place of that error. Its first line is what a
+# compare_maihda_groups() status cell holds.
+maihda_wemix_zero_modes_message <- function(e, modes) {
+  paste0(
+    "engine = \"wemix\": WeMix::mix() stopped while evaluating the likelihood of this ",
+    "binomial model: the estimated effect of ", modes[["zero"]], " of the ",
+    modes[["strata"]], " strata is exactly zero there, and mix() cannot go on when ",
+    "more than half of them are.\n",
+    "  That happens when those strata hold exactly as many (weighted) successes as ",
+    "failures and the fixed part predicts a probability of one half for them. It is a ",
+    "limitation of WeMix and says nothing about the model.\n",
+    "  nQuad = 1 (the Laplace approximation) skips the failing step.\n",
+    "  WeMix's own error: ", conditionMessage(e))
+}
+
+# Reject a 'max_iteration' forwarded to WeMix::mix() that would abandon (or never
+# enter) the optimisation. WeMix's loop condition is `iteration < max_iteration`,
+# so any value <= 0 returns the starting values untouched, and a non-numeric one
+# is coerced by `<` into a silent string comparison. Returns dot_vals unchanged
+# when the argument is absent or valid.
+maihda_validate_wemix_max_iteration <- function(dot_vals) {
+  if (!"max_iteration" %in% names(dot_vals)) {
+    return(dot_vals)
+  }
+  mi <- dot_vals$max_iteration
+  bad <- !is.numeric(mi) || length(mi) != 1L || !is.finite(mi) ||
+    mi < 1 || mi != round(mi)
+  if (bad) {
+    stop("'max_iteration' passed to the wemix engine must be a single whole ",
+         "number >= 1; got ", paste(deparse(mi), collapse = ""),
+         ". WeMix stops at that many iterations WITHOUT reporting that it did, ",
+         "so a value below 1 would silently return the unoptimized starting ",
+         "values as if they were the fit.", call. = FALSE)
+  }
+  dot_vals$max_iteration <- as.integer(mi)
+  dot_vals
+}
+
+# Reject WeMix::mix()'s center_grand / center_group. mix() centres the named covariates
+# inside the fit (by their level-1-weighted grand or within-group means) and returns
+# no centring constants, so every prediction rebuilt from the fit
+# (maihda_wemix_linpred()) multiplied the centred-scale coefficients by the UNCENTRED
+# covariates: off by slope * mean, or slope * the stratum's own mean, with no error.
+# Centring in `data` gives the identical fit and consistent predictions, so point
+# there. A NULL value is mix()'s own default -- no centring -- and passes. Expects
+# names resolved by maihda_resolve_dot_names().
+maihda_validate_wemix_centring <- function(dot_vals, sampling_weights) {
+  used <- intersect(c("center_grand", "center_group"), names(dot_vals))
+  used <- used[!vapply(dot_vals[used], is.null, logical(1))]
+  if (length(used) == 0L) {
+    return(dot_vals)
+  }
+  weight_col <- if (identical(make.names(sampling_weights), sampling_weights)) {
+    paste0("data$", sampling_weights)
+  } else {
+    paste0("data[[\"", sampling_weights, "\"]]")
+  }
+  stop("engine = \"wemix\" does not accept ", paste0("'", used, "'", collapse = " or "),
+       " (forwarded to WeMix::mix()). WeMix centres covariates internally and keeps ",
+       "no centring constants, so predictions, stratum tables, plots and binomial ",
+       "standard errors built from the fit would use the uncentred values. Centre ",
+       "the covariate in 'data' before fitting:\n",
+       "  grand: data$x_c <- data$x - weighted.mean(data$x, ", weight_col, ")\n",
+       "  group: subtract the sampling-weighted mean of x within each stratum\n",
+       "Computed on the rows you fit, this reproduces WeMix's centred fit exactly, ",
+       "and every prediction then stays consistent.", call. = FALSE)
+}
+
+# The centring arguments recorded in a wemix maihda_model's mix() call; character(0)
+# for any other fit. A fit made before fit_maihda() rejected WeMix's centring still
+# carries them there -- under the full argument name even when a partial one was typed,
+# since that call comes from match.call(). fit_maihda() passes evaluated values, so an
+# explicit NULL is recorded as NULL and does not count; a symbol recorded by a call
+# made through another function's `...` (..1) cannot be told apart from centring and
+# counts.
+maihda_wemix_centring_args <- function(object) {
+  fit_call <- if (identical(object$engine, "wemix")) object$model$call
+  if (!is.call(fit_call)) {
+    return(character(0))
+  }
+  used <- intersect(c("center_grand", "center_group"), names(fit_call))
+  used[!vapply(used, function(arg) is.null(fit_call[[arg]]), logical(1))]
+}
+
+# A centred fit's coefficients are on the centred scale and no constants were kept, so
+# refuse to rebuild its predictions rather than return values off by slope * mean.
+maihda_wemix_refuse_centred <- function(object) {
+  used <- maihda_wemix_centring_args(object)
+  if (length(used) > 0L) {
+    stop("This wemix fit was made with WeMix's internal centring (",
+         paste0("'", used, "'", collapse = " and "), "), which keeps no centring ",
+         "constants, so its predictions cannot be rebuilt: they would use the ",
+         "uncentred covariates. Refit with the covariate centred in 'data' before ",
+         "fitting.", call. = FALSE)
+  }
+  invisible(NULL)
+}
+
+# A saved maihda() analysis keeps the summaries computed when it was fitted, and those
+# of a binomial fit that used WeMix's centring came from the uncentred predictions:
+# its stratum standard errors and intervals and the interaction tests built on them
+# (and, under group centring, the AUC -- a grand constant leaves the ranks alone). A
+# Gaussian fit's stored summaries never use those predictions and stay correct, as do
+# a binomial fit's VPC and PCV. So the methods that show a saved analysis warn, while
+# recomputations refuse through maihda_wemix_refuse_centred().
+maihda_warn_centred_analysis <- function(object) {
+  used <- unique(unlist(lapply(list(object$model, object$model_adjusted), function(m) {
+    if (inherits(m, "maihda_model") && identical(m$family$family, "binomial")) {
+      maihda_wemix_centring_args(m)
+    }
+  })))
+  if (length(used) > 0L) {
+    stored <- if ("center_group" %in% used) {
+      "stratum standard errors, intervals, interaction tests and AUC"
+    } else {
+      "stratum standard errors, intervals and interaction tests"
+    }
+    warning("This analysis was fitted with WeMix's internal centring (",
+            paste0("'", used, "'", collapse = " and "), "), whose constants WeMix ",
+            "does not keep: its stored ", stored, " were computed from the uncentred ",
+            "covariates and are wrong. Refit with the covariate centred in 'data'.",
+            call. = FALSE)
+  }
+  invisible(NULL)
+}
+
+# Convergence criterion of a fitted WeMixResults, or NA when it cannot be judged.
+#
+# WeMix reports NOTHING about how its optimisation terminated: the returned object
+# carries no iteration count, no convergence code and no gradient, and the fitter
+# neither warns nor errors when it exhausts 'max_iteration' (linear path) or its
+# bobyqa return code is non-zero (whose `opt` object it discards). The one thing it
+# does return is the log-likelihood FUNCTION, so re-derive the evidence: evaluate
+# the gradient at the reported estimates and apply WeMix's own exit test,
+# max(pmin(|est * g|, |g|)).
+#
+# The two engine paths parameterise that function differently -- the adaptive
+# (non-Gaussian) path takes c(beta, variances) directly, the linear path takes
+# (v = named theta, sigma, beta) and returns a list -- and neither signature is
+# documented API. So the objective is SELF-CHECKED first: unless it reproduces the
+# fit's own reported log-likelihood, this returns NA and the caller reports
+# "unknown" rather than risk a verdict built on a misread parameterisation.
+maihda_wemix_gradient_criterion <- function(model) {
+  tryCatch({
+    lnlf <- model$lnlf
+    lnl0 <- suppressWarnings(as.numeric(model$lnl))
+    if (!is.function(lnlf) || length(lnl0) != 1L || !is.finite(lnl0)) {
+      return(NA_real_)
+    }
+    if (isTRUE(model$is_adaptive)) {
+      pars <- c(as.numeric(model$coef), as.numeric(model$vars))
+      f <- function(p) sum(as.numeric(lnlf(p)))
+    } else {
+      theta <- model$theta
+      k <- length(model$coef)
+      q <- length(theta)
+      pars <- c(as.numeric(model$coef), as.numeric(theta), as.numeric(model$sigma))
+      if (q < 1L || !is.finite(pars[k + q + 1L])) {
+        return(NA_real_)
+      }
+      f <- function(p) {
+        v <- p[k + seq_len(q)]
+        # The linear-path objective looks its variance terms up BY NAME.
+        names(v) <- names(theta)
+        as.numeric(lnlf(v = v, sigma = p[k + q + 1L],
+                        beta = p[seq_len(k)])$lnl)
+      }
+    }
+    if (length(pars) < 1L || !all(is.finite(pars))) {
+      return(NA_real_)
+    }
+    base <- f(pars)
+    # Self-check: refuse to judge unless the rebuilt objective agrees with the
+    # likelihood the fit itself reports.
+    if (!is.finite(base) ||
+        abs(base - lnl0) > 1e-4 * max(1, abs(lnl0))) {
+      return(NA_real_)
+    }
+    grad <- vapply(seq_along(pars), function(j) {
+      h <- max(1e-6, 1e-6 * abs(pars[j]))
+      up <- down <- pars
+      up[j] <- up[j] + h
+      down[j] <- down[j] - h
+      (f(up) - f(down)) / (2 * h)
+    }, numeric(1))
+    if (!all(is.finite(grad))) {
+      return(NA_real_)
+    }
+    max(pmin(abs(pars * grad), abs(grad)))
+  }, error = function(e) NA_real_)
+}
+
+# Convergence verdict + messages for a WeMixResults, mirroring the structure the
+# lme4 / ordinal / brms branches of maihda_fit_diagnostics() produce.
+#
+# `singular` is the caller's boundary flag. A variance pinned at zero sits on the
+# EDGE of the parameter space, where the gradient legitimately does not vanish
+# (the optimality condition is one-sided), so the stationarity test cannot
+# distinguish a converged boundary fit from an abandoned one -- report "unknown"
+# there and let the separately-surfaced singular flag carry the warning.
+maihda_wemix_convergence <- function(model, singular = NA) {
+  fail <- function(msg) list(converged = FALSE, messages = msg)
+
+  # A field that is PRESENT but non-finite is failure evidence; a field that is
+  # ABSENT is no evidence at all, and must not be read as one.
+  lnl <- suppressWarnings(as.numeric(model$lnl))
+  if (length(lnl) == 1L && !is.finite(lnl)) {
+    return(fail("The weighted pseudo-log-likelihood is not finite: the fit did not converge."))
+  }
+  coefs <- suppressWarnings(as.numeric(model$coef))
+  if (length(coefs) > 0 && !all(is.finite(coefs))) {
+    return(fail("One or more fixed-effect estimates are not finite: the fit did not converge."))
+  }
+  ses <- suppressWarnings(as.numeric(model$SE))
+  if (length(ses) > 0 && !all(is.finite(ses))) {
+    return(fail(paste0("One or more fixed-effect standard errors are not finite: the ",
+                       "fit did not converge, or its information matrix is singular.")))
+  }
+
+  crit <- maihda_wemix_gradient_criterion(model)
+  # Deliberately far looser than WeMix's own 1e-5 exit test. This gradient is a
+  # central DIFFERENCE taken in the variance parameterisation, not the analytic one
+  # the fitter optimises in, so the two do not agree to WeMix's precision: across
+  # healthy gaussian and binomial fits the criterion here ran from 0 to 8e-04,
+  # while fits whose optimisation was abandoned sat between 0.1 and 5. The
+  # threshold is placed in that gap. The purpose is to catch a grossly unfinished
+  # optimisation, NOT to second-guess where WeMix chose to stop -- a false alarm on
+  # a sound fit would cost more than missing a marginal one.
+  if (!is.na(crit) && crit < .maihda_wemix_grad_tol) {
+    return(list(converged = TRUE, messages = character(0)))
+  }
+  if (!is.na(crit) && !isTRUE(singular)) {
+    return(fail(sprintf(
+      paste0("The optimisation stopped well away from a maximum (gradient ",
+             "criterion %.3g, against a %g threshold): WeMix returns the last ",
+             "iterate without reporting this, so treat the estimates as ",
+             "provisional. Consider raising 'max_iteration' or 'nQuad'."),
+      crit, .maihda_wemix_grad_tol)))
+  }
+  # No usable evidence either way (unreadable likelihood function, an unfamiliar
+  # WeMix version, or a boundary fit): say so rather than assume success.
+  list(converged = NA, messages = character(0))
 }
 
 #' Variance components of a wemix MAIHDA fit
@@ -253,13 +701,21 @@ maihda_wemix_variances <- function(object) {
 #' WeMix's own \code{predict()} method needs the grouping structure re-resolved
 #' and offers no fixed-only form, so predictions are built directly from the
 #' coefficient vector and the stored stratum effects: the fixed design matrix is
-#' constructed with the training data's factor levels and multiplied by
-#' \code{coef}, any formula offset term is evaluated on \code{newdata} and added,
+#' constructed with the fit's factor coding -- the levels it fitted and the contrast
+#' matrix it applied to each factor, whatever \code{options(contrasts = )} says now
+#' -- AND its transformation basis (so a
+#' data-dependent term such as \code{scale(x)} uses the fit's centre and scale rather
+#' than recomputing them from \code{newdata}) and multiplied by
+#' \code{coef}, any formula offset term is evaluated on \code{newdata} and added
+#' (only a fit saved before \code{fit_maihda()} refused offsets for this engine
+#' carries one; WeMix fitted it without the offset),
 #' and \code{include_re} adds each row's stratum effect (conditional
-#' mode; an unseen stratum contributes 0 -- the population-average fallback that
+#' mode; an unseen stratum contributes 0 -- the zero-effect fallback that
 #' \code{\link{predict_maihda}} only reaches when \code{allow_new_levels = TRUE},
 #' having otherwise rejected unseen strata upstream). Everything is on the link
-#' scale.
+#' scale. A fit made with WeMix's internal centring (\code{center_grand} or
+#' \code{center_group}, which \code{fit_maihda()} now rejects) is refused: its
+#' coefficients are on a centred scale whose constants WeMix does not keep.
 #'
 #' @param object A \code{maihda_model} with engine \code{"wemix"}.
 #' @param newdata Data to predict for; defaults to the analytic data.
@@ -267,13 +723,20 @@ maihda_wemix_variances <- function(object) {
 #' @return A numeric vector of link-scale predictions.
 #' @keywords internal
 maihda_wemix_linpred <- function(object, newdata = NULL, include_re = TRUE) {
+  maihda_wemix_refuse_centred(object)
   if (is.null(newdata)) {
     newdata <- object$data
   }
-  tt <- stats::delete.response(stats::terms(reformulas::nobars(object$formula)))
-  xlev <- stats::.getXlevels(tt, stats::model.frame(tt, object$data))
-  mf <- stats::model.frame(tt, newdata, xlev = xlev, na.action = stats::na.pass)
-  X <- stats::model.matrix(tt, mf)
+  # Terms rebuilt from the FITTED data, so a data-dependent transformation such as
+  # scale(x) / poly(x, 2) / ns(x, 3) evaluates on the fit's basis instead of being
+  # recomputed from the prediction batch (see maihda_fitted_predict_terms()), and the
+  # factors coded exactly as the fit coded them -- its levels and contrast matrices --
+  # so an option-set or attribute-set contrast is not silently re-coded by default
+  # treatment coding (see maihda_engine_fixed_coding()).
+  tt <- maihda_fitted_predict_terms(object$formula, object$data)$terms
+  design <- maihda_fixed_design(tt, newdata, maihda_object_fixed_coding(object))
+  mf <- design$frame
+  X <- design$X
   beta <- object$model$coef
   missing_cols <- setdiff(names(beta), colnames(X))
   if (length(missing_cols) > 0) {
@@ -282,16 +745,26 @@ maihda_wemix_linpred <- function(object, newdata = NULL, include_re = TRUE) {
   }
   eta <- drop(X[, names(beta), drop = FALSE] %*% beta)
 
-  # A formula offset term (offset(.) in the model formula) is part of the linear
-  # predictor WeMix::mix() fits but is NOT a column of X, so model.matrix() never
-  # rebuilds it -- add it back explicitly from the model frame, evaluated on
-  # newdata, or response-scale predictions would be off by the offset.
+  # A formula offset() term is not a column of X, so add it from the model frame.
+  # fit_maihda() now refuses offsets for this engine because WeMix::mix() never fitted
+  # them (maihda_wemix_check_offset()); only a fit saved before that carries one, and
+  # its coefficients belong to the model without it. Such fits are left as they were.
   off <- stats::model.offset(mf)
   if (!is.null(off)) {
     eta <- eta + off
   }
 
   if (include_re) {
+    # A `newdata` without the grouping column cannot be matched to the stratum effects,
+    # and re[as.character(NULL)] is a ZERO-LENGTH vector that eta + u silently shrinks
+    # eta to -- a length-0 "prediction" for n rows, which surfaces far downstream as
+    # whatever the caller does with it (dplyr: "`fitted` must be size 600 or 1, not 0").
+    # Name what is missing here instead.
+    if (!"stratum" %in% names(newdata)) {
+      stop("Prediction data for a wemix fit must carry the 'stratum' column the model ",
+           "was fitted with; without it the stratum random effects cannot be matched to ",
+           "its rows.", call. = FALSE)
+    }
     re <- maihda_wemix_ranef_vector(object)
     u <- re[as.character(newdata$stratum)]
     u[is.na(u)] <- 0
@@ -454,13 +927,119 @@ maihda_brms_weights_formula <- function(formula, wcol) {
   formula
 }
 
+#' Remove the package-internal weights(.maihda_sw) addition term from a formula
+#'
+#' The inverse of the injection \code{maihda_brms_weights_formula()} performs for
+#' the reserved \code{.maihda_sw} column. \code{maihda()} and
+#' \code{compare_maihda_groups()} derive the null / adjusted models from a
+#' sampling-weighted fit's \emph{stored} formula, which already carries the
+#' injected \code{weights(.maihda_sw)} term; that term must be stripped before the
+#' derived model is re-prepared, or the reserved-column guard (\code{.maihda_sw}
+#' both in the formula and in the carried-over data) and the weights-formula
+#' rewrite (which rejects an existing \code{weights()} term) abort the package's
+#' own refit. Only the internal \code{weights(.maihda_sw)} call is removed -- a
+#' user's own \code{weights()} term (a genuine conflict) is left in place so it is
+#' still rejected -- and any other addition term (e.g. \code{trials(n)}) is
+#' preserved.
+#'
+#' @param formula A model formula.
+#' @return The formula with the internal \code{weights(.maihda_sw)} term removed,
+#'   or the input unchanged when it carries no such term.
+#' @keywords internal
+maihda_strip_brms_weights_term <- function(formula) {
+  if (length(formula) < 3L) {
+    return(formula)                    # one-sided formula: no LHS to strip
+  }
+  lhs <- formula[[2]]
+  if (!is.call(lhs) || !identical(lhs[[1]], as.name("|"))) {
+    return(formula)                    # response carries no addition term
+  }
+  stripped <- maihda_drop_weights_call(lhs[[3]], .maihda_brms_weights_col)
+  if (is.null(stripped)) {
+    # The addition was solely weights(.maihda_sw): drop the `|`, leaving the bare
+    # response.
+    formula[[2]] <- lhs[[2]]
+  } else if (!identical(stripped, lhs[[3]])) {
+    lhs[[3]] <- stripped
+    formula[[2]] <- lhs
+  }
+  formula
+}
+
+# Recursively drop a weights(<wcol>) call from a brms addition-term expression (a
+# `+`-tree of addition terms, e.g. `trials(n) + weights(.maihda_sw)`). Returns the
+# pruned expression, or NULL when nothing remains.
+maihda_drop_weights_call <- function(expr, wcol) {
+  is_target <- is.call(expr) && identical(expr[[1]], as.name("weights")) &&
+    length(expr) == 2L && identical(expr[[2]], as.name(wcol))
+  if (is_target) {
+    return(NULL)
+  }
+  if (is.call(expr) && identical(expr[[1]], as.name("+"))) {
+    left <- maihda_drop_weights_call(expr[[2]], wcol)
+    right <- maihda_drop_weights_call(expr[[3]], wcol)
+    if (is.null(left) && is.null(right)) {
+      return(NULL)
+    }
+    if (is.null(left)) {
+      return(right)
+    }
+    if (is.null(right)) {
+      return(left)
+    }
+    return(call("+", left, right))
+  }
+  expr
+}
+
+#' Rows complete on every variable a brms model will use
+#'
+#' Mirrors the rows brms retains after its own NA exclusion: complete on the
+#' response and its addition-term variables (\code{y | trials(n)}), on the
+#' fixed-effect terms -- evaluated through the model frame, so a transformed
+#' predictor whose transformation yields \code{NA}/\code{NaN} counts as
+#' incomplete -- and on every variable in the random-effect terms.
+#'
+#' @param formula The (pre-weights-injection) model formula.
+#' @param data The model data.
+#' @return A logical vector over the rows of \code{data}.
+#' @keywords internal
+maihda_brms_complete_rows <- function(formula, data) {
+  ok <- rep(TRUE, nrow(data))
+  fixed <- maihda_nobars(formula)
+  tt <- tryCatch(stats::delete.response(stats::terms(fixed, data = data)),
+                 error = function(e) NULL)
+  if (!is.null(tt)) {
+    mf <- tryCatch(stats::model.frame(tt, data, na.action = stats::na.pass),
+                   error = function(e) NULL)
+    if (!is.null(mf) && nrow(mf) == nrow(data)) {
+      ok <- ok & stats::complete.cases(mf)
+    }
+  }
+  raw_vars <- unique(c(
+    if (length(formula) == 3) all.vars(formula[[2]]),
+    unlist(lapply(reformulas::findbars(formula), all.vars), use.names = FALSE)
+  ))
+  raw_vars <- intersect(raw_vars, names(data))
+  if (length(raw_vars) > 0) {
+    ok <- ok & stats::complete.cases(data[raw_vars])
+  }
+  ok
+}
+
 #' Prepare data and formula for a sampling-weighted brms fit
 #'
-#' Drops rows with missing or non-positive sampling weights (with a warning),
-#' normalizes the remaining weights to mean 1 -- likelihood weights scale the
-#' effective sample size, so unnormalized expansion weights (summing to the
-#' population) would massively overstate the information in the data -- and
-#' rewrites the formula with a \code{weights()} addition term.
+#' Drops rows with missing or non-positive sampling weights and rows incomplete
+#' on the model variables (each with a warning), normalizes the remaining
+#' weights to mean 1 -- likelihood weights scale the effective sample size, so
+#' unnormalized expansion weights (summing to the population) would massively
+#' overstate the information in the data -- and rewrites the formula with a
+#' \code{weights()} addition term.
+#'
+#' Incomplete rows must go BEFORE the normalization: brms silently excludes
+#' them after receiving the data, so normalizing over all weight-valid rows
+#' would hand the sampler surviving weights with an arbitrary mean, scaling the
+#' pseudo-posterior's effective sample size by that mean.
 #'
 #' @param data The model data.
 #' @param formula The model formula.
@@ -471,6 +1050,16 @@ maihda_brms_weights_formula <- function(formula, wcol) {
 #'   forwarded arguments to the same rows).
 #' @keywords internal
 maihda_prepare_brms_sampling_weights <- function(data, formula, sampling_weights) {
+  # A maihda()- / compare_maihda_groups()-derived refit re-enters here with the
+  # internal weights term already on the formula and the .maihda_sw column already
+  # in `data` -- both copied from the prior sampling-weighted fit the null /
+  # adjusted model was derived from. Strip that term so this re-prepares cleanly
+  # from `sampling_weights`: otherwise the reserved-column guard (below) sees
+  # .maihda_sw referenced in the formula AND present in data and aborts, and the
+  # formula rewrite (further down) rejects the already-present weights() term. The
+  # weight column is re-normalized and re-injected from the ORIGINAL weight column
+  # (still carried in the derived data), which is the intended behaviour.
+  formula <- maihda_strip_brms_weights_term(formula)
   maihda_guard_reserved_weight_col(.maihda_brms_weights_col, data, formula, "brms")
   w <- as.numeric(data[[sampling_weights]])
   keep <- is.finite(w) & w > 0
@@ -482,6 +1071,22 @@ maihda_prepare_brms_sampling_weights <- function(data, formula, sampling_weights
     warning(sprintf(paste0("fit_maihda(): dropped %d row(s) with missing or ",
                            "non-positive sampling weights before the brms fit."),
                     sum(!keep)), call. = FALSE)
+  }
+  incomplete <- keep & !maihda_brms_complete_rows(formula, data)
+  if (sum(incomplete) > 0) {
+    keep <- keep & !incomplete
+    if (!any(keep)) {
+      stop("No usable rows remain after dropping rows incomplete on the model ",
+           "variables.", call. = FALSE)
+    }
+    warning(sprintf(paste0("fit_maihda(): dropped %d row(s) incomplete on the ",
+                           "model variables before normalizing the sampling ",
+                           "weights (brms would drop them only after ",
+                           "normalization, leaving the fitted weights with a ",
+                           "mean different from 1)."),
+            sum(incomplete)), call. = FALSE)
+  }
+  if (sum(!keep) > 0) {
     data <- data[keep, , drop = FALSE]
     w <- w[keep]
   }

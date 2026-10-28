@@ -19,7 +19,7 @@ The MAIHDA package provides a comprehensive toolkit for conducting Multilevel An
 - **[Interactive Dashboard](https://hdbt.shinyapps.io/shiny/)**: A fully-featured Shiny application (`run_maihda_app()`) for no-code exploratory data analysis and model fitting
 - **Model Fitting**: Multiple engines — `lme4` (frequentist), `brms` (Bayesian), `WeMix` (design-weighted pseudo-likelihood), and `ordinal` (`ordinal::clmm`, for cumulative/ordered-factor outcomes)
 - **Design-Weighted MAIHDA**: Survey/sampling weights via `sampling_weights` fit a population-weighted model using WeMix pseudo-maximum likelihood via `engine = "wemix"` or a brms pseudo-posterior via `engine = "brms"`.
-- **Summaries & Decompositions**: Variance partition coefficients (VPC/ICC), stratum-specific estimates, and stepwise Proportional Change in Variance (PCV)
+- **Summaries & Decompositions**: Variance partition coefficients (VPC/ICC), stratum-specific estimates, stepwise Proportional Change in Variance (PCV), and order-invariant PCV attribution via Shapley values / dominance analysis (`pcv_importance()`)
 - **Multiple Prediction Types**: Individual-level and stratum-level predictions
 - **Visualizations**: Predicted stratum values, VPC visualizations, mean-prediction vs. stratum-effect diagnostics, and observed vs. shrunken estimates, with multiplicity correction for flagged strata
 - **Group Comparison**: `compare_maihda_groups()` contrasts the between-stratum *share* of variance (VPC/ICC) and the between-/within-stratum variance components across levels of a higher-level variable such as country or region.
@@ -47,7 +47,8 @@ data("maihda_health_data")
 analysis <- maihda(BMI ~ Age + Gender + Race + Education + (1 | Gender:Race:Education),
                    data = maihda_health_data)
 analysis
-summary(analysis)
+summary(analysis)                     # null model: VPC/ICC, variance components
+summary(analysis, which = "adjusted") # adjusted model: dimension main effects
 
 plot(analysis, type = "vpc")
 plot(analysis, type = "effect_decomp")
@@ -104,8 +105,8 @@ a$summary$context$vpc_context_total  # the country share of unexplained variance
 plot(a, type = "context_vpc")
 ```
 
-A context with few levels (like these 6 countries) weakly identifies its variance;
-prefer many-level contexts or `engine = "brms"` for serious use.
+A context with few levels (like these 6 countries) identifies its variance weakly
+with either engine (see `?fit_maihda`); prefer many-level contexts for serious use.
 
 ### `summary()`
 Provides comprehensive model summaries including:
@@ -149,7 +150,10 @@ Calculates the proportional change in between-stratum variance (PCV) between two
 - Supports bootstrap confidence intervals for lme4 models
 
 ### `stepwise_pcv()`
-Evaluates multiple sequential models by iteratively adding covariates step-by-step. Each step's PCV is the change in between-stratum variance contributed by a predictor given the variables already in the model. For a binary outcome it also reports the discriminatory-accuracy trajectory (`AUC`, the step/total change in AUC, and `MOR`) alongside the PCV, so the strata's discriminatory accuracy can be tracked as covariates are added. Pass `context =` to run it as a contextual cross-classified model (a `(1 | context)` intercept held in every step, as in `maihda(context = )`): the reported PCV is then net of the context, and a `Context_Variance` column surfaces the between-context share.
+Evaluates multiple sequential models by iteratively adding covariates step-by-step. Each step's PCV is the change in between-stratum variance contributed by a predictor given the variables already in the model. For a binary outcome it also reports the discriminatory-accuracy trajectory (`AUC`, the step/total change in AUC, and `MOR`) alongside the PCV, so the strata's discriminatory accuracy can be tracked as covariates are added. Pass `context =` to run it as a contextual cross-classified model (a `(1 | context)` intercept held in every step, as in `maihda(context = )`): the reported PCV is then net of the context, and a `Context_Variance` column reports the absolute between-context variance component (not a share of the total).
+
+### `pcv_importance()`
+The order-*invariant* counterpart of `stepwise_pcv()`: apportions the full-model PCV fairly across the predictors, so each variable's contribution no longer depends on its entry order. `method = "shapley"` (default) averages each variable's marginal PCV over all entry orders — exact up to ~10 variables (all subset models fit once and cached), Monte-Carlo permutation sampling with per-variable MC standard errors beyond; `method = "dominance"` adds Budescu's conditional/complete dominance detail (general dominance = the Shapley values). Contributions are signed (a suppressor shows up as negative) and always sum exactly to the full-model Total PCV (the Shapley efficiency property). Attribute among the stratum dimensions to split the additive share across dimensions, or among covariates as an order-free variance-importance measure; optional parametric-bootstrap CIs per contribution (`bootstrap = TRUE`, lme4 only).
 
 ### Longitudinal (growth-curve) MAIHDA
 Supply `id` and `time` to `fit_maihda()`/`maihda()` for a 3-level growth-curve MAIHDA (occasions within individuals within strata, with random intercept *and* slope on time at both levels), the life-course extension of Bell, Evans, Holman & Leckie (2024). The between-stratum VPC is then time-varying, and `maihda(decomposition = "longitudinal")` reports the PCV separately for the baseline (intercept) and the slope variance — the additive-vs-multiplicative split of the intersectional *trajectory* inequality.
@@ -207,8 +211,7 @@ analysis <- maihda(
   sampling_weights = "person_weight"
 )
 analysis            # design-weighted VPC/ICC and PCV
-summary(analysis)   # design-consistent (sandwich) SEs for the fixed effects
-
+summary(analysis)   # sandwich (robust) SEs
 # Works across the toolkit: stepwise PCV, group comparison, prediction, plots,
 # and the design-weighted AUC for binary outcomes.
 stepwise_pcv(strata_data, "outcome", c("gender", "race", "education"),
@@ -235,6 +238,32 @@ stepwise_results <- stepwise_pcv(
 print(stepwise_results)
 ```
 
+## Order-Invariant PCV Attribution (Shapley / Dominance)
+
+`stepwise_pcv()`'s step contributions depend on the order the variables enter.
+`pcv_importance()` removes that dependence: it averages each variable's marginal
+PCV over all entry orders, with dominance analysis available under the same
+roof.
+
+```r
+imp <- pcv_importance(
+  data = data,
+  outcome = "health_outcome",
+  vars = c("gender", "race", "age")   # order does not matter
+)
+print(imp)   # signed contributions; sum = full-model Total PCV (efficiency)
+plot(imp)    # bar chart of the attribution
+
+# Budescu dominance analysis: adds conditional / complete dominance detail
+pcv_importance(data, "health_outcome", c("gender", "race", "age"),
+               method = "dominance")
+
+# Monte-Carlo Shapley for many variables (exact needs 2^k - 1 subset fits)
+set.seed(1)
+pcv_importance(data, "health_outcome", many_vars,
+               approx = "montecarlo", n_perm = 2000)
+```
+
 ## Tidy output (`broom`)
 
 `tidy()` and `glance()` methods turn a fitted model or analysis into tidy data for
@@ -252,6 +281,9 @@ glance(analysis)
 # Per-estimate tidy frames (broom's term/estimate/std.error/conf.low/conf.high shape):
 tidy(analysis)                          # stratum (intersection) effects, with labels
 tidy(analysis, component = "variance")  # variance components
+
+# Fixed effects add statistic/df/p.value to that shape (Gaussian: a t on
+# containment degrees of freedom; GLMM, WeMix and clmm: a Wald z, df NA):
 tidy(analysis, component = "fixed", which = "adjusted")
 
 # A caterpillar plot in two lines:
@@ -323,7 +355,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 If you use this package in your research, please cite:
 
 ```text
-Bulut (2025). *MAIHDA: Multilevel Analysis of Individual Heterogeneity and Discriminatory Accuracy.* R package version 0.2.1, https://github.com/hdbt/MAIHDA. doi: 10.32614/CRAN.package.MAIHDA
+Bulut (2025). *MAIHDA: Multilevel Analysis of Individual Heterogeneity and Discriminatory Accuracy.* R package version 0.3.0, https://github.com/hdbt/MAIHDA. doi: 10.32614/CRAN.package.MAIHDA
 ```
 
 A BibTeX entry for LaTeX users is:
@@ -333,7 +365,7 @@ A BibTeX entry for LaTeX users is:
   title  = {MAIHDA: Multilevel Analysis of Individual Heterogeneity and Discriminatory Accuracy},
   author = {Hamid Bulut},
   year   = {2025},
-  note   = {R package version 0.2.1},
+  note   = {R package version 0.3.0},
   url    = {https://github.com/hdbt/MAIHDA},
   doi    = {10.32614/CRAN.package.MAIHDA}
 }

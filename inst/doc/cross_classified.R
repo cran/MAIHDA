@@ -53,6 +53,7 @@ plot(cc, type = "effect_decomp")  # additive vs. interaction, per stratum
 #   decomposition = "crossed-dimensions"
 # )
 # cc_b$decomposition$additive_share_ci
+# cc_b$decomposition$realised$additive_share_ci
 
 ## ----context-fit--------------------------------------------------------------
 data("maihda_country_data")

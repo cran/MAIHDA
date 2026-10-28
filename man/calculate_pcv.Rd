@@ -9,7 +9,8 @@ calculate_pcv(
   model2,
   bootstrap = FALSE,
   n_boot = 1000,
-  conf_level = 0.95
+  conf_level = 0.95,
+  estimation = c("fitted", "ML", "REML")
 )
 }
 \arguments{
@@ -25,21 +26,65 @@ parametric bootstrap relies on lme4's \code{simulate()}/\code{refit()}, so
 for the brms, wemix, and ordinal engines the PCV is reported as a point
 estimate and \code{bootstrap = TRUE} is an error (see Details).}
 
-\item{n_boot}{Number of bootstrap samples if bootstrap = TRUE. Default is 1000.}
+\item{n_boot}{Number of bootstrap samples if bootstrap = TRUE. Default is 1000.
+A value below about 200 warns that the interval's tail endpoints are unstable
+(the hard minimum is 10).}
 
 \item{conf_level}{Confidence level for bootstrap intervals. Default is 0.95.}
+
+\item{estimation}{Which between-stratum variances are compared: \code{"fitted"}
+(default), \code{"ML"} or \code{"REML"}. \code{"fitted"} uses each model's own
+estimate (REML for a Gaussian \code{lmer} fit, maximum likelihood for a
+\code{glmer} fit). \code{"ML"} refits REML \code{lmer} fits by maximum likelihood
+first, which overstates the PCV when strata are few. \code{"REML"} compares
+REML-type variances for binomial and Poisson \code{glmer} fits, whose
+maximum-likelihood PCV is overstated in the same way. See Details.}
 }
 \value{
 A list containing:
   \item{pcv}{The estimated proportional change in variance}
-  \item{pvc}{Deprecated duplicate of \code{pcv}, kept so code written against
-    the historical \code{calculate_pvc()} spelling keeps working; it will be
+  \item{pvc}{Deprecated duplicate of \code{pcv}; reading it warns, and it will be
     removed in a future release}
   \item{var_model1}{Between-stratum variance from model1}
   \item{var_model2}{Between-stratum variance from model2}
+  \item{estimation}{The variance-estimation basis requested (\code{"fitted"},
+    \code{"ML"} or \code{"REML"})}
+  \item{estimation_used}{The basis actually used: \code{"fitted"}, \code{"ML"},
+    \code{"mixed"}, \code{"REML"} or \code{"posterior"}. \code{"mixed"} arises under
+    \code{estimation = "ML"} when a model keeps its REML fit -- its between-stratum
+    variance is on the boundary so the ML refit is skipped, or \code{\link[lme4]{refitML}}
+    failed -- so the comparison is partly REML rather than the pure ML one
+    requested. \code{"REML"} is reported when the REML-type variances of a
+    \code{glmer} fit were compared; \code{estimation = "REML"} on REML \code{lmer}
+    fits uses them as fitted and reports \code{"fitted"}. \code{"posterior"} is
+    reported for a \code{brms} comparison (a Bayesian posterior, on which
+    \code{"ML"} and \code{"REML"} are no-ops). \code{print()} states the basis}
+  \item{ml_variances}{Logical; \code{TRUE} when the compared variances are
+    maximum-likelihood estimates (a \code{glmer}, wemix or ordinal fit, or an
+    \code{lmer} fit made or refitted by maximum likelihood). \code{print()} notes it
+    under the default \code{estimation}}
+  \item{reml_available}{Logical; \code{TRUE} when \code{estimation = "REML"} would
+    compare REML-type variances for these two models (binomial or Poisson
+    \code{glmer} fits it accepts)}
+  \item{pcv_fitted, var_model1_fitted, var_model2_fitted}{Present when
+    \code{estimation_used} is \code{"REML"}: the PCV and the two variances as fitted
+    by maximum likelihood, the values \code{estimation = "fitted"} returns}
+  \item{adjusted_at_boundary}{Logical; \code{TRUE} when model2's between-stratum
+    variance is on the singularity boundary, so the PCV is pinned near 1 (100\%) and
+    its interval/SE are unreliable -- consistent with genuinely additive strata as
+    well as a degenerate fit (\code{print()} states this)}
+  \item{ml_refit_failed}{Logical; \code{TRUE} when \code{estimation = "ML"} was
+    requested but \code{\link[lme4]{refitML}} failed for a model, so its REML fit was
+    used instead (the comparison is then not on a pure ML basis)}
   \item{ci_lower}{Lower bound of confidence interval (if bootstrap = TRUE)}
   \item{ci_upper}{Upper bound of confidence interval (if bootstrap = TRUE)}
   \item{bootstrap}{Logical indicating if bootstrap was used}
+  \item{n_boot_nonconverged}{Number of contributing bootstrap draws whose refit
+    optimiser did not converge (\code{optinfo$conv$opt != 0}); these are retained
+    in the interval and counted, so \code{n_boot_ok} does not imply convergence}
+  \item{interval_reliable}{Logical (bootstrap only); \code{FALSE} when more than
+    half the contributing draws did not converge, in which case the interval is
+    still returned but flagged unreliable (see Details)}
 }
 \description{
 Calculates the proportional change in between-stratum variance (PCV) between
@@ -57,18 +102,66 @@ analytic sample and strata. The function does not require nesting, so for
 non-nested models the PCV is simply a model-dependent difference in variance,
 not an explained proportion.
 
-\strong{REML vs ML.} \code{lmer} fits Gaussian models by REML, whose
-between-stratum variance estimate is \emph{not} comparable across models with
-different fixed effects -- exactly the canonical null-vs-adjusted PCV, where the
-adjusted model adds the dimensions' main effects. \code{calculate_pcv()} therefore
-refits any REML \code{lmer} model with maximum likelihood
-(\code{\link[lme4]{refitML}}) before reading the variances (and before the
-parametric bootstrap, so the interval matches), matching \code{\link{maihda_ic}}
-and \code{anova()} on \code{lme4} models. Using REML estimates here biases the PCV
-(it overstates the residual between-stratum variance of the adjusted model). GLMM
-fits (\code{glmer}) and the brms/wemix/ordinal engines are already on the
-maximum-likelihood scale and are unaffected; single-model VPC/ICC summaries keep
-their REML fit, since that comparison-free quantity is not subject to the pitfall.
+\strong{REML vs ML (the \code{estimation} argument).} \code{estimation} sets which
+between-stratum variances are compared:
+\describe{
+  \item{\code{"fitted"} (default)}{each model's own estimate -- the REML estimate
+    for a Gaussian \code{lmer} fit, the variance
+    \code{\link{summary.maihda_model}} reports.}
+  \item{\code{"ML"}}{REML \code{lmer} fits are refitted by maximum likelihood
+    (\code{\link[lme4]{refitML}}) first, and the bootstrap interval is computed on
+    the same basis. Use it to match an analysis fitted by maximum likelihood.}
+  \item{\code{"REML"}}{REML-type variances. REML \code{lmer} fits are used as
+    fitted. For a binomial or Poisson \code{glmer} fit whose only random effect is
+    the stratum intercept, the between-stratum variance is re-estimated with the
+    fixed effects integrated out, as REML does for a Gaussian model (see below).}
+}
+The PCV is a ratio of two variance estimates and uses no likelihood value, so it
+does not need maximum-likelihood fits (likelihood-ratio tests and information
+criteria do; see \code{\link{maihda_ic}}). REML estimates each model's
+between-stratum variance with little bias. Maximum likelihood makes no allowance for
+the degrees of freedom spent on the fixed effects, so it underestimates that
+variance, and by more in the adjusted model than in the null model: the PCV is
+\emph{overstated}, most of all with few strata. In a balanced design whose fixed
+effects are constant within strata, ML multiplies REML's estimate of the variance of
+the stratum means, \eqn{\sigma^2_u + \sigma^2_e / n}, by \eqn{(J - p) / J} (\eqn{J}
+strata, \eqn{p} fixed-effect coefficients, neither estimate at zero): 23/24 for the
+null model of a 2 x 3 x 4 design but 17/24 for the adjusted one. The bootstrap
+interval inherits the bias, because it simulates from and refits on the same basis.
+
+\code{"fitted"} and \code{"ML"} differ for Gaussian \code{lmer} fits only.
+\code{glmer} and the wemix and ordinal engines estimate variances by maximum
+likelihood, so under either setting their PCV is overstated in the same way: most
+with few strata, and more when strata are small or uneven in size, because the
+shortfall applies to the between-stratum variance plus the sampling variance of a
+stratum's own estimate. \code{print()} notes when the compared variances are
+maximum-likelihood estimates.
+
+\code{estimation = "REML"} corrects that shortfall for binomial and Poisson
+\code{glmer} fits. Each variance minimises the Laplace-approximated deviance
+evaluated at the joint mode of the fixed and random effects (lme4's
+\code{nAGQ = 0} deviance) plus the log-determinant of the fixed-effect information,
+which integrates the fixed effects out; for the logit and log links this is the
+criterion \code{glmmTMB(REML = TRUE)} minimises. The models are not refitted, and
+the as-fitted values are returned alongside (\code{pcv_fitted},
+\code{var_model1_fitted}, \code{var_model2_fitted}).
+
+Use it when strata are few but each holds enough observations for its own estimate
+to be precise: the PCV then has little bias, though with very few strata it stays
+imprecise. When the strata are small as well, neither basis is dependable. A
+variance estimate cannot fall below zero, so with that much noise the REML-type
+estimate averages too high, most in the adjusted model: the PCV then varies widely
+from sample to sample and can come out far too low, even negative, where the
+maximum-likelihood PCV stays too high.
+
+\code{estimation = "REML"} is an error for the wemix and ordinal engines, for other
+\code{glmer} families, for a fit with a further random effect such as a
+\code{context}, for an \code{lmer} fit made by maximum likelihood, and with
+\code{bootstrap = TRUE} on a \code{glmer} fit.
+
+A \code{brms} fit is a Bayesian posterior: \code{"ML"} and \code{"REML"} perform no
+refit and \code{estimation_used} is \code{"posterior"}. Single-model VPC/ICC
+summaries always use the model as fitted.
 
 \strong{Latent-scale families and rescaling.} For families whose level-1
 variance is a fixed latent-scale constant -- binomial/Bernoulli
@@ -95,12 +188,37 @@ For negative-binomial models (\code{glmer.nb}) \code{refit()} holds the
 dispersion parameter theta fixed at its original estimate, so the interval is
 conditional on the estimated theta.
 
+A bootstrap draw whose \emph{null-model} between-stratum variance lands on
+the zero boundary has no defined PCV (the denominator is zero); such draws
+are excluded, so the percentile interval is \emph{conditional on estimating
+a positive null variance}. Whenever any draws hit the boundary the function
+warns, reports the count as \code{n_boot_boundary} on the result, and
+\code{print()} repeats the caveat -- a sizeable boundary share signals weak
+between-stratum variation, and the PCV itself is then fragile.
+
+Bootstrap draws whose refit optimiser reports non-convergence are kept in the
+interval (they still have a defined PCV) and counted in
+\code{n_boot_nonconverged}, which \code{print()} shows. When more than half the
+contributing draws did not converge the interval is still returned, but with a
+warning and \code{interval_reliable = FALSE}; treat it as indicative only and
+check for singular or failing fits.
+
 The bootstrap is available for the \code{lme4} engine only. For the other
 engines the PCV is a \emph{point estimate}: a brms fit's posterior credible
 interval (reported by \code{\link{summary.maihda_model}}) covers a single
 fit's VPC/ICC, not the PCV, which compares two separately fitted models -- no
 posterior interval for the PCV itself is computed -- and a design-based
 (wemix) interval would require replicate weights.
+
+\strong{brms fits.} For two \code{brms} fits the variances compared are the
+posterior medians of each model's between-stratum variance, the values the
+variance-components table of \code{\link{summary.maihda_model}} shows. The
+posterior of a between-stratum variance is
+right-skewed when strata are few, and more so in the adjusted model, which spends
+degrees of freedom on the main effects. The PCV is therefore \emph{understated}
+with few strata -- the opposite direction to maximum likelihood -- and with very
+few strata it can be negative where the true value is positive. The understatement
+shrinks as strata are added.
 }
 \examples{
 \donttest{

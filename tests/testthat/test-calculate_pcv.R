@@ -65,8 +65,10 @@ test_that("calculate_pcv works with bootstrap", {
                        data = data,
                        engine = "lme4")
   
-  # Calculate PCV with bootstrap (small number for testing)
-  pcv_result <- calculate_pcv(model1, model2, bootstrap = TRUE, n_boot = 50)
+  # Calculate PCV with bootstrap (small number for testing; the low-n_boot
+  # stability warning is expected and suppressed)
+  pcv_result <- suppressWarnings(
+    calculate_pcv(model1, model2, bootstrap = TRUE, n_boot = 50))
   
   # Check structure
   expect_true(inherits(pcv_result, "pcv_result"))
@@ -320,11 +322,27 @@ test_that("maihda_bootstrap_ci requires a minimum number of successful draws", {
     MAIHDA:::maihda_bootstrap_ci(numeric(0), n_boot = 100, conf_level = 0.95, what = "VPC"),
     "All"
   )
+  # Below the absolute floor (10).
   expect_error(
     MAIHDA:::maihda_bootstrap_ci(rep(0.5, 5), n_boot = 100, conf_level = 0.95, what = "VPC"),
     "at least"
   )
-  ci <- MAIHDA:::maihda_bootstrap_ci(seq(0, 1, length.out = 50), n_boot = 100, conf_level = 0.95)
+  # Above the absolute floor but far below a majority of the requested draws:
+  # the interval must be unavailable, not returned with a warning (finding 2).
+  expect_error(
+    MAIHDA:::maihda_bootstrap_ci(rep(0.5, 30), n_boot = 100, conf_level = 0.95, what = "VPC"),
+    "must succeed"
+  )
+  # Legitimately excluded draws (n_excluded) do not count against the success
+  # fraction, so 30 successes of 50 eligible (100 requested, 50 excluded) is fine
+  # -- but the 40% failure rate among the eligible draws still warns.
+  ci_excl <- expect_warning(
+    MAIHDA:::maihda_bootstrap_ci(rep(0.5, 30), n_boot = 100,
+                                 conf_level = 0.95, n_excluded = 50),
+    "refits failed")
+  expect_length(ci_excl, 2)
+  # A clean majority succeeding returns an interval.
+  ci <- MAIHDA:::maihda_bootstrap_ci(seq(0, 1, length.out = 80), n_boot = 100, conf_level = 0.95)
   expect_length(ci, 2)
   expect_true(ci[1] < ci[2])
 })
@@ -388,7 +406,7 @@ test_that("bootstrap_pcv rejects non-lme4 engines with honest per-engine guidanc
   )
 })
 
-test_that("calculate_pvc is a deprecated alias of calculate_pcv", {
+test_that("a PCV result keeps the deprecated pvc copy, and reading it warns", {
   set.seed(42)
   data <- data.frame(
     stratum = factor(rep(1:8, each = 20)),
@@ -399,14 +417,217 @@ test_that("calculate_pvc is a deprecated alias of calculate_pcv", {
 
   model1 <- fit_maihda(outcome ~ 1 + (1 | stratum), data = data)
   model2 <- fit_maihda(outcome ~ age + (1 | stratum), data = data)
-
   new <- calculate_pcv(model1, model2)
-  # Match on the condition class, not the message: .Deprecated()'s text is localized.
-  expect_warning(old <- calculate_pvc(model1, model2), class = "deprecatedWarning")
-  expect_identical(old, new)
+  plain <- unclass(new)
 
   # The result answers to both the new and the historical class/element names.
   expect_s3_class(new, "pcv_result")
   expect_s3_class(new, "pvc_result")
-  expect_identical(new$pvc, new$pcv)
+  expect_identical(plain$pvc, plain$pcv)
+
+  # Reading 'pvc' by name warns once, with a deprecatedWarning, through $, [[ and
+  # getElement(), and returns pcv. The class is checked on the caught condition:
+  # expect_warning() ignores 'class' in testthat's second edition, which this suite uses.
+  read_pvc <- function(expr) {
+    conds <- list()
+    value <- withCallingHandlers(expr, warning = function(w) {
+      conds[[length(conds) + 1L]] <<- w
+      invokeRestart("muffleWarning")
+    })
+    list(value = value, conds = conds)
+  }
+  for (r in list(read_pvc(new$pvc), read_pvc(new[["pvc"]]),
+                 read_pvc(getElement(new, "pvc")))) {
+    expect_length(r$conds, 1L)
+    expect_s3_class(r$conds[[1]], "deprecatedWarning")
+    expect_identical(r$value, plain$pcv)
+  }
+
+  # Every other read is a plain list's, with no warning; so are print(), which reads
+  # its fields by name, and str(), which walks the elements by position.
+  expect_no_warning(reads <- list(new$pcv, new[["pcv"]], new$var_model1, new[[3]],
+                                  new$estimation_used, new$nonexistent))
+  expect_identical(reads, list(plain$pcv, plain[["pcv"]], plain$var_model1, plain[[3]],
+                               plain$estimation_used, NULL))
+  expect_no_warning(utils::capture.output(print(new)))
+  expect_no_warning(utils::capture.output(utils::str(new)))
+})
+
+test_that("PCV bootstrap reports zero-null-variance boundary draws", {
+  # Regression: draws whose null model estimated a zero between-stratum
+  # variance were silently converted to NA and dropped -- the advertised
+  # percentile interval was conditional on a positive null variance with no
+  # warning unless over half of ALL draws failed. Any boundary mass now warns
+  # and is reported on the result.
+  skip_on_cran()
+  set.seed(8)
+  n <- 320
+  d <- data.frame(
+    g = sample(c("F", "M"), n, replace = TRUE),
+    r = sample(c("A", "B"), n, replace = TRUE),
+    x = rnorm(n)
+  )
+  sk <- interaction(d$g, d$r, drop = TRUE)
+  d$y <- 0.3 * d$x + rnorm(nlevels(sk), sd = 0.16)[sk] + rnorm(n)
+  st <- make_strata(d, c("g", "r"))
+  d$stratum <- st$data$stratum
+  m1 <- suppressWarnings(suppressMessages(fit_maihda(y ~ (1 | stratum), data = d)))
+  m2 <- suppressWarnings(suppressMessages(fit_maihda(y ~ x + (1 | stratum), data = d)))
+
+  # capture_warnings: the simulated refits can also emit optimizer-convergence
+  # warnings, which are irrelevant here.
+  set.seed(1008)
+  w <- capture_warnings(
+    r <- suppressMessages(calculate_pcv(m1, m2, bootstrap = TRUE, n_boot = 40)))
+  expect_true(any(grepl("conditional on a positive null variance", w)))
+  expect_true(is.finite(r$n_boot_boundary) && r$n_boot_boundary > 0)
+  expect_equal(r$n_boot_ok + r$n_boot_boundary, 40)
+  expect_output(print(r), "boundary")
+  # The surviving draws form a sane conditional interval (near-boundary
+  # denominators that produced intervals like [-6.6e16, 1] are excluded).
+  expect_true(r$ci_lower > -100 && r$ci_upper <= 1 + 1e-8)
+})
+
+test_that("calculate_pcv rejects an effectively singular null model", {
+  # A null variance like 1e-9 passed the strict var1 <= 0 guard and produced
+  # PCVs in the thousands (audit follow-up: PCV = -120427 with interval
+  # [-6.6e16, 1]); the lme4 relative singularity tolerance now rejects the
+  # degenerate denominator with a clear message.
+  skip_on_cran()
+  set.seed(4)
+  n <- 320
+  d <- data.frame(
+    g = sample(c("F", "M"), n, replace = TRUE),
+    r = sample(c("A", "B"), n, replace = TRUE),
+    x = rnorm(n)
+  )
+  sk <- interaction(d$g, d$r, drop = TRUE)
+  d$y <- 0.3 * d$x + rnorm(nlevels(sk), sd = 0.12)[sk] + rnorm(n)
+  st <- make_strata(d, c("g", "r"))
+  d$stratum <- st$data$stratum
+  m1 <- suppressWarnings(suppressMessages(fit_maihda(y ~ (1 | stratum), data = d)))
+  m2 <- suppressWarnings(suppressMessages(fit_maihda(y ~ x + (1 | stratum), data = d)))
+
+  expect_error(suppressWarnings(suppressMessages(calculate_pcv(m1, m2))),
+               "zero or negative|zero boundary")
+})
+
+test_that("calculate_pcv estimation basis: 'fitted' (default) uses REML, 'ML' refits", {
+  # Audit finding 1: for a Gaussian lmer PCV the forced ML refit materially changes
+  # the reported PCV with few strata. The estimation argument exposes both bases;
+  # the default is now "fitted" (each fit's own REML variance), matching summary().
+  skip_on_cran()
+  set.seed(20260711)
+  n_strata <- 24; n_per <- 12
+  smean <- rnorm(n_strata, sd = 2)                    # stratum means
+  x1_stratum <- smean + rnorm(n_strata, sd = 1)       # stratum-level covariate
+  d <- data.frame(
+    stratum = rep(seq_len(n_strata), each = n_per),
+    age = rnorm(n_strata * n_per),
+    x1 = rep(x1_stratum, each = n_per))
+  d$outcome <- 5 + 0.5 * d$age + smean[d$stratum] + rnorm(nrow(d), sd = 1)
+  # x1 is a stratum-level covariate that explains part of the between-stratum
+  # variance, so the adjusted model has a clearly lower stratum variance.
+  m1 <- fit_maihda(outcome ~ age + (1 | stratum), data = d, engine = "lme4")
+  m2 <- fit_maihda(outcome ~ age + x1 + (1 | stratum), data = d, engine = "lme4")
+  expect_true(lme4::isREML(m1$model))
+
+  # Default = "fitted": PCV variances equal the fitted REML VarCorr variances.
+  p_fit <- calculate_pcv(m1, m2)
+  expect_identical(p_fit$estimation, "fitted")
+  v1_reml <- as.numeric(lme4::VarCorr(m1$model)$stratum[1])
+  v2_reml <- as.numeric(lme4::VarCorr(m2$model)$stratum[1])
+  expect_equal(p_fit$var_model1, v1_reml)
+  expect_equal(p_fit$var_model2, v2_reml)
+  expect_equal(p_fit$pcv, (v1_reml - v2_reml) / v1_reml)
+
+  # "ML": PCV variances equal the ML-refit VarCorr variances.
+  p_ml <- calculate_pcv(m1, m2, estimation = "ML")
+  expect_identical(p_ml$estimation, "ML")
+  v1_ml <- as.numeric(lme4::VarCorr(lme4::refitML(m1$model))$stratum[1])
+  v2_ml <- as.numeric(lme4::VarCorr(lme4::refitML(m2$model))$stratum[1])
+  expect_equal(p_ml$var_model1, v1_ml)
+  expect_equal(p_ml$var_model2, v2_ml)
+
+  # The REML and ML adjusted variances differ (the finding), so the two bases give
+  # a different PCV. (Direction is not asserted -- it depends on the design.)
+  expect_false(isTRUE(all.equal(v2_reml, v2_ml)))
+  expect_false(isTRUE(all.equal(p_fit$pcv, p_ml$pcv)))
+
+  # print() states the variance basis; a bad value is rejected (message is locale-
+  # dependent, so only the error itself is asserted).
+  expect_output(print(p_fit), "as fitted")
+  expect_output(print(p_ml), "ML-refit")
+  expect_error(calculate_pcv(m1, m2, estimation = "reml"))
+})
+
+test_that("calculate_pcv estimation is a no-op for non-REML (glmer) fits", {
+  # For a binomial glmer the fit is already ML, so "fitted" and "ML" coincide.
+  skip_on_cran()
+  set.seed(21)
+  n_strata <- 20; n_per <- 40
+  eff <- rnorm(n_strata, sd = 1)
+  d <- data.frame(stratum = rep(seq_len(n_strata), each = n_per),
+                  age = rnorm(n_strata * n_per),
+                  z = rnorm(n_strata * n_per))
+  d$y <- rbinom(nrow(d), 1, plogis(-0.2 + 0.5 * d$age + eff[d$stratum]))
+  m1 <- suppressWarnings(suppressMessages(
+    fit_maihda(y ~ age + (1 | stratum), data = d, family = "binomial")))
+  m2 <- suppressWarnings(suppressMessages(
+    fit_maihda(y ~ age + z + (1 | stratum), data = d, family = "binomial")))
+  p_fit <- calculate_pcv(m1, m2)
+  p_ml  <- calculate_pcv(m1, m2, estimation = "ML")
+  expect_equal(p_fit$pcv, p_ml$pcv)
+  expect_equal(p_fit$var_model1, p_ml$var_model1)
+})
+
+test_that("stepwise_pcv and pcv_importance accept the estimation argument", {
+  # The estimation basis threads through the model-series PCV attributions too.
+  skip_on_cran()
+  set.seed(99)
+  N <- 18 * 22
+  d <- data.frame(
+    g = factor(sample(letters[1:3], N, replace = TRUE)),   # 3 x 6 = up to 18 strata
+    r = factor(sample(LETTERS[1:6], N, replace = TRUE)),
+    age = rnorm(N))
+  st <- make_strata(d, c("g", "r"))
+  d <- st$data
+  slev <- unique(as.character(d$stratum))
+  eff <- stats::setNames(rnorm(length(slev), sd = 2), slev)  # per-stratum (incl. interaction)
+  d$y <- 3 + 0.5 * d$age + eff[as.character(d$stratum)] + rnorm(nrow(d))
+
+  sw_fit <- stepwise_pcv(d, "y", c("g", "r", "age"))                 # default fitted
+  sw_ml  <- stepwise_pcv(d, "y", c("g", "r", "age"), estimation = "ML")
+  expect_s3_class(sw_fit, "maihda_stepwise")
+  # The two bases give different Total_PCV trajectories for the Gaussian lmer fits.
+  expect_false(isTRUE(all.equal(sw_fit$Total_PCV, sw_ml$Total_PCV)))
+
+  imp_fit <- pcv_importance(d, "y", c("g", "r", "age"))
+  imp_ml  <- pcv_importance(d, "y", c("g", "r", "age"), estimation = "ML")
+  expect_false(isTRUE(all.equal(imp_fit$total_pcv, imp_ml$total_pcv)))
+})
+
+test_that("stepwise_pcv rejects an effectively singular null model", {
+  # Audit follow-up: calculate_pcv() rejects a boundary-level null denominator,
+  # but stepwise_pcv() divided Total_PCV / Step_PCV by it, turning a degenerate
+  # ~0 null variance into a spurious 100% (or a huge negative) PCV with no
+  # warning. The same lme4 relative singularity guard now rejects it up front.
+  # Reuses the boundary construction from the calculate_pcv boundary test above.
+  skip_on_cran()
+  set.seed(4)
+  n <- 320
+  d <- data.frame(
+    g = sample(c("F", "M"), n, replace = TRUE),
+    r = sample(c("A", "B"), n, replace = TRUE),
+    x = rnorm(n)
+  )
+  sk <- interaction(d$g, d$r, drop = TRUE)
+  d$y <- 0.3 * d$x + rnorm(nlevels(sk), sd = 0.12)[sk] + rnorm(n)
+  st <- make_strata(d, c("g", "r"))
+  d$stratum <- st$data$stratum
+
+  expect_error(
+    suppressWarnings(suppressMessages(stepwise_pcv(d, "y", "x"))),
+    "zero boundary"
+  )
 })

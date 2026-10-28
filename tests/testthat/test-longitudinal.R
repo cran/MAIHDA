@@ -170,6 +170,41 @@ test_that("maihda_validate_longitudinal enforces its contract", {
                "linear growth only")
 })
 
+test_that("longitudinal ids reused across strata are rejected", {
+  # Ids numbered within a site/group (person "1" in every site) used to be
+  # silently merged into ONE level-2 unit by (time | id), pooling different
+  # people's trajectories. An id spanning more than one stratum is the
+  # observable symptom and is now an error.
+  set.seed(77)
+  person <- rbind(
+    data.frame(pid = 1:10, gender = "F", edu = rep(c("lo", "hi"), 5)),
+    data.frame(pid = 1:10, gender = "M", edu = rep(c("lo", "hi"), 5))
+  )
+  d <- person[rep(seq_len(nrow(person)), each = 3), ]
+  d$wave <- rep(0:2, nrow(person))
+  d$y <- rnorm(nrow(d))
+
+  expect_error(
+    fit_maihda(y ~ wave + (1 | gender:edu), data = d, id = "pid", time = "wave"),
+    "more than one stratum"
+  )
+
+  # The direct guard: unique-per-person ids pass; NA rows are ignored.
+  d_ok <- d
+  d_ok$pid <- paste(d_ok$gender, d_ok$pid)   # globally unique
+  d_ok$stratum <- interaction(d_ok$gender, d_ok$edu)
+  expect_silent(maihda_check_longitudinal_ids(d_ok, "pid"))
+  d_na <- d_ok
+  d_na$pid[1] <- NA
+  expect_silent(maihda_check_longitudinal_ids(d_na, "pid"))
+
+  # ...and the reused ids fail with the offending values named.
+  d_bad <- d
+  d_bad$stratum <- interaction(d_bad$gender, d_bad$edu)
+  expect_error(maihda_check_longitudinal_ids(d_bad, "pid"),
+               "10 id value\\(s\\)")
+})
+
 # ---- fitted-model tests (lme4) ---------------------------------------------
 
 skip_on_cran()
@@ -234,49 +269,59 @@ test_that("longitudinal PCV recovers a mostly-additive trajectory split", {
   expect_gt(a$pcv$Sigma_stratum_adjusted[2, 2], 0)
 })
 
-test_that("longitudinal PCV compares ML-refitted variances, not REML", {
+test_that("longitudinal PCV: default 'fitted' uses REML, estimation = 'ML' refits", {
+  skip_slow_test()
   # The null and adjusted growth models differ in fixed effects (the dimensions'
-  # main effects + dim:time), across which REML between-stratum variances are not
-  # comparable -- the same pitfall calculate_pcv() ML-refits for. The stored fits
-  # (and hence summary()'s time-varying VPC) keep REML; only the PCV comparison
-  # is on the ML scale, and the object records that basis.
+  # main effects + dim:time), so their REML and ML covariance blocks differ.
+  # estimation selects the basis (see calculate_pcv()): the default "fitted" keeps
+  # each fit's own REML covariance block; "ML" refits both first. The stored fits
+  # (and summary()'s time-varying VPC) always keep REML.
   expect_true(lme4::isREML(a_g$model$model))
   expect_true(lme4::isREML(a_g$model_adjusted$model))
-  expect_true(isTRUE(a_g$pcv$ml_refit))
 
-  # Recompute the baseline PCV from hand-ML-refitted blocks: must match exactly.
-  null_ml <- a_g$model
-  null_ml$model <- lme4::refitML(a_g$model$model)
-  adj_ml <- a_g$model_adjusted
-  adj_ml$model <- lme4::refitML(a_g$model_adjusted$model)
   ref_c <- a_g$model$longitudinal_info$ref_time -
     maihda_lng_time_center(a_g$model$longitudinal_info)
+
+  # Default (fitted): NO ML refit; the baseline variances equal the REML blocks.
+  expect_false(isTRUE(a_g$pcv$ml_refit))
+  vn_reml <- maihda_var_at_time(maihda_re_block(a_g$model, "stratum"), ref_c)
+  va_reml <- maihda_var_at_time(maihda_re_block(a_g$model_adjusted, "stratum"), ref_c)
+  expect_equal(a_g$pcv$var_baseline_null, vn_reml, tolerance = 1e-6)
+  expect_equal(a_g$pcv$var_baseline_adjusted, va_reml, tolerance = 1e-6)
+  expect_equal(a_g$pcv$pcv_intercept, (vn_reml - va_reml) / vn_reml, tolerance = 1e-6)
+
+  # estimation = "ML": refit both growth fits with ML before differencing the blocks.
+  a_mlbasis <- suppressMessages(
+    maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
+           data = maihda_long_data, id = "id", time = "wave",
+           decomposition = "longitudinal", estimation = "ML"))
+  expect_true(isTRUE(a_mlbasis$pcv$ml_refit))
+  null_ml <- a_g$model;          null_ml$model <- lme4::refitML(a_g$model$model)
+  adj_ml  <- a_g$model_adjusted; adj_ml$model  <- lme4::refitML(a_g$model_adjusted$model)
   vn <- maihda_var_at_time(maihda_re_block(null_ml, "stratum"), ref_c)
   va <- maihda_var_at_time(maihda_re_block(adj_ml, "stratum"), ref_c)
-  expect_equal(a_g$pcv$var_baseline_null, vn, tolerance = 1e-6)
-  expect_equal(a_g$pcv$var_baseline_adjusted, va, tolerance = 1e-6)
-  expect_equal(a_g$pcv$pcv_intercept, (vn - va) / vn, tolerance = 1e-6)
+  expect_equal(a_mlbasis$pcv$var_baseline_null, vn, tolerance = 1e-6)
+  expect_equal(a_mlbasis$pcv$var_baseline_adjusted, va, tolerance = 1e-6)
+  expect_equal(a_mlbasis$pcv$pcv_intercept, (vn - va) / vn, tolerance = 1e-6)
 
-  # ... and it genuinely differs from the naive REML-block value it replaces.
-  vn_reml <- maihda_var_at_time(maihda_re_block(a_g$model, "stratum"), ref_c)
-  expect_false(isTRUE(all.equal(a_g$pcv$var_baseline_null, vn_reml,
+  # The ML basis genuinely differs from the REML (fitted) baseline it replaces.
+  expect_false(isTRUE(all.equal(a_mlbasis$pcv$var_baseline_null, vn_reml,
                                 tolerance = 1e-6)))
 
-  # An explicitly ML-fitted pair (REML = FALSE forwarded to both growth fits)
-  # reproduces the same decomposition: the internal refit is a no-op there.
-  a_ml <- suppressMessages(
+  # An explicitly ML-FITTED pair (REML = FALSE) needs no refit under either basis and
+  # reproduces the ML-basis decomposition.
+  a_mlfit <- suppressMessages(
     maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
            data = maihda_long_data, id = "id", time = "wave",
            decomposition = "longitudinal", REML = FALSE))
-  expect_false(isTRUE(a_ml$pcv$ml_refit))   # nothing needed refitting
-  expect_equal(a_ml$pcv$pcv_intercept, a_g$pcv$pcv_intercept, tolerance = 1e-4)
-  expect_equal(a_ml$pcv$pcv_slope, a_g$pcv$pcv_slope, tolerance = 1e-4)
+  expect_false(isTRUE(a_mlfit$pcv$ml_refit))   # nothing needed refitting
+  expect_equal(a_mlfit$pcv$pcv_intercept, a_mlbasis$pcv$pcv_intercept, tolerance = 1e-4)
+  expect_equal(a_mlfit$pcv$pcv_slope, a_mlbasis$pcv$pcv_slope, tolerance = 1e-4)
 
   # The print method discloses the ML basis when (and only when) a refit ran.
-  expect_output(print(a_g$pcv), "refitted with maximum likelihood")
-  expect_output(print(a_ml$pcv), "mostly additive")
+  expect_output(print(a_mlbasis$pcv), "refitted with maximum likelihood")
   expect_false(any(grepl("refitted with maximum likelihood",
-                         capture.output(print(a_ml$pcv)))))
+                         capture.output(print(a_g$pcv)))))
 })
 
 test_that("maihda_interactions refuses a longitudinal analysis or model", {
@@ -532,21 +577,58 @@ test_that("brms longitudinal path gives a time-varying VPC with credible bands",
   skip_if_not_installed("brms")
 
   d <- subset(maihda_long_data, id %in% unique(maihda_long_data$id)[1:120])
+  # The most demanding fixture in the opt-in suite (1484s, ahead of
+  # cross-classified's 838s), and the only one still failing on MIXING after the
+  # retune the other blocks needed: at chains = 2, iter = 600 AND at iter = 2000
+  # max Rhat sat at 1.031, so neither more adapt_delta nor the standard bump
+  # would have fixed it. Random slopes over 120 ids make
+  # sampling (not compilation) the bottleneck here, so unlike the cross-sectional
+  # blocks the extra iterations are not free; 4 chains x 4000 is what clears the
+  # bar, and the seed keeps it reproducible.
   m <- suppressWarnings(suppressMessages(
     fit_maihda(wellbeing ~ wave + (1 | gender:ethnicity:education), data = d,
                id = "id", time = "wave", engine = "brms",
-               chains = 2, iter = 600, refresh = 0, seed = 1)))
+               chains = 4, iter = 4000, warmup = 2000, refresh = 0, seed = 1,
+               control = list(adapt_delta = 0.95))))
+  # Fixture guard -- see the note in test-ordinal-engine.R.
+  expect_true(isTRUE(m$diagnostics$converged))
+
   s <- summary(m)
   expect_false(is.null(s$longitudinal))
   expect_identical(s$vpc$method, "posterior")
   expect_true(all(is.finite(s$longitudinal$vpc_t$estimate)))
   expect_true(any(is.finite(s$longitudinal$vpc_t$lower)))   # credible band
 
+  # The decomposition fits BOTH a null and an adjusted growth model, so a
+  # non-converged half would otherwise hide behind a PCV that is merely finite.
+  #
+  # Do NOT pass seed = here: maihda()'s 'seed' is a formal (the response-scale VPC
+  # simulation seed) and is never forwarded to brms::brm(), so it does not seed
+  # the sampler -- the fits came out differently run to run, which is how this was
+  # found. set.seed() does pin it, because brms draws its sampler seed from R's
+  # RNG when none is supplied.
+  set.seed(20260831)
   a <- suppressWarnings(suppressMessages(
     maihda(wellbeing ~ wave + (1 | gender:ethnicity:education), data = d,
            id = "id", time = "wave", engine = "brms",
-           decomposition = "longitudinal", chains = 2, iter = 600,
-           refresh = 0, seed = 1)))
+           decomposition = "longitudinal", chains = 4, iter = 4000,
+           warmup = 2000, refresh = 0,
+           control = list(adapt_delta = 0.95))))
+
+  # Assert the MIXING half of the bar explicitly rather than $diagnostics$converged.
+  # The adjusted growth model mixes well (max Rhat ~1.006) but leaves a handful of
+  # divergent transitions from the person-level intercept/slope funnel
+  # (cor_id__Intercept__wave), which 120 ids identify poorly -- the same term the
+  # 2026-08-25 pass found going rank-deficient in this model family. Zero
+  # divergences IS reachable, at adapt_delta = 0.999, but that costs 2180s against
+  # 800s here, and those divergences do not affect the VPC(t)/PCV asserted in this
+  # block. So demand convergence of the chains and say why the geometry half is
+  # not demanded, rather than either suppressing the question or paying 36 minutes
+  # for it.
+  max_rhat <- function(fit) max(suppressWarnings(brms::rhat(fit$model)), na.rm = TRUE)
+  expect_lt(max_rhat(a$model), 1.01)
+  expect_lt(max_rhat(a$model_adjusted), 1.01)
+
   expect_s3_class(a$pcv, "maihda_long_pcv")
   expect_true(is.finite(a$pcv$pcv_slope))
 })
@@ -557,6 +639,7 @@ test_that("maihda_ic works on a longitudinal lme4 fit", {
 })
 
 test_that("binomial longitudinal fit gives a latent-scale time-varying VPC", {
+  skip_slow_test()
   mb <- fit_maihda(low_wellbeing ~ wave + (1 | gender:ethnicity:education),
                    data = maihda_long_data, id = "id", time = "wave",
                    family = "binomial")
@@ -566,11 +649,15 @@ test_that("binomial longitudinal fit gives a latent-scale time-varying VPC", {
 })
 
 test_that("count longitudinal fit evaluates the level-1 variance at time-varying marginal means", {
+  skip_slow_test()
   # A Poisson growth model's marginal expected count carries a TIME-VARYING
-  # lognormal correction: lambda_i = exp(x_i'beta + v_i/2) with v_i the stratum
-  # plus individual growth-block variance a(t_i)' Sigma a(t_i) at the row's
-  # time -- not the conditional fitted mean, whose BLUPs the level-1 variance
-  # must not depend on. Recompute v_i independently from the summary's blocks.
+  # lognormal correction: lambda(t) = exp(x'beta(t) + v(t)/2) with v(t) the stratum
+  # plus individual growth-block variance a(t)' Sigma a(t) at time t. The level-1
+  # variance log1p(1/lambda(t)) therefore changes over the reporting grid, so the
+  # VPC(t) residual must be evaluated AT each grid time -- not one sample-wide
+  # average reused everywhere. Recompute the grid residual independently, setting
+  # the model's time term to each grid value (marginalizing over the rows) with the
+  # correction v(t)/2 from the summary's blocks.
   d <- subset(maihda_long_data, id %in% unique(maihda_long_data$id)[1:150])
   set.seed(909)
   d$events <- rpois(nrow(d), lambda = exp(0.6 + 0.15 * d$wave))
@@ -581,13 +668,39 @@ test_that("count longitudinal fit evaluates the level-1 variance at time-varying
   expect_false(is.null(s$longitudinal))
   expect_true(all(is.finite(s$longitudinal$vpc_t$estimate)))
 
-  tv <- mp$data$wave - s$longitudinal$time_center
-  v_rows <- maihda_var_at_time(s$longitudinal$Sigma_stratum, tv) +
-    maihda_var_at_time(s$longitudinal$Sigma_id, tv)
-  eta <- as.numeric(stats::predict(mp$model, re.form = NA, type = "link"))
-  lambda <- pmax(exp(eta + v_rows / 2), .Machine$double.eps)
-  expect_equal(s$longitudinal$var_resid, mean(log1p(1 / lambda)),
-               tolerance = 1e-8)
+  lng <- s$longitudinal
+  tt <- lng$time_term
+  center <- lng$time_center
+  frame <- MAIHDA:::maihda_model_frame(mp$model)
+  resid_at <- function(t_orig) {
+    tc <- t_orig - center
+    nd <- frame
+    nd[[tt]] <- tc
+    eta <- as.numeric(stats::predict(mp$model, newdata = nd, re.form = NA,
+                                     type = "link"))
+    v_t <- maihda_var_at_time(lng$Sigma_stratum, tc) +
+      maihda_var_at_time(lng$Sigma_id, tc)
+    lambda <- pmax(exp(eta + v_t / 2), .Machine$double.eps)
+    mean(log1p(1 / lambda))
+  }
+
+  # The per-grid residual matches the independent recomputation, and the headline
+  # scalar is the reference-time value (NOT the old global average).
+  expected_grid <- vapply(lng$time_grid, resid_at, numeric(1))
+  expect_equal(lng$var_resid_t, expected_grid, tolerance = 1e-8)
+  expect_equal(lng$var_resid, resid_at(lng$ref_time), tolerance = 1e-8)
+
+  # The whole point of the fix: the residual is genuinely time-varying here (the
+  # marginal count rises with wave, so log1p(1/lambda) falls), not a constant.
+  expect_gt(diff(range(lng$var_resid_t)), 1e-6)
+  # The old behavior -- one sample-wide average over rows at their OWN times --
+  # differs from the corrected reference-time residual, so this is a real change.
+  tv <- mp$data[[lng$time]] - center
+  v_rows <- maihda_var_at_time(lng$Sigma_stratum, tv) +
+    maihda_var_at_time(lng$Sigma_id, tv)
+  eta_own <- as.numeric(stats::predict(mp$model, re.form = NA, type = "link"))
+  old_global <- mean(log1p(1 / pmax(exp(eta_own + v_rows / 2), .Machine$double.eps)))
+  expect_false(isTRUE(all.equal(lng$var_resid, old_global)))
 })
 
 # ---- edge cases: higher time_degree, singular fits, explicit-times PCV ------
@@ -672,12 +785,13 @@ test_that("a VPC-trajectory bootstrap survives singular bootstrap refits", {
   # On a boundary fit many parametric-bootstrap refits are themselves singular;
   # the per-draw tryCatch must keep the reference-time CI finite regardless.
   set.seed(101)
-  s <- summary(m_sing, bootstrap = TRUE, n_boot = 20)
+  s <- suppressWarnings(summary(m_sing, bootstrap = TRUE, n_boot = 20))
   expect_true(is.finite(s$vpc$ci_lower) && is.finite(s$vpc$ci_upper))
   expect_lte(s$vpc$ci_lower, s$vpc$ci_upper)
 })
 
 test_that("quadratic growth is anchoring-invariant (regression: silent false convergence)", {
+  skip_slow_test()
   # THE original defect: before internal centering, a quadratic growth fit on an
   # offset time axis (waves 10..) silently converged ~128 log-likelihood units
   # below the true optimum WITHOUT any lme4 convergence warning, reporting a

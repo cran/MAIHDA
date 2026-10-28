@@ -82,7 +82,83 @@ plot(m, type = "trajectories")     # predicted per-stratum mean trajectories
 ```
 
 A rising VPC trajectory means the strata fan out over time (intersectional
-inequality grows). 
+inequality grows).
+
+### Two VPCs, and which one to report
+
+`summary()` reports **two different variance partitions** for a growth model, and
+they are not interchangeable. They differ in a single denominator term: the level-1
+(occasion) residual $\sigma^2_e$, which here is *within-individual volatility* --
+how far one measurement falls from that person's own smooth trajectory. It mixes
+measurement error, real short-term fluctuation, and any misfit of the functional
+form. A cross-sectional MAIHDA cannot separate it from between-individual variance
+at all; repeated measures are what split the two.
+
+The headline VPC keeps the term, and therefore answers the discriminatory-accuracy
+question of how much of an *observed measurement* a stratum accounts for:
+
+$$\operatorname{VPC}_S(t) = \frac{\operatorname{Var}_S(t)}
+  {\operatorname{Var}_S(t) + \operatorname{Var}_I(t) + \sigma^2_e}.$$
+
+The **trajectory VPCs** drop this term, following Bell et al. (2024), equation (5):
+
+$$\operatorname{VPC}_{\text{intercept}} = \frac{\operatorname{Var}_S(t_0)}
+  {\operatorname{Var}_S(t_0) + \operatorname{Var}_I(t_0)},
+\qquad
+\operatorname{VPC}_{\text{slope}} = \frac{\operatorname{SlopeVar}_S(t_0)}
+  {\operatorname{SlopeVar}_S(t_0) + \operatorname{SlopeVar}_I(t_0)}.$$
+
+```{r traj-vpc}
+s <- summary(m)
+c(intercept = s$longitudinal$vpc_intercept, slope = s$longitudinal$vpc_slope)
+```
+
+These ask how intersectionally patterned people's *trajectories* are -- what share
+of the between-individual variation in where a trajectory starts, and in how fast it
+changes, lies between strata. Because $\sigma^2_e$ is absent, neither shrinks when
+the outcome is measured noisily, which makes them comparable across studies using
+different instruments where the headline VPC is not.
+
+Both are shares of a *between-stratum* variance, which a MAIHDA estimates from few
+strata by construction, so report them with their interval -- `vpc_intercept_ci` and
+`vpc_slope_ci`, filled in by `summary(bootstrap = TRUE)` here (not run in the
+vignette, because it refits the model many times) and by the posterior for a `brms`
+fit, which needs no refitting:
+
+```{r traj-vpc-ci, eval = FALSE}
+s_ci <- summary(m, bootstrap = TRUE, n_boot = 500)
+s_ci$longitudinal$vpc_intercept_ci
+s_ci$longitudinal$vpc_slope_ci
+```
+
+The point estimates differ in kind between the two engines, and the difference is
+not cosmetic. For `lme4` they are the plug-in from the fitted covariance blocks --
+the two numbers printed above. For `brms` they are the posterior **median of the
+per-draw ratio**, not the ratio of the posterior-mean variance components: the
+between-stratum variance has a right-skewed posterior whenever the strata are few,
+so a plug-in built from its posterior mean runs high. Refitting these same twelve
+strata with `brms`, over 150 of the individuals, the plug-in gives 0.6145 where the
+posterior median is 0.5765 -- a 6.6% overstatement, and one that widens as the
+strata get fewer. The interval matters more than the shift: on that fit it runs
+from 0.34 to 0.82, half the unit interval.
+
+
+**Report the headline VPC unless you specifically mean the trajectory question.** It
+is the quantity comparable to published cross-sectional MAIHDA VPCs, and it is the
+one that speaks to discriminatory accuracy. The trajectory VPCs should be reported
+next to `PCV_intercept` and `PCV_slope`, and `vpc_slope` is the only scale-free way
+to describe how intersectional the rates of change are.
+
+For the slope the residual could not have been included even in principle: a slope
+variance is in $(\text{outcome}/\text{time})^2$ while $\sigma^2_e$ is in
+$\text{outcome}^2$, so the sum would be dimensionally meaningless. (The headline VPC
+is well formed because $a(t)'\Sigma a(t)$ returns to $\text{outcome}^2$.) The
+intercept VPC drops it for symmetry with the slope.
+
+Both are evaluated at the baseline $t_0$; the intercept VPC depends on where time is
+zeroed and the slope VPC does not, as Bell et al. note. Their own examples centre on
+mean age rather than the baseline, so an intercept VPC replicated from the paper will
+differ from the one reported here unless the reference points are aligned.
 
 ## Decomposing the trajectory: additive vs. multiplicative
 
@@ -101,32 +177,117 @@ a$pcv
 
 The PCV is reported separately for the two pieces of the trajectory:
 
-* **`PCV_intercept`** -- the share of the *baseline* between-stratum inequality
+* **`PCV_intercept`** describes the share of the *baseline* between-stratum inequality
   explained by the additive main effects.
-* **`PCV_slope`** -- the share of the *trajectory* (slope) between-stratum inequality
-  explained additively. A high `PCV_slope` is the "trajectories are mostly additive"
+* **`PCV_slope`** describes the share of the *trajectory* (slope) between-stratum inequality
+  explained additively. A high `PCV_slope` means the "trajectories are mostly additive"
   finding; the remainder is the multiplicative/interaction part.
 
 ```{r pcv-traj}
 plot(a, type = "pcv_trajectory")   # the additive share over time
 ```
 
+Both PCVs compare REML variance estimates, and such an estimate cannot fall below
+zero: the stratum block must remain a covariance matrix. Where the strata differ
+little after adjustment next to how precisely one stratum's own baseline or slope is
+estimated, the adjusted model's variance is therefore too large on average while the
+null model's is not, and the PCV is understated on average; single values scatter
+widely and can be negative. `PCV_slope` is the more exposed, because strata usually
+differ less in slope than in level. The yardstick is the sampling variance of one
+stratum's slope, about $(\sigma^2_{v1} + \sigma^2_e / \sum_k (t_k - \bar t)^2) / n_j$
+for a stratum of $n_j$ individuals observed at times $t_k$, with $\sigma^2_{v1}$ the
+slope variance between individuals. Here it is about 0.0014 (0.0006 to 0.0025 across
+the twelve strata) against a null between-stratum slope variance of 0.043, and the
+shortfall is negligible; with a dozen strata it shows from about a third of the null
+variance, and when the two are of similar size the data do not support a
+decomposition of the slope. More strata, larger strata and more waves reduce it.
+
+With `engine = "brms"` each variance in this decomposition is the posterior
+**median** of its per-draw value: the between-stratum variance at the baseline, the
+slope variance, and the variance at each time behind the trajectory plot. The
+covariance blocks in `summary()` are posterior means, so they do not reproduce
+those numbers. The posterior of a between-stratum variance is right-skewed when the
+strata are few, and more so in the adjusted model: its variance is smaller next to
+the sampling noise of the stratum estimates, and it spends degrees of freedom on the
+main effects and their time interactions. A `brms` PCV is therefore understated on
+average with few strata -- by more when the additive share is moderate, when the
+strata are small, or, for `PCV_slope`, when the strata differ little in slope next to
+how precisely a stratum's slope is estimated -- and can come out negative where the
+true share is positive. With around a dozen strata the `lme4` decomposition is less
+biased, though neither is precise with so few strata; the understatement shrinks as
+strata are added.
+
 ## Scope and cautions
 
-* **Time coding.** You can code time however is natural -- waves 0, 1, 2, ...,
-  waves 10, 11, ..., age, or calendar year. When the axis does not start at 0,
+* **Time coding.** You can code time however is convenient for your workflow (waves 0, 1, 2, ...,
+  waves 10, 11, ..., age, calendar year, or days since baseline). When the axis does not start at 0,
   the growth terms are fit on internally *centered* time (`time - min(time)`,
   with a message), because the raw polynomial basis over an offset range is
-  ill-conditioned and can silently converge to a wrong solution. All results --
-  the VPC trajectory, the PCV, plots, and predictions -- are reported on your
-  original time scale, and the baseline (`ref_time`) is always the earliest
-  observed time.
+  ill-conditioned and can silently converge to a wrong solution. With `engine = "lme4"`,
+  time whose span is not between 1 and 10 is also divided by a power of ten for the fit
+  (days over five years by 1000, with a message): counted in fine units, lme4's optimisers
+  stop far from the optimum, mostly without a convergence warning. The growth model of a
+  count or binary outcome is also refitted from more starting values, because glmer's
+  optimiser often stops with a variance at zero, short of the maximum. All results (the VPC
+  trajectory, the PCV, the fixed effects, plots, and predictions) are reported on your
+  original time scale, and the baseline (`ref_time`) is always the earliest observed time.
 * **Identifiability.** A stratum random slope needs enough occasions per stratum;
-  sparse strata or few waves can give a singular lme4 fit (surfaced in the fit
-  diagnostics) -- the brms engine handles this better.
+  sparse strata, few waves, or irregular measurement times can give a singular lme4
+  fit (`engine = "brms"` reports an interval instead, very wide when the data say
+  little). The fit diagnostics name the block that
+  is at the boundary. Which block it is decides whether the result is affected. For example a
+  boundary `(time | id)` block leaves the between-stratum variance well estimated, a
+  boundary `(time | stratum)` block does not.
+
+* **Rank-deficient stratum blocks.** The usual boundary outcome is a stratum
+  intercept-slope correlation of exactly 1 or -1 (`Corr = 1.00` in `VarCorr()`). The block is then rank 1 (one row), one parameter short of a full covariance
+  matrix, and the stratum slope variance is not separately identified. `PCV_slope` is
+  `NA` in that case, and `print()` on the PCV object says why. `PCV_intercept` and the
+  VPC trajectory are still reported. A rank 1 block has no between-stratum variance at
+  one time, which `print()` names: the further that time lies from the observed times,
+  the more both are carried by the intercept variance, which is still estimable; close
+  to it the VPC is near zero and a PCV is not interpretable.
+
+    How often this happens depends on the number of strata and on how large the stratum
+    slope variance is next to the sampling variance of one stratum's slope (the yardstick
+    in the decomposition section above). Where the strata do not diverge it is common in
+    any design. Where they do, it is common with few strata unless their slope variance
+    is well above the yardstick, and the slope variance of such a fit tends to be too
+    small; more strata, more people per stratum and more measurement occasions make it
+    rarer. With few strata, a rank-deficient block is therefore weak evidence that the
+    strata do not diverge over time.
+
+    Both structures share the same fixed effects, so their fits can be compared
+    with `AIC`:
+
+    ```r
+    m_slope <- fit_maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
+                          data = maihda_long_data, id = "id", time = "wave")
+    m_level <- fit_maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
+                          data = maihda_long_data, id = "id", time = "wave",
+                          stratum_slope = FALSE)
+    AIC(m_slope$model) - AIC(m_level$model)   # negative favours keeping the slope
+    ```
+
+    With few strata this comparison has little power: it often favours dropping a slope
+    variance that is there.
+
+    `stratum_slope = FALSE` fits `(time | id) + (1 | stratum)`. Individuals keep their
+    growth curves; strata are constrained to differ in level only. Report the
+    constraint, when the absence of trajectory divergence is assumed, and therefore not
+    estimated. The between-stratum variance is then one time-constant number and the
+    decomposition reports `PCV_intercept` (no slope) only. The VPC still varies with time,
+    because the individual-level slope variance and the residual are in its
+    denominator. Where the strata do diverge, the constraint moves their slope differences
+    into the individual-level slope variance, so the VPC understates the between-stratum
+    share at later times and can fall where the true VPC rises; `PCV_intercept` can then
+    also take in part of that divergence.
 * **Not a single number.** The VPC is time-varying, so `extract_between_variance()`
   and `calculate_pcv()` deliberately refuse a longitudinal model; use the
   longitudinal decomposition above.
+* **Which VPC.** `summary()` reports both the discriminatory-accuracy VPC(t) and the
+  Bell et al. trajectory VPCs, which use a different denominator; see
+  [Two VPCs, and which one to report](#two-vpcs-and-which-one-to-report).
 * **Out of scope (v1).** Design-weighted, contextual (stratum $\times$ place
   $\times$ time), and `wemix`/`ordinal` longitudinal models are not yet supported.
 

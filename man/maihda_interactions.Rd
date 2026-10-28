@@ -4,7 +4,14 @@
 \alias{maihda_interactions}
 \title{Flag strata with credibly non-zero intersectional interaction}
 \usage{
-maihda_interactions(object, conf_level = 0.95, adjust = "BH", rope = NULL, ...)
+maihda_interactions(
+  object,
+  conf_level = 0.95,
+  adjust = "BH",
+  rope = NULL,
+  scale = c("link", "response"),
+  ...
+)
 }
 \arguments{
 \item{object}{A \code{maihda_analysis} from \code{\link{maihda}} (preferred --
@@ -24,7 +31,9 @@ explicitly).}
 
 \item{rope}{Optional equivalence region (a "smallest interaction of interest")
 for an "is the interaction \emph{negligible}?" reading (Schuirmann 1987;
-Kruschke 2018), on the link (latent) scale. \code{NULL} (default) gives
+Kruschke 2018), read on the requested \code{scale} -- log-odds under the
+default, probability points under \code{scale = "response"} for a logistic
+fit. \code{NULL} (default) gives
 only the usual zero-centred flag. A single positive number \code{d} means the
 symmetric region \code{c(-d, d)}; or supply \code{c(lower, upper)}. When set, the
 result gains a \code{decision} column classifying each stratum from its
@@ -32,22 +41,61 @@ result gains a \code{decision} column classifying each stratum from its
 entirely outside it), \code{"negligible"} (entirely inside it), or
 \code{"inconclusive"} (straddling a bound).}
 
+\item{scale}{Scale the interaction is reported on. \code{"link"} (default) gives
+the stratum BLUP \eqn{u_j} on the model's link scale -- for a Gaussian fit the
+outcome's own units, for a logistic fit a log-odds departure.
+\code{"response"} instead gives Evans et al.'s (2024, sec. 2.5.1)
+\eqn{\pi^B_j = \pi_j - \pi^A_j}: the stratum's total predicted outcome minus the
+outcome implied by its additive main effects alone, so a logistic fit reports a
+difference in \emph{probability}, a count fit a difference in expected count, and
+a cumulative (ordinal) fit a difference in expected category score -- the printed
+column is named for whichever it is.
+The two scales flag the same strata (see the section below); an identity-link
+fit returns the same numbers either way. For a
+\code{decomposition = "crossed-dimensions"} model the additive baseline is the
+dimension random effects, matching that decomposition.}
+
 \item{...}{Currently unused.}
 }
 \value{
 An object of class \code{maihda_interactions} (a data frame), one row
   per stratum, sorted flagged-first then by \code{abs(interaction)}. Columns
   common to every engine: \code{stratum}, \code{label}, \code{n} (stratum size),
-  \code{interaction} (the BLUP), \code{lower}/\code{upper} (the interval),
+  \code{interaction} (the BLUP, under the default \code{scale}),
+  \code{lower}/\code{upper} (the interval),
   \code{flagged} (logical), and \code{direction} (\code{"above"}/\code{"below"}
-  the additive expectation). Frequentist fits add \code{se} and \code{p_value}
-  (and \code{p_adjusted} when \code{adjust != "none"}); \code{brms} adds
+  the additive expectation). Under \code{scale = "response"} the
+  \code{interaction}/\code{lower}/\code{upper} columns hold \eqn{\pi^B_j} and its
+  interval, and \code{se} is dropped: the conditional standard error is a
+  link-scale quantity, and the response-scale interval is deliberately not
+  symmetric about the estimate, so no single SE would reproduce it. Frequentist
+  fits add \code{se} (link scale only) and \code{p_value}
+  (and \code{p_adjusted} when \code{adjust != "none"}). \code{p_value} is a
+  \emph{conditional} screening statistic -- a Wald tail on the
+  shrunken BLUP's conditional SE, with the variance components treated as known
+  -- \strong{not} a calibrated frequentist p-value; it is \emph{conservative}
+  (stochastically large under a true null), so the BH-adjusted flag under-flags
+  truly-null strata rather than delivering an exact error-rate guarantee (see
+  Details). \code{brms} instead adds
   \code{pd} (probability of direction, \code{max(P(>0), P(<0))} in
   \code{[0.5, 1]}). When \code{rope} is set, a
   \code{decision} column (\code{"relevant"}/\code{"negligible"}/\code{"inconclusive"})
   is added. Attributes record \code{conf_level}, \code{adjust}, \code{rope},
   \code{engine}, \code{model_type}, \code{n_strata}, \code{n_flagged},
-  \code{scale} and \code{singular}.
+  \code{scale}, \code{link} (the model's link name, so a caller can tell a
+  log-odds departure from one in the outcome's own units), \code{response_kind}
+  (what the model's response scale is -- \code{"probability"}, \code{"count"},
+  \code{"score"} or \code{"response"} -- which the link alone does not settle,
+  since a cumulative fit is logit-linked but scores categories), \code{singular}
+  (a variance of the fit is at zero, in any term), \code{interaction_at_boundary}
+  (the variance of the term the interaction is read from is at zero, so its
+  standard errors collapse; \code{print()} then says so),
+  and -- on a non-identity link under the default \code{scale} --
+  \code{response_interaction}, the outcome-scale estimates keyed by stratum. That
+  last attribute exists so \code{print()} can show the outcome-scale size beside
+  the link-scale one; the columns are the same either way, and
+  \code{scale = "response"} is how to obtain those numbers, with their interval,
+  as data.
 }
 \description{
 Reports, for each intersectional stratum, the \strong{interaction} component of
@@ -55,8 +103,9 @@ its outcome -- the stratum random effect (BLUP) of an \emph{adjusted} MAIHDA
 model, i.e. how far the stratum departs from the additive main-effects
 prediction of its defining dimensions -- and \strong{flags} the strata whose
 interaction is credibly different from zero. This is the heart of "where is
-there genuine intersectionality": a flagged stratum is one whose joint identity
-produces an outcome the additive parts do not.
+there genuine intersectionality": a flagged stratum is one whose outcome
+departs credibly from what the additive parts predict -- a descriptive
+statement about the stratum's outcome, not a causal claim about identity.
 }
 \details{
 \strong{It must be read off the adjusted model.} Only when the dimensions'
@@ -78,7 +127,11 @@ p-value, with an optional multiplicity correction (\code{adjust}). For
 posterior tail is used -- a credible interval at \code{conf_level} and the
 probability of direction \code{pd = max(P(BLUP > 0), P(BLUP < 0))} (in
 \code{[0.5, 1]}; the sign is in \code{direction}) -- and \code{adjust} is not
-applied (the Bayesian answer is multiplicity-free).
+applied: the posterior is already partially pooled, the hierarchical-shrinkage
+answer to multiplicity (Gelman, Hill & Yajima 2012). That is a per-stratum
+answer; the marginal intervals carry no formal joint error-rate guarantee for
+the collective claim "an interaction exists \emph{somewhere}" (the disjunction
+reading below applies to Bayesian flags too).
 
 \strong{Multiplicity: partial pooling and a correction are different things, and
 the experts disagree.}
@@ -94,7 +147,7 @@ the experts disagree.}
     and its interval.
   \item \emph{Whether to correct.} If you do want an error-rate screen, whether a
     correction is warranted depends on the \emph{inferential structure} of the
-    claim -- the joint hypothesis, not the number of strata (Rubin 2021). Each
+    claim. Each
     stratum as its own pre-specified hypothesis ("does \emph{this} stratum
     interact?") is \emph{individual} testing and needs none -- \strong{only} if you
     do not also read the flags collectively. Once the question is "is there an
@@ -107,12 +160,14 @@ in one call is the disjunction/screening case, where controlling the expected
 \code{adjust = "none"} only when each stratum is a genuine, pre-specified
 individual hypothesis. The FDR choice (over family-wise
 \code{"bonferroni"}/\code{"holm"}) is this package's, matching that screening
-goal; it is not a recommendation of Rubin (2021), who raises FDR only to
-distinguish it from the family-wise rate. The flag itself is a Wald test on a
-shrunken BLUP whose
+goal. The flag itself is a Wald test on a shrunken BLUP whose
 conditional SE treats the variance components as known, so it (and any
-\code{adjust} on it) is an explicit, approximate \emph{screen}, not a procedure
-inheriting an exact guarantee from the model. Lead with the interval (and, for
+\code{adjust} on it) is an explicit, \emph{conservative} screen -- strict, not
+liberal. Partial pooling deflates a truly-null
+stratum's BLUP more than its conditional SE, so the null z-statistic is
+sub-normal (variance about the shrinkage fraction, below 1) and the screen
+under-flags rather than over-flags, degenerating to no flags at the
+singular/zero-variance boundary. Lead with the interval (and, for
 \code{brms}, the probability of direction); the substantive question is often not
 whether an interaction differs from zero but whether it exceeds a smallest
 interaction of interest (an equivalence reading; Schuirmann 1987; Kruschke 2018),
@@ -120,8 +175,83 @@ read from the interval.
 
 The interaction is reported on the model's link (latent) scale -- a log-odds
 deviation for a logistic model, etc. -- because the additive/interaction split
-is only exact there.
+is only exact there. On a non-identity link that makes it a \emph{multiplicative}
+departure, which is a different quantity from a shift in the outcome itself; see
+the section below before reporting it.
 }
+\section{What the interaction means on a non-identity link}{
+
+For a Gaussian (identity-link) fit the stratum BLUP \eqn{u_j} \emph{is} the part
+of the stratum's mean outcome attributable to interaction, in the outcome's own
+units. For a logistic fit it is not: \eqn{u_j} is a deviation in
+\strong{log-odds}, so what this function reports is the \emph{multiplicative},
+odds-scale interaction. (What follows is written for the logistic case, the one
+the literature works in. The same logic holds on any non-identity link, in its own
+units: a Poisson fit's \eqn{u_j} is a log-rate departure and \code{scale =
+"response"} gives it as a difference in expected counts, and a cumulative
+(ordinal) fit's is a latent shift reported as a difference in expected category
+score. The printed column is named for whichever applies.) Evans et al. (2024, section 2.5.1)
+put it directly -- in a logistic MAIHDA one can "no longer directly interpret
+\eqn{u_j} as the change in mean outcomes (i.e., shift in probabilities)
+attributable to interaction effects".
+
+\strong{Three quantities, of which this function reports two.} Keeping them apart
+is the whole of the difficulty:
+\enumerate{
+  \item \strong{The multiplicative interaction, \eqn{u_j}} -- the departure from
+    additivity \emph{in log-odds}, i.e. whether a dimension multiplies the odds by
+    the same factor at every level of the others. This is what the default
+    \code{scale = "link"} reports and what \code{flagged} is about.
+  \item \strong{The same departure in outcome units, \eqn{\pi^B_j}} -- what
+    \code{scale = "response"} returns. Evans et al. (2024) define it as
+    \deqn{\pi^B_j = \pi_j - \pi^A_j, \qquad
+          \pi_j = \mathrm{logit}^{-1}(x_j'\beta + u_j), \qquad
+          \pi^A_j = \mathrm{logit}^{-1}(x_j'\beta),}
+    the gap between a stratum's total predicted probability and the probability
+    implied by the additive main effects alone, and rank-plot \eqn{\pi^B_j} where
+    the linear case plots \eqn{u_j}. This is quantity 1 \emph{re-expressed}, not a
+    second finding: it is zero exactly when \eqn{u_j} is zero and it flags the same
+    strata, so it changes the units you report, not what you may conclude.
+  \item \strong{The additive (risk-difference) interaction} -- whether a dimension
+    adds the same number of percentage points of risk at every level of the others.
+    \strong{Neither of the above reports this}, and it is generally non-zero even
+    where \eqn{u_j} is exactly zero, because the logistic curve is steeper in the
+    middle than in the tails. With a \eqn{-2} baseline and \eqn{+0.7} for each of
+    two dimensions and no interaction at all (\eqn{u_j = 0} throughout), the second
+    dimension still adds 9.5 percentage points of risk at one level of the first
+    and 14.0 at the other. That excess is a property of the link, not a finding.
+}
+
+So "no strata flagged" supports "no credible \strong{multiplicative} interaction",
+not "no interaction": additivity in log-odds does not carry over to probabilities,
+so quantity 3 is generally non-zero regardless, and it is often the one a policy
+audience cares about. (\emph{Generally}, not always. The risk-difference
+interaction is positive below the curve's midpoint and negative above it, so it
+passes through zero: with two dimensions of effect \eqn{a} and \eqn{b} it vanishes
+exactly at an intercept of \eqn{-(a + b)/2}, where the two comparisons straddle the
+midpoint symmetrically. That is a single configuration, not the general case, and
+the flags say nothing about which one you are in either way.)
+
+\strong{Both scales flag the same strata.} Writing \eqn{g(u)} for the map from a
+stratum's BLUP to its \eqn{\pi^B_j}, \eqn{g} is strictly increasing with
+\eqn{g(0) = 0}, so estimate, interval endpoints and zero all carry across
+together. \code{flagged}, \code{direction}, \code{p_value} / \code{p_adjusted} and
+\code{pd} are therefore identical under either \code{scale}, and the response-scale
+interval is the \emph{exact} image of the link-scale one rather than a delta-method
+approximation -- inheriting its conditionality (fixed effects and variance
+components held at their point estimates), which is why no simulation step is
+needed. What does change is the size and the ranking: the same log-odds departure
+is worth more probability near \eqn{\pi = 0.5} than in the tail, so strata are
+ordered by the quantity actually reported.
+
+\strong{If quantity 3 is what you need}, no argument here will give it to you --
+fit a linear probability model instead: \code{fit_maihda(..., family = "gaussian")}
+on a 0/1 outcome, which \code{\link{fit_maihda}} signposts when it auto-detects a
+binary outcome. There the BLUP \emph{is} the risk-difference interaction by
+construction, at the usual costs (predictions outside \code{[0, 1]},
+heteroskedastic residuals).
+}
+
 \examples{
 \donttest{
 data(maihda_health_data)
@@ -130,6 +260,12 @@ a <- maihda(BMI ~ Age + Gender + Race + (1 | Gender:Race),
 maihda_interactions(a)                  # FDR-screened (default adjust = "BH")
 maihda_interactions(a, adjust = "none") # uncorrected per-stratum individual view
 maihda_interactions(a, rope = 0.1)      # equivalence: |interaction| within 0.1?
+
+# On a logistic fit the BLUP is a log-odds departure; scale = "response" reports
+# Evans et al.'s (2024) pi_j - pi^A_j, the same interaction in probability points.
+b <- maihda(Obese ~ Gender + Race + (1 | Gender:Race),
+            data = maihda_health_data, family = "binomial")
+maihda_interactions(b, scale = "response")
 }
 
 }
@@ -141,6 +277,11 @@ multiple social identities. \emph{Social Science & Medicine}, 203, 64-73.
 Merlo, J. (2018). Multilevel analysis of individual heterogeneity and
 discriminatory accuracy (MAIHDA) within an intersectional framework.
 \emph{Social Science & Medicine}, 203, 74-80.
+
+Evans, C. R., Leckie, G., Subramanian, S. V., Bell, A., & Merlo, J. (2024). A
+tutorial for conducting intersectional multilevel analysis of individual
+heterogeneity and discriminatory accuracy (MAIHDA).
+\emph{SSM - Population Health}, 26, 101664. \doi{10.1016/j.ssmph.2024.101664}
 
 Gelman, A., Hill, J., & Yajima, M. (2012). Why we (usually) don't have to worry
 about multiple comparisons. \emph{Journal of Research on Educational

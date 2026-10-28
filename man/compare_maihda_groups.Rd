@@ -20,6 +20,7 @@ compare_maihda_groups(
   context = NULL,
   sampling_weights = NULL,
   warn_linear = TRUE,
+  estimation = c("fitted", "ML"),
   ...
 )
 }
@@ -27,7 +28,12 @@ compare_maihda_groups(
 \item{formula}{A model formula. Either the shorthand intersectional form
 \code{outcome ~ covars + (1 | var1:var2)} (strata are built automatically)
 or \code{outcome ~ covars + (1 | stratum)} when \code{data} already contains
-a \code{stratum} column from \code{\link{make_strata}}.}
+a \code{stratum} column from \code{\link{make_strata}}.
+Any dimension main effect listed must be written as its bare column name: a
+transformed term such as \code{factor(edu)} is rejected, because only a bare
+name is recognised as a dimension's main effect and the transform would
+otherwise survive into the derived null model. Transform the column in
+\code{data} instead (\code{data$edu <- factor(data$edu)}).}
 
 \item{data}{A data frame containing the variables in \code{formula} and the
 grouping variable.}
@@ -74,8 +80,7 @@ binning of numeric grouping variables. Default TRUE.}
 
 \item{decomposition}{Per-group additive-vs-interaction decomposition: the two-model
 null -> adjusted PCV (\code{"two-model"}, default) or the single crossed-dimensions
-model (\code{"crossed-dimensions"}; \code{"cross-classified"} is a deprecated
-alias that warns). The crossed-dimensions form requires
+model (\code{"crossed-dimensions"}). The crossed-dimensions form requires
 \code{shared_strata = TRUE} and at least two stratum dimensions, and adds the
 \code{var_additive}, \code{var_interaction}, \code{additive_share} and
 \code{interaction_share} columns (in place of \code{pcv} /
@@ -115,31 +120,60 @@ effects, which silently changes the PCV/decomposition interpretation (see
 \code{\link{maihda}} delegates here, because it has already warned on the same
 data.}
 
+\item{estimation}{Variance-estimation basis for each group's per-group PCV,
+\code{"fitted"} (default) or \code{"ML"}; see \code{\link{calculate_pcv}}.
+Affects Gaussian \code{lmer} fits only. Recorded as an \code{"estimation"}
+attribute on the returned comparison; the basis actually used is recorded as
+\code{"estimation_used"} (\code{"mixed"} when a group's ML refit was skipped at
+the boundary, leaving it on REML). Both are shown by \code{print()}. An
+\code{"ml_variances"} attribute is \code{TRUE} when the groups' fits estimate their
+variances by maximum likelihood (\code{glmer}, wemix or ordinal fits, or
+\code{lmer} fits made with \code{REML = FALSE}) or the PCVs compare
+maximum-likelihood refits (\code{estimation = "ML"}); under the default
+\code{estimation} \code{print()} notes it below a table with PCVs, as
+\code{\link{calculate_pcv}} does.}
+
 \item{...}{Additional arguments passed to \code{\link{fit_maihda}} (and on to
-\code{lmer}/\code{glmer}).}
+\code{lmer}/\code{glmer}). \code{weights}, \code{subset} and \code{offset} are
+an error on the \code{wemix}, \code{brms} and \code{ordinal} engines.}
 }
 \value{
 A \code{data.frame} of class \code{maihda_group_comparison} with one
   row per group and columns \code{group}, \code{n}, \code{n_strata},
   \code{vpc}, \code{var_between}, \code{var_other}, \code{var_residual},
-  \code{status} (and \code{ci_lower}/\code{ci_upper} when
-  \code{bootstrap = TRUE}). When the strata are defined by at least two
+  \code{status} (and \code{ci_lower}/\code{ci_upper} whenever a group's
+  summary supplies an interval: an lme4 bootstrap CI with
+  \code{bootstrap = TRUE}, or a brms posterior credible interval, which is
+  returned without bootstrapping). When the strata are defined by at least two
   dimensions, two further columns report the per-group null -> adjusted
   decomposition: \code{pcv} (proportional change in between-stratum variance when
-  the dimensions' additive main effects are added; computed on the
-  maximum-likelihood scale -- see \code{\link{calculate_pcv}} -- because REML
-  variances are not comparable across the null vs. adjusted fixed effects),
+  the dimensions' additive main effects are added; computed on the variance basis
+  set by \code{estimation} -- see \code{\link{calculate_pcv}}),
   \code{var_between_adjusted} (a \emph{derived} coherence quantity, reported as
   \code{var_between * (1 - pcv)} so it shares the scale of the REML
   \code{var_between}/\code{vpc} and the table satisfies
   \code{pcv = (var_between - var_between_adjusted) / var_between} exactly -- it is
   \strong{not} the adjusted fit's own variance), and
   \code{var_between_adjusted_ml} (the adjusted model's \emph{actual}
-  between-stratum variance, read straight off the adjusted fit on the same
-  maximum-likelihood scale as the PCV; it differs from \code{var_between_adjusted}
-  only by the small REML-vs-ML gap in the null variance). All three are
-  \code{NA} for a group whose adjusted fit failed, and the columns are
-  omitted entirely when the strata have a single dimension. When \code{context}
+  between-stratum variance, read straight off the adjusted fit on the same basis as
+  the PCV; under the default \code{estimation = "fitted"} this is the REML variance,
+  coinciding with \code{var_between_adjusted}, and under \code{estimation = "ML"} it
+  is the ML variance, differing from \code{var_between_adjusted} only by the small
+  REML-vs-ML gap in the null variance; despite its name it is not always a
+  maximum-likelihood estimate; for a \code{brms} fit it is the posterior median of
+  the adjusted variance, which \code{var_between_adjusted} equals as well). All
+  three are
+  \code{NA} for a group whose adjusted fit failed. A fourth column,
+  \code{pcv_status}, records the decomposition outcome per group:
+  \code{"ok"} when the PCV was computed, \code{"failed"} when the adjusted model
+  or PCV errored (\code{pcv} is then \code{NA} and the group is named in a
+  warning -- the group's own \code{status} can still be \code{"ok"} because its
+  null VPC model succeeded), and \code{"singular"} when the adjusted fit was
+  singular and the PCV saturated near 100\% -- \emph{not} warned about, since a
+  singular adjusted fit is indistinguishable from genuinely additive strata (a
+  legitimate, common result), so it is flagged only in this column.
+  These four columns are omitted entirely when the strata have a single
+  dimension. When \code{context}
   is supplied, two further columns report each group's contextual partition:
   \code{var_context} (the between-context variance, summed over contexts) and
   \code{vpc_context} (the contexts' share of the group's unexplained variance);
@@ -151,7 +185,8 @@ A \code{data.frame} of class \code{maihda_group_comparison} with one
   frame cannot be built. \code{var_other} is the variance of any additional
   random effects and is 0 for the canonical single-stratum model. Groups that
   were skipped or failed have \code{NA} metrics and an explanatory
-  \code{status}.
+  \code{status}; for a failed fit it is \code{"fit failed: "} followed by the
+  first line of the error, whose whole message is in a warning.
 }
 \description{
 Fits a separate random-intercept MAIHDA model (intercept-only \emph{random}
@@ -166,8 +201,11 @@ share of that group's intersectional inequality.
 }
 \details{
 It estimates one VPC per group as a stratified analysis: each group is modelled
-independently. It is \emph{not} a cross-classified model and does not adjust the
-strata for the grouping variable.
+independently -- the grouping variable itself is not modelled as a crossed
+random effect, and the strata are not adjusted for it. (A \code{context}
+argument, if supplied, does add a crossed contextual random intercept
+\emph{within} each group's model, making each per-group fit contextual
+cross-classified; the groups themselves remain independently fitted.)
 
 The VPC is the \emph{share} of the unexplained variance that lies between strata,
 not the absolute magnitude of intersectional inequality. Because it is a ratio,
@@ -196,13 +234,21 @@ strata are rebuilt inside each group, so a degenerate single-stratum group is
 instead reported with a "fit failed" status rather than a pre-fit skip. A
 singular fit yields a VPC of 0 rather than an error (unlike
 \code{\link{calculate_pcv}}). A hard fit failure in one group records \code{NA}
-and a status note without aborting the whole comparison.
+and a status note without aborting the whole comparison; one warning names the
+groups whose fit failed and gives each distinct reason once.
 
-Fit-quality diagnostics: for the \code{lme4} engine, groups whose model is
-singular or fails to converge keep a \code{status} of \code{"ok"} (the fit did
-complete) but are named in a single aggregated warning, because their VPC/ICC
-may be unreliable -- a singular fit usually pins the between-stratum variance at
-the boundary, giving a VPC of 0.
+Fit-quality diagnostics: on every engine, one warning names the groups with a fit
+problem, and such a group keeps a \code{status} of \code{"ok"} (the fit did
+complete). A group is named for a singular fit when its between-stratum variance
+is estimated at zero, so that \code{var_between} and the VPC are 0. A zero in
+another variance component -- a context, a further random effect, the interaction
+or a dimension of the crossed-dimensions model -- leaves them as estimated and does
+not name the group. A group is also named when its model did not converge and, in
+a two-model decomposition, when its adjusted model did not. The warning says
+which: an adjusted model affects the group's PCV, not its VPC, and
+\code{pcv_status} does not record it. A \code{brms} model is named when its
+largest R-hat is above 1.01 or its sampler had a divergent transition, and is never
+reported as singular.
 }
 \examples{
 \donttest{

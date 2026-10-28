@@ -20,6 +20,15 @@ summary(m)
 plot(m, type = "vpc_trajectory")   # VPC(t), with the reference time marked
 plot(m, type = "trajectories")     # predicted per-stratum mean trajectories
 
+## ----traj-vpc-----------------------------------------------------------------
+s <- summary(m)
+c(intercept = s$longitudinal$vpc_intercept, slope = s$longitudinal$vpc_slope)
+
+## ----traj-vpc-ci, eval = FALSE------------------------------------------------
+# s_ci <- summary(m, bootstrap = TRUE, n_boot = 500)
+# s_ci$longitudinal$vpc_intercept_ci
+# s_ci$longitudinal$vpc_slope_ci
+
 ## ----decomp-------------------------------------------------------------------
 a <- maihda(wellbeing ~ wave + (1 | gender:ethnicity:education),
             data = maihda_long_data, id = "id", time = "wave",

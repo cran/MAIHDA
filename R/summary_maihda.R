@@ -20,6 +20,86 @@ add_stratum_labels <- function(stratum_estimates, strata_info) {
   return(stratum_estimates)
 }
 
+#' Fixed-effect table with Wald statistics
+#'
+#' Internal helper that assembles the \code{fixed_effects} slot of a
+#' \code{maihda_summary} for the frequentist engines: the Wald statistic
+#' (\code{estimate / se}), its two-sided p-value and the matching Wald interval
+#' at \code{conf_level}. With \code{df} the reference is a \eqn{t} on those
+#' degrees of freedom, otherwise the normal.
+#'
+#' @param term Character vector of coefficient names.
+#' @param estimate Numeric vector of point estimates.
+#' @param se Numeric vector of standard errors (\code{NULL} for none).
+#' @param conf_level Interval level.
+#' @param df Denominator degrees of freedom, named by \code{term} or in
+#'   \code{term} order; \code{NULL} (default) for the normal approximation.
+#' @return A data frame with \code{term}, \code{estimate}, \code{se},
+#'   \code{statistic}, \code{df}, \code{p_value}, \code{lower} and \code{upper}.
+#'   \code{df} is \code{NA} on the normal path.
+#' @keywords internal
+maihda_fixed_effects_table <- function(term, estimate, se, conf_level = 0.95,
+                                       df = NULL) {
+  term <- as.character(term)
+  estimate <- as.numeric(estimate)
+  se <- if (is.null(se)) rep(NA_real_, length(estimate)) else as.numeric(se)
+  # A zero/NA SE (boundary or non-positive-definite Hessian) leaves the Wald
+  # quantities undefined rather than infinite.
+  se[!is.na(se) & se <= 0] <- NA_real_
+  statistic <- estimate / se
+
+  # Degrees of freedom are matched by name where they carry one, so a df vector
+  # ordered differently from `term` (or missing a term) cannot silently shift.
+  if (is.null(df)) {
+    df <- rep(NA_real_, length(estimate))
+  } else {
+    df <- if (!is.null(names(df))) as.numeric(df)[match(term, names(df))]
+          else as.numeric(df)[seq_along(term)]
+    df[!is.na(df) & df <= 0] <- NA_real_
+  }
+
+  # A missing df falls back to the normal, which is the t's own limit, so the
+  # two paths stay consistent within one table. as.numeric() keeps the empty
+  # table numeric: ifelse() on a zero-length test returns logical(0).
+  safe_df <- ifelse(is.na(df), 1, df)
+  crit <- as.numeric(ifelse(is.na(df), stats::qnorm((1 + conf_level) / 2),
+                            stats::qt((1 + conf_level) / 2, df = safe_df)))
+  p_value <- as.numeric(ifelse(is.na(df), 2 * stats::pnorm(-abs(statistic)),
+                               2 * stats::pt(-abs(statistic), df = safe_df)))
+
+  data.frame(
+    term      = term,
+    estimate  = estimate,
+    se        = se,
+    statistic = statistic,
+    df        = as.numeric(df),
+    p_value   = p_value,
+    lower     = estimate - crit * se,
+    upper     = estimate + crit * se,
+    row.names = NULL,
+    stringsAsFactors = FALSE
+  )
+}
+
+#' Tag a summary with its role in a two-model analysis
+#'
+#' Internal helper. The null and adjusted summaries of a \code{\link{maihda}}
+#' analysis are indistinguishable once pulled out of the analysis object, which
+#' makes a printed summary easy to misread -- the null model's fixed effects are
+#' the intercept and covariates only, because the strata dimensions are its
+#' random-effect grouping rather than fixed effects. Stamping the role lets
+#' \code{\link{print.maihda_summary}} say which model it is showing.
+#'
+#' @param s A \code{maihda_summary}, or \code{NULL}.
+#' @param role \code{"null"} or \code{"adjusted"}.
+#' @return \code{s} with a \code{"maihda_role"} attribute (\code{NULL} in, \code{NULL} out).
+#' @keywords internal
+maihda_tag_role <- function(s, role) {
+  if (is.null(s)) return(NULL)
+  attr(s, "maihda_role") <- role
+  s
+}
+
 #' Summarize MAIHDA Model
 #'
 #' Provides a summary of a MAIHDA model including variance partition coefficients
@@ -39,14 +119,18 @@ add_stratum_labels <- function(stratum_estimates, strata_info) {
 #'   latent/distributional approximation (\eqn{\pi^2/3} for logistic;
 #'   \eqn{\log(1 + 1/\lambda)} for Poisson per Stryhn et al. 2006 and
 #'   \eqn{\log(1 + 1/\lambda + 1/\theta)} for the negative binomial per Nakagawa,
-#'   Johnson & Schielzeth 2017, each evaluated at the \emph{marginal} expected
-#'   count \eqn{\lambda_i = \exp(x_i'\beta + v_i/2)} -- the fixed-part prediction
-#'   with the log-normal correction for the row's total random-effect variance
-#'   \eqn{v_i}, which reduces to Nakagawa et al.'s
-#'   \eqn{\lambda = \exp(\beta_0 + \sigma^2/2)} in the null model -- and
-#'   averaged over the analytic sample, \emph{not} at the conditional fitted
-#'   means, whose BLUPs would tie the level-1 variance to the realized random
-#'   effects), so the
+#'   Johnson & Schielzeth 2017 -- their \code{"delta"} and \code{"trigamma"}
+#'   alternatives are available via \code{fit_maihda(count_approximation = )}, and
+#'   the choice is reported in the printed summary and in \code{count_vpc} because
+#'   the three diverge materially below a marginal count of 2 -- each evaluated at a single \emph{marginal}
+#'   expected count \eqn{\lambda}: the mean over the analytic sample of the
+#'   row-level \eqn{\lambda_i = \exp(x_i'\beta + v_i/2)} -- the fixed-part
+#'   prediction with the log-normal correction for the row's total random-effect
+#'   variance \eqn{v_i}. The counts are averaged \emph{before} the transform,
+#'   which is where the cited \eqn{\lambda} is defined and which reduces to
+#'   Nakagawa et al.'s \eqn{\lambda = \exp(\beta_0 + \sigma^2/2)} in the null
+#'   model; \emph{not} at the conditional fitted means, whose BLUPs would tie the
+#'   level-1 variance to the realized random effects), so the
 #'   VPC is on that latent scale; for a \emph{weighted} Gaussian model the level-1
 #'   variance is the mean conditional residual variance,
 #'   \eqn{\bar{\sigma^2 / w_i}}, since the per-observation residual variance is
@@ -55,28 +139,53 @@ add_stratum_labels <- function(stratum_estimates, strata_info) {
 #'   (interaction) component only when the additive main effects of the strata
 #'   variables are included in the model.
 #'
+#'   For a Poisson or negative-binomial model the VPC can also be computed on the
+#'   count scale itself, with no approximation of the level-1 variance (Leckie et
+#'   al., 2020): see \code{\link{maihda_vpc_response}}, or set
+#'   \code{response_vpc = TRUE}.
+#'
 #' @param object A maihda_model object from \code{fit_maihda()}.
 #' @param bootstrap Logical indicating whether to compute parametric bootstrap
 #'   confidence intervals for VPC/ICC. Default is FALSE. Supported for lme4
 #'   models only; \code{brms} models always return a posterior credible interval
 #'   (see Details), so \code{bootstrap = TRUE} is rejected for them.
-#'   For a negative-binomial model (\code{glmer.nb}) the bootstrap refits via
-#'   \code{lme4::refit()}, which holds the dispersion parameter theta fixed at
-#'   its original estimate, so the interval is conditional on the estimated
+#'   Each simulated response is refitted from the fitted model's estimates
+#'   (\code{lme4::refit()}); for a growth fit (\code{fit_maihda(id =, time =)}) it is
+#'   then refitted as \code{fit_maihda()} fits the model, from the further starting
+#'   values and, for a \code{glmer} fit, across a variance bound (see
+#'   \code{\link{fit_maihda}}, arguments \code{time} and \code{stratum_slope}), and
+#'   the best fit is kept, at two to five times the time of one refit.
+#'   For a negative-binomial model (\code{glmer.nb}) the bootstrap refits hold
+#'   the dispersion parameter theta fixed at its original estimate, as
+#'   \code{lme4::refit()} does, so the interval is conditional on the estimated
 #'   theta (theta's own sampling uncertainty is not propagated). The
 #'   \code{ordinal} (clmm) engine has no simulate/refit machinery, so
 #'   \code{bootstrap = TRUE} is rejected there (use \code{engine = "brms"} for
-#'   interval estimates).
+#'   interval estimates). For a Gaussian model carrying lme4 precision
+#'   \code{weights}, the simulated responses draw each residual at
+#'   \eqn{\sigma / \sqrt{w_i}}, so the interval rests on the same
+#'   \eqn{\sigma^2 / w_i} semantics as the point estimate above.
 #' @param n_boot Number of bootstrap samples if bootstrap = TRUE. Default is 1000.
 #' @param conf_level Confidence level for the VPC/ICC interval -- the lme4
 #'   bootstrap CI or the brms posterior credible interval. Default is 0.95.
 #' @param response_vpc Logical; for a binomial (lme4) model, also compute the
 #'   response-scale VPC (\code{\link{maihda_vpc_response}}) and attach it as the
 #'   \code{vpc_response} slot. It is estimated by simulation, so it is opt-in (default
-#'   \code{FALSE}) and uses \code{seed} for reproducibility. Ignored for other
-#'   families/engines.
+#'   \code{FALSE}) and uses \code{seed} for reproducibility. For a Poisson or
+#'   negative-binomial (lme4) model whose only random effect is the stratum
+#'   intercept, the same slot receives the count-scale VPC of Leckie et al. (2020),
+#'   a closed form that needs no seed. Ignored for other families, engines and
+#'   random-effect structures.
 #' @param seed Optional integer seed for the response-scale VPC simulation when
 #'   \code{response_vpc = TRUE}.
+#' @param df_method Reference distribution for the fixed-effect p-values and
+#'   intervals of an \code{lme4} fit: \code{"between-within"} (default) a
+#'   \eqn{t} on containment degrees of freedom for a Gaussian fit and a z
+#'   elsewhere, \code{"normal"} a z, \code{"bootstrap"} a null-restricted
+#'   parametric bootstrap costing \code{n_boot} refits \emph{per tested
+#'   fixed-effect coefficient}. \code{"bootstrap"} is the reference to use for a
+#'   GLMM term that is constant within a stratum, such as an adjusted model's
+#'   dimension main effects. Every other engine uses a z regardless.
 #' @param ... Additional arguments (not currently used).
 #'
 #' @return A maihda_summary object containing:
@@ -88,31 +197,76 @@ add_stratum_labels <- function(stratum_estimates, strata_info) {
 #'   \item{variance_components}{Data frame of variance components. For a
 #'     contextual cross-classified fit (\code{fit_maihda(context = )}) each
 #'     context appears as its own \code{Context: <name>} row}
+#'   \item{longitudinal}{For a longitudinal (growth-curve) fit, the time-varying
+#'     summary: \code{vpc_t} (the VPC over a reporting grid, with bootstrap or
+#'     posterior bands), the per-level variances over that grid, the stratum and
+#'     individual covariance blocks, and the two \emph{trajectory VPCs}
+#'     \code{vpc_intercept} and \code{vpc_slope} described below, each with an
+#'     interval in \code{vpc_intercept_ci} / \code{vpc_slope_ci} (a posterior
+#'     credible interval for brms, a bootstrap interval for a bootstrapped lme4
+#'     fit, \code{NA} otherwise) and the basis in
+#'     \code{trajectory_vpc_method}. \code{NULL} for a cross-sectional fit}
 #'   \item{context}{For a contextual cross-classified fit, the stratum vs.
 #'     context partition: per-context variances and shares, the contexts' total
 #'     share (\code{vpc_context_total}, with an interval when bootstrapped or for
-#'     brms), and the between-stratum share (\code{vpc_stratum}); \code{NULL}
-#'     otherwise}
+#'     brms), and the between-stratum share (\code{vpc_stratum}); for brms also
+#'     each context's number of levels in the fitted data (\code{context_levels}),
+#'     and \code{print()} names a context with fewer than 10, whose variance
+#'     depends on the prior on its standard deviation, and the realised partition
+#'     in \code{realised}: the same quantities for the effects of the strata and
+#'     context levels in the data (see the section Realised strata and contexts of
+#'     \code{\link{maihda}}); \code{NULL} otherwise}
 #'   \item{discriminatory_accuracy}{For a binomial/Bernoulli outcome, the
 #'     \code{maihda_da} object (AUC + MOR) from
-#'     \code{\link{maihda_discriminatory_accuracy}}; \code{NULL} otherwise. Also
-#'     \code{NULL} for a crossed-dimensions fit (whose single-stratum between-variance
-#'     the MOR needs is not defined across crossed random effects) and for a
-#'     contextual cross-classified fit (\code{fit_maihda(context = )}), where the AUC
-#'     would be built from predictions that include the context random effects -- a
-#'     mismatch with the stratum-vs-context partition the summary reports}
+#'     \code{\link{maihda_discriminatory_accuracy}}; \code{NULL} otherwise. A
+#'     contextual fit (\code{fit_maihda(context = )}) is included -- its headline AUC
+#'     is the intersectional-scope concordance that excludes the context random
+#'     effect. \code{NULL} for a crossed-dimensions fit (whose headline here is the
+#'     additive/interaction decomposition) and a longitudinal fit}
+#'   \item{count_vpc}{For a log-link count model, the \code{approximation} the
+#'     level-1 variance came from, the marginal count \code{lambda} (and
+#'     \code{theta} / \code{lambda_effective} for the negative binomial) it was
+#'     evaluated at, the \code{alternatives} all three approximations give at that
+#'     \code{lambda} (\code{level1_variance} is the one used), and
+#'     \code{low_count} -- \code{TRUE} below the \eqn{\lambda = 2} threshold above
+#'     which Nakagawa et al. (2017) report the three agree. These are plug-in
+#'     values at a single \code{lambda}: on the likelihood engines that is exactly
+#'     the number in \code{variance_components}, but a \code{brms} summary works
+#'     draw by draw and reports the posterior median of the level-1 variance there,
+#'     which differs slightly.
+#'     \code{NULL} for every other family.}
 #'   \item{vpc_response}{The response-scale VPC (\code{maihda_vpc_response}) when
-#'     \code{response_vpc = TRUE} for a single-stratum binomial lme4 model;
-#'     \code{NULL} otherwise (including for crossed-dimensions and contextual fits,
-#'     whose partition the stratum-only simulation does not match)}
+#'     \code{response_vpc = TRUE} for a binomial lme4 model, including a contextual
+#'     fit (the context variance enters the VPC denominator), and the count-scale
+#'     VPC for a Poisson or negative-binomial lme4 model whose only random effect
+#'     is the stratum intercept; \code{NULL} otherwise
+#'     (including for crossed-dimensions and longitudinal fits)}
 #'   \item{stratum_estimates}{Data frame of stratum-specific random effects with labels if available}
-#'   \item{fixed_effects}{Fixed effects estimates}
+#'   \item{fixed_effects}{Fixed-effect estimates. For the lme4, WeMix and ordinal
+#'     engines a data frame with \code{term}, \code{estimate}, \code{se},
+#'     \code{statistic}, \code{df}, \code{p_value} and the Wald interval
+#'     \code{lower}/\code{upper} at \code{conf_level}; \code{df} is \code{NA}
+#'     wherever the reference is a z. The WeMix standard errors are its sandwich
+#'     (robust) ones. For brms, the \code{brms::fixef()} matrix (posterior mean,
+#'     \code{Est.Error} and the credible-interval quantiles at
+#'     \code{conf_level}). Available in a tidy, engine-independent shape from
+#'     \code{tidy(x, component = "fixed")}}
+#'   \item{conf_level}{The interval level used for the fixed effects (and, when
+#'     bootstrapped or Bayesian, the VPC)}
+#'   \item{df_method}{The reference distribution the \code{fixed_effects} table
+#'     used, \code{"between-within"}, \code{"normal"} or \code{"bootstrap"}}
 #'   \item{thresholds}{For a cumulative (ordinal) clmm fit, the threshold (cut
 #'     point) estimates with standard errors -- the cumulative model's
 #'     "intercepts"; NULL otherwise}
 #'   \item{model_summary}{Original model summary}
 #'   \item{diagnostics}{Fit-quality diagnostics (singular fit / convergence)
 #'     carried over from the fitted model and reported by the print method}
+#'   \item{strata_autobin_info}{The auto-binning recipe carried over from the
+#'     fitted model: for each numeric stratum dimension \code{make_strata()}
+#'     discretised, its \code{breaks} and \code{labels}. The cut-points are
+#'     quantiles of the analytic sample, so they define the strata (and hence the
+#'     estimand); the print method reports them. An empty list when nothing was
+#'     binned}
 #'
 #' @note
 #' For \code{lme4} models a VPC/ICC interval is obtained from a parametric
@@ -121,15 +275,147 @@ add_stratum_labels <- function(stratum_estimates, strata_info) {
 #' posterior median of the per-draw VPC (\eqn{E[\sigma^2]}-based, not the biased
 #' \eqn{E[\sigma]^2}) and the interval is a central credible interval at
 #' \code{conf_level} (default 95\%), so no \code{bootstrap} argument is needed.
-#' The variance-components table reports the posterior-mean variance components,
-#' so the stratum proportion shown there may differ slightly from the headline
-#' VPC because the median of a ratio is not the ratio of means. For non-Gaussian
+#' The variance-components table of a cross-sectional \code{brms} fit reports the
+#' posterior median of each variance component -- the between-stratum row is the
+#' variance the PCV and the Median Odds Ratio use, and its \code{sd} the posterior
+#' median SD -- with the total and the proportions computed from those rows. The
+#' stratum proportion therefore equals the headline VPC when the level-1 variance
+#' is fixed by the link and the stratum is the only random effect, and differs
+#' from it slightly otherwise, because the median of a ratio is not the ratio of
+#' medians; in a crossed-dimensions fit, whose between-strata variance is the sum
+#' of several components, the share those rows add up to can differ markedly from
+#' the headline VPC when dimensions have few levels. With few strata the posterior
+#' of a variance is right-skewed, and its
+#' median overstates the variance (and with it the VPC and the Median Odds
+#' Ratio); the overstatement shrinks as strata are added. A longitudinal fit's
+#' table holds the posterior means of its covariance blocks. For non-Gaussian
 #' \code{brms} families the level-1 (residual) variance uses the usual
-#' latent-scale approximation; for the count families the marginal expected
-#' counts are built from the posterior-mean fixed effects and random-effect
-#' variances rather than per draw, to avoid an expensive
-#' \eqn{ndraws \times nobs} computation (the negative-binomial \code{shape}
-#' draws are still propagated).
+#' latent-scale approximation. For the count families (Poisson, negative
+#' binomial) the marginal expected counts are propagated \emph{per draw} -- from
+#' the fixed-part linear-predictor draws and each draw's total random-intercept
+#' variance -- for the intercept-only VPC structures (strata, crossed-dimensions,
+#' contextual), so the credible interval reflects fixed-effect and random-effect
+#' variance uncertainty; the negative-binomial \code{shape} draws are always
+#' propagated. A random-slope (longitudinal) structure, whose per-row
+#' random-effect design that fast path does not carry, instead holds the marginal
+#' expected counts at a posterior-mean plug-in (constant across draws) to avoid an
+#' expensive \eqn{ndraws \times nobs} computation.
+#'
+#' @section Fixed-effect reference distribution:
+#' A Gaussian \code{lme4} fit refers each Wald statistic to a \eqn{t} on
+#' \emph{containment} (between-within) degrees of freedom, reported in the
+#' \code{df} column: a term absorbed by a random-effect grouping is tested
+#' against that grouping's units minus the terms it absorbs, and a term absorbed
+#' by none against \eqn{n} minus the random-effect levels. A random slope counts
+#' as absorbing. Set \code{df_method = "normal"} for a z instead.
+#'
+#' A GLMM, a WeMix pseudo-ML fit and an \code{ordinal::clmm} fit have no
+#' finite-sample \eqn{t} and use the Wald z; a brms summary reports the
+#' posterior. For Kenward-Roger or Satterthwaite, apply \pkg{pbkrtest} or
+#' \pkg{lmerTest} to \code{x$model}.
+#'
+#' \code{df_method = "bootstrap"} replaces that reference for an \code{lme4} fit
+#' with at least one fixed-effect term, and is the one to use for a GLMM, whose z
+#' is anticonservative for a term constant within a stratum, most of all when the
+#' strata are few. For each fixed-effect coefficient the model is refitted with
+#' that coefficient \emph{constrained to zero}, \code{n_boot} responses are
+#' simulated from the restricted fit, the full model is refitted on each, and the
+#' observed Wald statistic is referred to the resulting distribution of
+#' \eqn{|t^*|}. The restricted fit of a growth model is made as \code{fit_maihda()}
+#' makes the model's own fit, with the same refits from further starting values
+#' (\code{\link{fit_maihda}}, arguments \code{time} and \code{stratum_slope}), and so
+#' is the full model's refit on each draw (see \code{bootstrap}). The
+#' estimate and standard error are unchanged. The p-value is
+#' \eqn{(1 + \#\{|t^*| \ge |t|\}) / (B + 1)}{(1 + #{|t*| >= |t|}) / (B + 1)}
+#' over the \eqn{B} refits that succeeded, and the interval is the estimate plus
+#' or minus a critical value read from the same draws, times the standard error,
+#' so zero falls outside it exactly when the p-value is at most
+#' \code{1 - conf_level}. That agreement is algebraic, not a coverage guarantee.
+#' \code{df} is \code{NA}, and so are the intercept's p-value and interval: an
+#' intercept has no null model to simulate from.
+#'
+#' The restriction is on the coefficient, not on its term. For a term spanning
+#' several design columns (a factor with three or more levels, a polynomial, an
+#' interaction between factors) each column is tested against its own null: that
+#' column zeroed, the siblings kept and re-estimated. What the constraint means
+#' follows the fitted contrasts: treatment coding merges that level into the
+#' reference, sum coding sets its deviation from the unweighted mean of the level
+#' means to zero.
+#'
+#' The bootstrap is an approximation, not an exact test. Its null is a fit
+#' estimated from the same data, so it is least reliable with few strata, where
+#' the stratum variance is often estimated at exactly zero; a p-value near the
+#' threshold from such a fit deserves little weight. \code{n_boot} sets the Monte
+#' Carlo resolution, not that approximation: the p-value lies on a grid of step
+#' \eqn{1 / (B + 1)}, and more draws only shrink its Monte Carlo error. No
+#' \code{n_boot} makes the test exact.
+#'
+#' It costs \code{n_boot} refits \emph{per tested coefficient} -- a \eqn{k}-level
+#' factor costs \eqn{k - 1} blocks -- and is separate from the
+#' \code{bootstrap = TRUE} VPC interval. A Gaussian refit takes milliseconds, a
+#' binomial one about a second at \eqn{n = 1000} and tens of seconds at
+#' \eqn{n = 6000}, so \code{n_boot = 199} is the usual choice for a GLMM.
+#' \code{summary()} warns when the draws are too few for the requested level; the
+#' check is level-aware: 99, 199 and 999 are the smallest counts that put ten
+#' draws beyond the cut-off at the 10\%, 5\% and 1\% levels.
+#'
+#' @section Two VPCs for a longitudinal fit:
+#' A longitudinal summary reports \strong{two different variance partitions}, and
+#' they are not interchangeable. They differ in one term of the denominator: the
+#' level-1 (occasion) residual variance \eqn{\sigma^2_e}, which in a growth model is
+#' \emph{within-individual volatility} -- how far a single measurement falls from
+#' that person's own smooth trajectory. It mixes measurement error, genuine
+#' short-term fluctuation, and any misfit of the assumed functional form. A
+#' cross-sectional MAIHDA cannot separate it from between-individual variance at
+#' all; repeated measures are what split the two.
+#'
+#' \strong{The headline VPC} (\code{vpc}, and \code{longitudinal$vpc_t} over time)
+#' keeps it:
+#' \deqn{VPC_S(t) = \frac{Var_S(t)}{Var_S(t) + Var_I(t) + \sigma^2_e}.}
+#' This is the discriminatory-accuracy question -- how much of an \emph{observed
+#' measurement} at time \eqn{t} a stratum accounts for -- and it is the quantity
+#' comparable to published cross-sectional MAIHDA VPCs. Report this one unless you
+#' specifically mean the trajectory question.
+#'
+#' \strong{The trajectory VPCs} (\code{longitudinal$vpc_intercept} and
+#' \code{longitudinal$vpc_slope}) drop it, following Bell et al. (2024), equation
+#' (5):
+#' \deqn{VPC_{intercept} = \frac{Var_S(t_0)}{Var_S(t_0) + Var_I(t_0)}, \qquad
+#'       VPC_{slope} = \frac{SlopeVar_S(t_0)}{SlopeVar_S(t_0) + SlopeVar_I(t_0)}.}
+#' These ask how intersectionally patterned people's \emph{trajectories} are i.e., what
+#' share of the between-individual variation in where a trajectory starts, and in how
+#' fast it changes, lies between strata. Because \eqn{\sigma^2_e} is absent neither is
+#' affected by how noisy the outcome measure is, which makes them comparable across
+#' studies using different instruments.
+#'
+#' Both are evaluated at the baseline \eqn{t_0} (\code{ref_time}, the earliest
+#' observed time), pairing with \code{PCV_intercept} and \code{PCV_slope} from
+#' \code{maihda(decomposition = "longitudinal")}. The intercept VPC depends on where
+#' time is zeroed and the slope VPC does not, so an intercept VPC computed at another
+#' reference time, such as the mean age of Bell et al.'s examples, differs from the
+#' one reported here. \code{vpc_slope} is \code{NA} when the model was fit with
+#' \code{stratum_slope = FALSE} (no between-stratum slope variance exists to take a
+#' share of).
+#'
+#' Both come with an interval in \code{vpc_intercept_ci} / \code{vpc_slope_ci},
+#' and \code{trajectory_vpc_method} records its basis. For a \code{brms} fit the
+#' two shares are computed \emph{per posterior draw} and reported as the posterior
+#' median with a credible interval, matching \code{vpc_t} and the headline VPC on
+#' the same fit; for an \code{lme4} fit the point estimates are the plug-in from
+#' the fitted covariance blocks and \code{summary(bootstrap = TRUE)} adds a
+#' parametric-bootstrap interval (\code{NA} without one). Report the interval:
+#' these shares are poorly determined when the strata are few.
+#'
+#' @references
+#' Bell, A., Evans, C., Holman, D., & Leckie, G. (2024). Extending intersectional
+#' multilevel analysis of individual heterogeneity and discriminatory accuracy
+#' (MAIHDA) to study individual longitudinal trajectories, with application to
+#' mental health in the UK. \emph{Social Science & Medicine}, 351, 116955.
+#' \doi{10.1016/j.socscimed.2024.116955}
+#'
+#' Leckie, G., Browne, W. J., Goldstein, H., Merlo, J., & Austin, P. C. (2020).
+#' Partitioning variation in multilevel models for count data.
+#' \emph{Psychological Methods}, 25(6), 787-801. \doi{10.1037/met0000265}
 #'
 #' @examples
 #' \donttest{
@@ -144,22 +430,48 @@ add_stratum_labels <- function(stratum_estimates, strata_info) {
 #' @export
 #' @importFrom lme4 VarCorr fixef ranef
 summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
-                          conf_level = 0.95, response_vpc = FALSE, seed = NULL, ...) {
+                          conf_level = 0.95, response_vpc = FALSE, seed = NULL,
+                          df_method = c("between-within", "normal", "bootstrap"),
+                          ...) {
   if (!inherits(object, "maihda_model")) {
     stop("'object' must be a maihda_model object from fit_maihda()")
+  }
+  df_method <- match.arg(df_method)
+  # The parametric bootstrap rests on lme4's simulate()/refit(), exactly as the
+  # VPC bootstrap does, so it is available on the lme4 engine alone. Checked
+  # before n_boot is validated: an engine that cannot bootstrap at all should not
+  # first be warned about how many replicates it asked for.
+  if (identical(df_method, "bootstrap") && !identical(object$engine, "lme4")) {
+    stop("df_method = \"bootstrap\" is only available for the lme4 engine: the ",
+         "parametric bootstrap relies on lme4's simulate()/refit(). This model was ",
+         "fitted with engine = \"", object$engine, "\".", call. = FALSE)
   }
 
   if (!is.logical(bootstrap) || length(bootstrap) != 1 || is.na(bootstrap)) {
     stop("'bootstrap' must be TRUE or FALSE.", call. = FALSE)
   }
-  if (bootstrap) {
-    bootstrap_args <- maihda_validate_bootstrap_args(n_boot, conf_level)
+  # Validated for every engine and both bootstrap settings: conf_level also sets
+  # the fixed-effect interval below, not just the bootstrap VPC interval.
+  conf_level <- maihda_validate_conf_level(conf_level)
+  # A fixed-effect bootstrap draws on n_boot and conf_level too, so validate them
+  # whenever EITHER bootstrap is requested -- not only when the VPC one is. The
+  # two form different intervals, and a replicate count that is ample for one can
+  # be thin for the other, so name the kinds actually being formed rather than
+  # letting the VPC's percentile rule speak for both.
+  if (bootstrap || identical(df_method, "bootstrap")) {
+    bootstrap_args <- maihda_validate_bootstrap_args(
+      n_boot, conf_level,
+      interval = c(if (bootstrap) "percentile",
+                   if (identical(df_method, "bootstrap")) "studentized"))
     n_boot <- bootstrap_args$n_boot
     conf_level <- bootstrap_args$conf_level
   }
 
   engine <- object$engine
   model <- object$model
+  # Set by the lme4 branch when it replaces the Wald reference wholesale; NULL
+  # everywhere else, where the reported method is read off the df column.
+  fe_method <- NULL
   # A crossed-dimensions model (tagged by maihda(decomposition =
   # "crossed-dimensions")) has several crossed REs: each dimension carries its
   # additive main-effect variance and the intersection ("stratum") RE the
@@ -207,7 +519,8 @@ summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
       var_random <- maihda_stratum_variance_lme4(model)
       var_total_random <- maihda_total_random_variance_lme4(model)
       var_other_random <- max(0, var_total_random - var_random)
-      var_residual <- maihda_residual_variance_lme4(model, vc)
+      var_residual <- maihda_residual_variance_lme4(
+        model, vc, approximation = maihda_count_approximation(object))
 
       # Calculate VPC (ICC)
       vpc <- var_random / (var_random + var_other_random + var_residual)
@@ -219,7 +532,9 @@ summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
 
       # Bootstrap confidence intervals for VPC if requested
       if (bootstrap) {
-        vpc_ci <- bootstrap_vpc(model, object$data, object$formula, n_boot, conf_level)
+        vpc_ci <- bootstrap_vpc(model, object$data, object$formula, n_boot,
+                                conf_level,
+                                approximation = maihda_count_approximation(object))
         vpc_result <- list(
           estimate = vpc,
           ci_lower = vpc_ci[1],
@@ -228,6 +543,8 @@ summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
           bootstrap = TRUE,
           method = "bootstrap",
           n_boot_ok = attr(vpc_ci, "n_ok"),
+          n_boot_nonconverged = attr(vpc_ci, "n_nonconverged"),
+          interval_reliable = attr(vpc_ci, "interval_reliable"),
           mc_se = attr(vpc_ci, "mc_se")
         )
       } else {
@@ -238,22 +555,57 @@ summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
       }
     }
 
-    # Extract fixed effects
-    fixed_effects <- data.frame(
-      term = names(lme4::fixef(model)),
-      estimate = lme4::fixef(model),
-      row.names = NULL
-    )
+    # Get model summary
+    model_summary <- summary(model)
+
+    # Fixed effects with their standard errors, Wald statistics and intervals,
+    # read off the model summary's coefficient matrix (Estimate / Std. Error --
+    # identical to lme4::fixef() plus sqrt(diag(vcov()))). lme4 reports no
+    # p-value for a Gaussian fit by design; the one added here is the Wald p that
+    # matches the interval (see maihda_fixed_effects_table). A Gaussian fit gets
+    # containment (between-within) denominator degrees of freedom, so a dimension
+    # main effect is tested against the number of strata rather than n; a GLMM has
+    # no finite-sample t reference and stays on the normal.
+    # df_method = "bootstrap" replaces the whole Wald reference with the
+    # parametric-bootstrap one (maihda_bootstrap_fixef): the estimate and the
+    # model's own standard error are unchanged, the p-value and the interval come
+    # from the bootstrap distribution of the studentized statistic. It is the only
+    # option that repairs a GLMM's few-stratum standard error rather than only its
+    # reference distribution.
+    if (identical(df_method, "bootstrap")) {
+      fixed_effects <- maihda_bootstrap_fixef(model, n_boot, conf_level, longitudinal = lng)
+      fe_method <- "bootstrap"
+    } else {
+      fe_coef <- stats::coef(model_summary)
+      fe_df <- if (df_method == "between-within") maihda_containment_df(model) else NULL
+      fixed_effects <- maihda_fixed_effects_table(
+        term = rownames(fe_coef),
+        estimate = fe_coef[, "Estimate"],
+        se = fe_coef[, "Std. Error"],
+        conf_level = conf_level,
+        df = fe_df
+      )
+      fe_method <- NULL
+    }
+    # A growth fit on internally scaled time reports its time coefficients per unit of
+    # the user's time (maihda_lng_unscale_fixed(); a no-op for an unscaled fit).
+    if (!is.null(lng)) {
+      fixed_effects <- maihda_lng_unscale_fixed(fixed_effects, object)
+    }
 
     # Stratum (intersection) random-effect estimates -- the interaction residuals in
     # the cross-classified model (the named interaction group), or the single stratum
     # RE otherwise.
     interaction_group <- if (!is.null(cc)) cc$interaction_group else "stratum"
-    stratum_estimates <- maihda_stratum_ranef_lme4(model, group = interaction_group)
+    # A longitudinal growth block carries time slopes by design; its intercept
+    # column (the deviation at the model's coefficient origin) is reported here
+    # while the full trajectory lives in the `longitudinal` slot, so it opts out
+    # of the extractor's intercept-only guard. Every other path reaching this
+    # line is already slope-free (the ordinary branch validated the whole model
+    # above; the crossed builder rejects slope terms).
+    stratum_estimates <- maihda_stratum_ranef_lme4(model, group = interaction_group,
+                                                   allow_slope_columns = !is.null(lng))
     stratum_estimates <- add_stratum_labels(stratum_estimates, object$strata_info)
-
-    # Get model summary
-    model_summary <- summary(model)
 
   } else if (engine == "wemix") {
     if (bootstrap) {
@@ -280,20 +632,23 @@ summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
     )
     vpc_result <- list(estimate = vpc, bootstrap = FALSE)
 
-    # WeMix fixed-effect standard errors are design-consistent (sandwich), the
-    # main payoff of the design-weighted fit -- include them alongside the
-    # estimates (the lme4 table reports estimates only).
-    fixed_effects <- data.frame(
+    # WeMix reports sandwich (robust) fixed-effect standard errors -- include them
+    # alongside the estimates (the lme4 table reports estimates only). They cover
+    # the weighting and within-stratum dependence, NOT the clustering or
+    # stratification of a complex sample design, which this wrapper has no way to
+    # represent from a single person-weight column (see fit_maihda's
+    # `sampling_weights`); do not describe them as design-consistent.
+    fixed_effects <- maihda_fixed_effects_table(
       term = names(object$model$coef),
       estimate = as.numeric(object$model$coef),
       se = as.numeric(object$model$SE[names(object$model$coef)]),
-      row.names = NULL
+      conf_level = conf_level
     )
 
     stratum_estimates <- maihda_wemix_stratum_ranef(object)
     stratum_estimates <- add_stratum_labels(stratum_estimates, object$strata_info)
 
-    model_summary <- tryCatch(summary(model), error = function(e) NULL)
+    model_summary <- tryCatch(maihda_wemix_summary(model), error = function(e) NULL)
 
   } else if (engine == "ordinal") {
     if (bootstrap) {
@@ -323,19 +678,19 @@ summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
     # cumulative model's "intercepts") are reported separately below.
     beta <- object$model$beta
     if (is.null(beta) || length(beta) == 0) {
-      fixed_effects <- data.frame(term = character(0), estimate = numeric(0),
-                                  se = numeric(0))
+      fixed_effects <- maihda_fixed_effects_table(character(0), numeric(0),
+                                                  numeric(0), conf_level)
     } else {
       V <- tryCatch(stats::vcov(object$model), error = function(e) NULL)
       beta_se <- rep(NA_real_, length(beta))
       if (!is.null(V) && all(names(beta) %in% rownames(V))) {
         beta_se <- sqrt(pmax(diag(V)[names(beta)], 0))
       }
-      fixed_effects <- data.frame(
+      fixed_effects <- maihda_fixed_effects_table(
         term = names(beta),
         estimate = as.numeric(beta),
         se = as.numeric(beta_se),
-        row.names = NULL
+        conf_level = conf_level
       )
     }
 
@@ -378,11 +733,13 @@ summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
       vpc_result <- ctx_res$vpc_result
       context_summary <- ctx_res$context
     } else {
-      # Summarise the VPC/ICC from posterior draws (E[sd^2], with a credible
+      # Summarise the VPC/ICC from posterior draws (per-draw sd^2, with a credible
       # interval) rather than from the posterior summary SDs (E[sd]^2, no interval).
-      vpc_draws <- maihda_vpc_draws_brms(model, conf_level = conf_level)
+      vpc_draws <- maihda_vpc_draws_brms(
+        model, conf_level = conf_level,
+        approximation = maihda_count_approximation(object))
 
-      # Components table reports the posterior-mean variance of each component.
+      # Components table reports the posterior-median variance of each component.
       variance_components <- maihda_variance_components_table(
         vpc_draws$var_stratum, vpc_draws$var_other_random, vpc_draws$var_residual
       )
@@ -397,11 +754,20 @@ summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
       )
     }
 
-    # Extract fixed effects
-    fixed_effects <- brms::fixef(model)
+    # Extract fixed effects. Kept in brms::fixef()'s matrix form (Estimate /
+    # Est.Error / two quantile columns); the quantiles are taken at conf_level,
+    # so the interval matches the rest of this summary. A posterior summary has
+    # no test statistic or p-value -- tidy() reports those as NA for brms.
+    fixed_effects <- brms::fixef(
+      model,
+      probs = c((1 - conf_level) / 2, 1 - (1 - conf_level) / 2)
+    )
 
     interaction_group <- if (!is.null(cc)) cc$interaction_group else "stratum"
-    stratum_estimates <- maihda_stratum_ranef_brms(model, group = interaction_group)
+    # Longitudinal opt-out as in the lme4 branch above: the growth block's time
+    # slopes are reported via the `longitudinal` slot, not this table.
+    stratum_estimates <- maihda_stratum_ranef_brms(model, group = interaction_group,
+                                                   allow_slope_columns = !is.null(lng))
     stratum_estimates <- add_stratum_labels(stratum_estimates, object$strata_info)
 
     model_summary <- summary(model)
@@ -411,36 +777,59 @@ summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
   # discriminatory accuracy (AUC + MOR) -- the "DA" in MAIHDA -- always, and the
   # response-scale VPC on request (it is a simulation, hence opt-in and seeded).
   # Both summarise the single fitted model with no refit, mirroring how the
-  # cross-classified additive/interaction `decomposition` slot above is computed in
-  # this same summary layer so that fit_maihda() and maihda() share the logic.
-  # Skipped for a cross-classified fit (its MOR / response-VPC need a single-stratum
-  # between-variance that is not defined across crossed random effects) and for a
-  # contextual cross-classified fit (fit_maihda(context = )): there the AUC is built
-  # from full predictions that INCLUDE the context random effects while the
-  # response-scale VPC simulates only the stratum variance, so neither matches the
-  # stratum-vs-context partition this summary reports -- attaching them would pin a
-  # mismatched estimand to the contextual partition. Also skipped for a longitudinal
-  # fit, whose VPC is time-varying. Wrapped so a bonus summary never breaks the core
-  # VPC.
+  # crossed-dimensions additive/interaction `decomposition` slot above is computed
+  # in this same summary layer so that fit_maihda() and maihda() share the logic.
+  #
+  # A CONTEXTUAL fit (fit_maihda(context = )) is INCLUDED: the DA's headline AUC is
+  # the intersectional-scope concordance that EXCLUDES the context random effect
+  # (auc_full carries the all-effects value separately), and maihda_vpc_response()
+  # integrates the context variance into the VPC denominator -- so both sit on the
+  # same stratum-vs-context estimand this summary reports, not the mismatched one
+  # the earlier skip guarded against. Skipped only for a crossed-dimensions fit --
+  # whose headline here is the additive/interaction decomposition above, the DA /
+  # response-VPC companions remaining available from the standalone helpers -- and a
+  # longitudinal fit, whose VPC is time-varying. Wrapped so a bonus summary never
+  # breaks the core VPC.
   discriminatory_accuracy <- NULL
   vpc_response <- NULL
   fam_name <- tryCatch(maihda_model_family_name(object),
                        error = function(e) NA_character_)
-  if (is.null(cc) && is.null(ctx) && is.null(lng) &&
+  if (is.null(cc) && is.null(lng) &&
       isTRUE(fam_name %in% c("binomial", "bernoulli"))) {
-    discriminatory_accuracy <- tryCatch(
-      maihda_discriminatory_accuracy(object), error = function(e) NULL)
+    discriminatory_accuracy <- maihda_try_optional(
+      maihda_discriminatory_accuracy(object),
+      "Discriminatory accuracy (AUC/MOR)")
     if (isTRUE(response_vpc) && identical(engine, "lme4") &&
         identical(fam_name, "binomial")) {
-      vpc_response <- tryCatch(
-        maihda_vpc_response(object, seed = seed), error = function(e) NULL)
+      vpc_response <- maihda_try_optional(
+        maihda_vpc_response(object, seed = seed), "Response-scale VPC")
     }
   }
+  # The count-scale counterpart, on the same request. It is a closed form, so it
+  # takes no seed. Attached only where maihda_vpc_response() covers the fit (a
+  # Poisson or negative-binomial lme4 fit whose one random effect is the stratum
+  # intercept), so a structure it does not cover is skipped as any other family or
+  # engine is, rather than reported as a calculation that failed.
+  if (isTRUE(response_vpc) &&
+      isTRUE(tryCatch(is.null(maihda_count_vpc_refusal(object)),
+                      error = function(e) FALSE))) {
+    vpc_response <- maihda_try_optional(
+      maihda_vpc_response(object), "Count-scale VPC")
+  }
+
+  # Which count level-1 approximation the VPC used, and the marginal lambda it was
+  # evaluated at -- Nakagawa et al. (2017) ask that the choice be reported because
+  # the three approximations diverge materially at low counts, and this is the only
+  # place the user sees it. NULL for every non-count family. Wrapped like the other
+  # optional summaries so a failure here never breaks the VPC.
+  count_vpc <- maihda_try_optional(maihda_count_vpc_note(object),
+                                   "Count VPC approximation note")
 
   # Create summary object
   result <- structure(
     list(
       vpc = vpc_result,
+      count_vpc = count_vpc,
       variance_components = variance_components,
       decomposition = decomposition,
       context = context_summary,
@@ -449,18 +838,64 @@ summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
       vpc_response = vpc_response,
       stratum_estimates = stratum_estimates,
       fixed_effects = fixed_effects,
+      conf_level = conf_level,
+      # Which reference distribution the fixed-effect table used. Only the
+      # Gaussian lme4 path can honour "between-within"; every other engine
+      # reports "normal" whatever was asked for, so the print method and any
+      # downstream reader can say what was actually done.
+      df_method = if (!is.null(fe_method)) fe_method
+                  else if (is.data.frame(fixed_effects) &&
+                           "df" %in% names(fixed_effects) &&
+                           any(!is.na(fixed_effects$df))) "between-within" else "normal",
       thresholds = thresholds,
       model_summary = model_summary,
       engine = engine,
       cc_info = cc,
       context_info = ctx,
       longitudinal_info = lng,
-      diagnostics = object$diagnostics
+      diagnostics = object$diagnostics,
+      strata_autobin_info = object$strata_autobin_info
     ),
     class = "maihda_summary"
   )
 
   return(result)
+}
+
+# WeMix's own summary of a fit, for the model_summary slot, without the warning it
+# raises over a correlation matrix it then does not use.
+#
+# summary.WeMixResults() takes the correlations among a level's random effects with
+# stats::cov2cor(), which warns when a diagonal entry of its matrix is missing or not
+# positive. For a binomial fit that matrix holds the sampling variance of the variance
+# estimate, which WeMix leaves at NA when the estimate is below exp(-3.6), about 0.027.
+# The wemix engine fits one random intercept, so there is no correlation to report and
+# WeMix discards what cov2cor() returned. That warning is dropped; any other one
+# passes, and the object returned is the one WeMix built.
+maihda_wemix_summary <- function(model) {
+  withCallingHandlers(
+    summary(model),
+    warning = function(w) {
+      if (maihda_wemix_cov2cor_warning(w)) {
+        invokeRestart("muffleWarning")
+      }
+    })
+}
+
+# TRUE when the warning `w` was raised by a call to cov2cor(), written bare or with a
+# namespace. The call is read, not the text: R translates the text.
+maihda_wemix_cov2cor_warning <- function(w) {
+  cl <- conditionCall(w)
+  if (!is.call(cl)) {
+    return(FALSE)
+  }
+  fn <- cl[[1L]]
+  # `stats::cov2cor(...)` as well as a bare `cov2cor(...)`.
+  if (is.call(fn) && length(fn) == 3L &&
+      (identical(fn[[1L]], as.name("::")) || identical(fn[[1L]], as.name(":::")))) {
+    fn <- fn[[3L]]
+  }
+  identical(fn, as.name("cov2cor"))
 }
 
 #' Crossed-dimensions variance summary (lme4)
@@ -485,7 +920,8 @@ summary.maihda_model <- function(object, bootstrap = FALSE, n_boot = 1000,
 maihda_cc_summary_lme4 <- function(object, cc, vc, bootstrap, n_boot, conf_level) {
   model <- object$model
   var_named <- maihda_random_variances_lme4(model)
-  var_within <- maihda_residual_variance_lme4(model, vc)
+  var_within <- maihda_residual_variance_lme4(
+    model, vc, approximation = maihda_count_approximation(object))
   split <- maihda_cc_variance_split(var_named, cc$dim_groups, cc$interaction_group)
   ctx_vars <- if (!is.null(object$context_info)) {
     object$context_info$context_vars
@@ -528,7 +964,8 @@ maihda_cc_summary_lme4 <- function(object, cc, vc, bootstrap, n_boot, conf_level
   }
 
   if (bootstrap) {
-    boot <- bootstrap_cc(model, cc, n_boot, conf_level, ctx_vars = ctx_vars)
+    boot <- bootstrap_cc(model, cc, n_boot, conf_level, ctx_vars = ctx_vars,
+                         approximation = maihda_count_approximation(object))
     vpc_result <- list(
       estimate = part$vpc,
       ci_lower = boot$vpc[1],
@@ -537,6 +974,8 @@ maihda_cc_summary_lme4 <- function(object, cc, vc, bootstrap, n_boot, conf_level
       bootstrap = TRUE,
       method = "bootstrap",
       n_boot_ok = attr(boot$vpc, "n_ok"),
+      n_boot_nonconverged = attr(boot$vpc, "n_nonconverged"),
+      interval_reliable = attr(boot$vpc, "interval_reliable"),
       mc_se = attr(boot$vpc, "mc_se")
     )
     decomposition$bootstrap <- TRUE
@@ -565,12 +1004,18 @@ maihda_cc_summary_lme4 <- function(object, cc, vc, bootstrap, n_boot, conf_level
 #' credible intervals for the VPC and the shares (no bootstrap -- the posterior already
 #' supplies the interval). A contextual random intercept
 #' (\code{object$context_info} set) enters the per-draw VPC denominator and is
-#' reported as its own component row and \code{context} element.
+#' reported as its own component row and \code{context} element. Each variance
+#' component is the posterior median of its draws, and the additive, between-strata
+#' and context totals are sums of those components. When the draws hold the level
+#' effects, \code{decomposition$realised} carries the realised strata and
+#' \code{context$realised} the realised partition (see the sections Realised strata
+#' and Realised strata and contexts of \code{\link{maihda}}).
 #'
 #' @param object A \code{maihda_model} (crossed-dimensions, brms engine).
 #' @param cc The \code{cc_info} list.
 #' @param conf_level Credible-interval level.
-#' @param point Posterior point estimate, "median" (default) or "mean".
+#' @param point Posterior point estimate of the VPC and the shares, "median"
+#'   (default) or "mean".
 #' @return A list with \code{variance_components}, \code{vpc_result},
 #'   \code{decomposition} and \code{context} (NULL without a context).
 #' @keywords internal
@@ -579,7 +1024,8 @@ maihda_cc_summary_brms <- function(object, cc, conf_level, point = c("median", "
   model <- object$model
   draws <- maihda_posterior_draws_brms(model)
   gv <- maihda_group_variance_draws_brms(draws)
-  within_draws <- maihda_residual_variance_draws_brms(model, draws)
+  within_draws <- maihda_residual_variance_draws_brms(
+    model, draws, approximation = maihda_count_approximation(object))
 
   dim_re <- unname(cc$dim_groups)
   ctx_vars <- if (!is.null(object$context_info)) {
@@ -613,18 +1059,48 @@ maihda_cc_summary_brms <- function(object, cc, conf_level, point = c("median", "
   add_s <- summ(part$additive_share)
   int_s <- summ(part$interaction_share)
 
-  per_dim_mean <- vapply(dim_re, function(g) mean(gv[[g]]), numeric(1))
-  names(per_dim_mean) <- names(cc$dim_groups)
-  interaction_mean <- mean(interaction_draws)
-  within_mean <- mean(within_draws)
-  per_context_mean <- if (length(ctx_vars) > 0) {
-    vapply(ctx_vars, function(g) mean(gv[[g]]), numeric(1))
+  # Each variance component is the posterior median of its own draws -- the summary
+  # every variance of a cross-sectional brms fit uses (maihda_stratum_variance_brms())
+  # -- and the additive, between-strata and context totals are sums of those rows, so
+  # the table and the decomposition add up. The VPC and the shares are summarised per
+  # draw above; a sum of medians is not the median of the per-draw sum, so the table's
+  # proportions need not equal them.
+  per_dim_var <- vapply(dim_re, function(g) stats::median(gv[[g]]), numeric(1))
+  names(per_dim_var) <- names(cc$dim_groups)
+  interaction_var <- stats::median(interaction_draws)
+  within_var <- stats::median(within_draws)
+  per_context_var <- if (length(ctx_vars) > 0) {
+    vapply(ctx_vars, function(g) stats::median(gv[[g]]), numeric(1))
   } else {
     NULL
   }
+  additive_var <- sum(per_dim_var)
+  between_var <- additive_var + interaction_var
+  # A dimension's variance is estimated from its levels alone, so the decomposition
+  # carries how many each has; print() names the dimensions with few of them.
+  dim_levels <- maihda_cc_dim_levels(object$data, cc$dim_groups)
+  # The variances of the effects of the strata, levels and contexts in the data, which
+  # the data identify however few levels a dimension or context has (see
+  # maihda_cc_realised_brms()). The contexts' realised variance enters the realised VPC.
+  effects <- maihda_try_optional(maihda_cc_realised_effects(object, cc, draws),
+                                 "The realised-strata summary")
+  ctx_realised <- if (!is.null(effects) && length(ctx_vars) > 0) {
+    maihda_try_optional(maihda_realised_group_vars_brms(object, ctx_vars),
+                        "The realised contextual partition")
+  }
+  realised <- if (!is.null(effects)) {
+    maihda_try_optional(
+      maihda_cc_realised_brms(object, cc, draws, within_draws, conf_level, point = point,
+                              context = length(ctx_vars) > 0,
+                              context_draws = if (!is.null(ctx_realised)) {
+                                Reduce(`+`, ctx_realised)
+                              },
+                              effects = effects),
+      "The realised-strata summary")
+  }
 
-  variance_components <- maihda_cc_components_table(per_dim_mean, interaction_mean,
-                                                   within_mean, per_context_mean)
+  variance_components <- maihda_cc_components_table(per_dim_var, interaction_var,
+                                                   within_var, per_context_var)
 
   vpc_result <- list(
     estimate = vpc_s$estimate,
@@ -636,29 +1112,34 @@ maihda_cc_summary_brms <- function(object, cc, conf_level, point = c("median", "
   )
 
   decomposition <- list(
-    additive_var = mean(additive_draws),
-    interaction_var = interaction_mean,
-    between_var = mean(part$between),
-    within_var = within_mean,
+    additive_var = additive_var,
+    interaction_var = interaction_var,
+    between_var = between_var,
+    within_var = within_var,
     additive_share = add_s$estimate,
     interaction_share = int_s$estimate,
     additive_share_ci = c(add_s$ci_lower, add_s$ci_upper),
     interaction_share_ci = c(int_s$ci_lower, int_s$ci_upper),
-    per_dim = per_dim_mean,
+    per_dim = per_dim_var,
+    dim_levels = dim_levels,
     bootstrap = FALSE,
     method = "posterior",
     conf_level = conf_level
   )
+  if (!is.null(realised)) {
+    decomposition <- append(decomposition, list(realised = realised),
+                            after = match("dim_levels", names(decomposition)))
+  }
 
   context_summary <- NULL
   if (length(ctx_vars) > 0) {
     ctx_total_s <- summ(part$other / part$total)
     context_summary <- list(
       context_vars = ctx_vars,
-      var_stratum = mean(part$between),
-      per_context = per_context_mean,
-      context_var_total = mean(context_total_draws),
-      within_var = within_mean,
+      var_stratum = between_var,
+      per_context = per_context_var,
+      context_var_total = sum(per_context_var),
+      within_var = within_var,
       other_var = 0,
       vpc_stratum = vpc_s$estimate,
       vpc_context = vapply(ctx_vars, function(g) summ(gv[[g]] / part$total)$estimate,
@@ -667,12 +1148,409 @@ maihda_cc_summary_brms <- function(object, cc, conf_level, point = c("median", "
       vpc_context_total_ci = c(ctx_total_s$ci_lower, ctx_total_s$ci_upper),
       bootstrap = FALSE,
       method = "posterior",
-      conf_level = conf_level
+      conf_level = conf_level,
+      context_levels = maihda_context_levels(object$data, ctx_vars)
     )
+    # The realised partition: the strata's realised variance is the realised-strata
+    # block's, so its share is that block's VPC.
+    if (!is.null(ctx_realised)) {
+      ctx_part <- maihda_try_optional(
+        maihda_context_realised_from_draws(
+          maihda_fp_var_draws(effects$Z), ctx_realised,
+          within = if (maihda_realised_within_ok(object)) within_draws,
+          conf_level = conf_level, point = point, n_strata = ncol(effects$Z)),
+        "The realised contextual partition")
+      if (!is.null(ctx_part)) {
+        context_summary$realised <- ctx_part
+      }
+    }
   }
 
   list(variance_components = variance_components, vpc_result = vpc_result,
        decomposition = decomposition, context = context_summary)
+}
+
+# The realised-strata summary of a brms crossed-dimensions fit. Each posterior draw
+# gives an effect for every stratum in the fitted data -- the sum of its dimensions'
+# level effects and its own (interaction) effect -- and for every level of every
+# dimension. The summary is of the finite-population variances of these effects
+# (Gelman 2005, eq. 8). They describe the strata and levels that exist, which the data
+# pin down however few levels a dimension has; the variance components describe the
+# distributions those were drawn from, and with few levels they follow the prior on
+# the standard deviations.
+#
+# The VPC is given where the within-stratum variance of a draw does not depend on the
+# variance components -- a Gaussian identity fit, and a binomial, Bernoulli or
+# cumulative fit on its latent scale (maihda_realised_within_ok()). With a context, the
+# contexts' realised variance per draw (context_draws) enters its denominator, and
+# without it no VPC is given. The median odds ratio is given for a logit link. NULL
+# when the draws hold no level effects (a fit stored without them). `effects` takes
+# what maihda_cc_realised_effects() returns, so that it is built once.
+maihda_cc_realised_brms <- function(object, cc, draws, within_draws, conf_level,
+                                    point = "median", context = FALSE,
+                                    context_draws = NULL, effects = NULL) {
+  eff <- if (is.null(effects)) maihda_cc_realised_effects(object, cc, draws) else effects
+  if (is.null(eff)) {
+    return(NULL)
+  }
+  fam <- maihda_model_family_name(object)
+  link <- maihda_model_link_name(object)
+  latent <- isTRUE(fam %in% c("binomial", "bernoulli", "cumulative"))
+  give_vpc <- (!context || !is.null(context_draws)) && maihda_realised_within_ok(object)
+  maihda_cc_realised_from_draws(eff$Z, eff$U, eff$dims,
+                                within = if (give_vpc) within_draws else NULL,
+                                mor = latent && identical(link, "logit"),
+                                conf_level = conf_level, point = point,
+                                other = if (give_vpc) context_draws)
+}
+
+# The effects, per posterior draw, of the strata of a brms crossed-dimensions fit: Z,
+# a draws x strata matrix with one column per stratum of the fitted data (its own
+# effect plus the effect of its level on each dimension), U, each dimension's level
+# effects, and dims, each stratum's levels. NULL when the draws hold no level effects.
+maihda_cc_realised_effects <- function(object, cc, draws) {
+  if (!any(startsWith(names(draws), "r_"))) {
+    return(NULL)
+  }
+  dim_re <- unname(cc$dim_groups)
+  dim_names <- names(cc$dim_groups)
+  if (is.null(dim_names)) {
+    dim_names <- dim_re
+  }
+  igroup <- cc$interaction_group
+  lev <- maihda_level_draws_brms(object$model, c(dim_re, igroup))
+  cells <- maihda_cc_realised_cells(object$data, dim_re, igroup)
+
+  # One column per stratum: its own effect plus the effect of its level on each
+  # dimension.
+  V <- lev[[igroup]]
+  j <- match(cells[[igroup]], colnames(V))
+  if (anyNA(j)) {
+    stop("A stratum of the fitted data has no effect in the brms posterior.",
+         call. = FALSE)
+  }
+  Z <- V[, j, drop = FALSE]
+  U <- list()
+  for (k in seq_along(dim_re)) {
+    Uk <- lev[[dim_re[k]]]
+    i <- match(cells[[dim_re[k]]], colnames(Uk))
+    if (anyNA(i)) {
+      stop("A level of '", dim_names[k], "' in the fitted data has no effect in the ",
+           "brms posterior.", call. = FALSE)
+    }
+    Z <- Z + Uk[, i, drop = FALSE]
+    U[[dim_names[k]]] <- Uk
+  }
+  colnames(Z) <- cells[[igroup]]
+  dims <- cells[, dim_re, drop = FALSE]
+  names(dims) <- dim_names
+  list(Z = Z, U = U, dims = dims)
+}
+
+# Whether a brms fit's within-stratum variance per draw stands apart from its variance
+# components, so that realised variances can be set beside it: a Gaussian identity fit
+# (its residual variance) and a binomial, Bernoulli or cumulative fit on the latent
+# scale of a logit, probit or cloglog link (a constant of the link). A Poisson or
+# negative-binomial fit's is computed from the variance components.
+maihda_realised_within_ok <- function(object) {
+  fam <- maihda_model_family_name(object)
+  link <- maihda_model_link_name(object)
+  latent <- isTRUE(fam %in% c("binomial", "bernoulli", "cumulative"))
+  (identical(fam, "gaussian") && identical(link, "identity")) ||
+    (latent && isTRUE(link %in% c("logit", "probit", "cloglog")))
+}
+
+# The realised-strata quantities from posterior draws, a pure function so that the
+# arithmetic can be checked without a fit.
+#   Z       draws x strata matrix of the stratum effects
+#   U       named list of draws x levels matrices, each dimension's level effects
+#   cells   data frame with one row per column of Z: each stratum's dimension levels
+#   within  the within-stratum variance per draw (length 1 or nrow(Z)); NULL: no VPC
+#   mor     whether to give the median odds ratio between two strata
+#   other   a further variance per draw in the VPC's denominator (the contexts'
+#           realised variance), or NULL
+# Per draw, with J strata: the between-strata variance is
+# sum_j (z_j - mean)^2 / (J - 1), half the mean squared difference between two
+# distinct strata. The interaction variance is the residual sum of squares of the
+# least-squares fit of the z_j on an intercept and the dimensions' indicators, over
+# the strata present, divided by its degrees of freedom (J minus the rank of that
+# fit), so strata missing from the grid need no rule of their own. The additive
+# share is 1 - interaction / between, a mean-square split like a PCV computed from
+# REML variances: near zero, and possibly below it, when the dimensions add nothing.
+# A dimension's variance is that of its level effects (divisor levels - 1).
+# Each is summarised by the posterior median (or mean) and the equal-tailed interval
+# at conf_level; NULL with fewer than two strata.
+maihda_cc_realised_from_draws <- function(Z, U, cells, within = NULL, mor = FALSE,
+                                          conf_level = 0.95, point = "median",
+                                          other = NULL) {
+  Z <- as.matrix(Z)
+  J <- ncol(Z)
+  if (J < 2L) {
+    return(NULL)
+  }
+  between <- rowSums((Z - rowMeans(Z))^2) / (J - 1)
+  q <- qr(maihda_cc_additive_design(cells))
+  df_int <- J - q$rank
+  interaction <- if (df_int > 0) {
+    colSums(qr.resid(q, t(Z))^2) / df_int
+  } else {
+    rep(NA_real_, nrow(Z))
+  }
+  share_int <- ifelse(between > 0, interaction / between, NA_real_)
+
+  summ <- function(v) {
+    v <- v[is.finite(v)]
+    if (length(v) == 0) {
+      return(c(NA_real_, NA_real_, NA_real_))
+    }
+    a <- 1 - conf_level
+    c(if (point == "median") stats::median(v) else mean(v),
+      stats::quantile(v, probs = c(a / 2, 1 - a / 2), names = FALSE))
+  }
+  out <- list()
+  s <- summ(between)
+  out$between_var <- s[1]
+  out$between_var_ci <- s[2:3]
+  if (!is.null(within)) {
+    s <- summ(if (is.null(other)) {
+      between / (between + within)
+    } else {
+      between / (between + other + within)
+    })
+    out$vpc <- s[1]
+    out$vpc_ci <- s[2:3]
+  }
+  s <- summ(1 - share_int)
+  out$additive_share <- s[1]
+  out$additive_share_ci <- s[2:3]
+  s <- summ(share_int)
+  out$interaction_share <- s[1]
+  out$interaction_share_ci <- s[2:3]
+  s <- summ(interaction)
+  out$interaction_var <- s[1]
+  out$interaction_var_ci <- s[2:3]
+  per_dim <- lapply(U, function(u) {
+    u <- as.matrix(u)
+    if (ncol(u) < 2L) {
+      return(c(NA_real_, NA_real_, NA_real_))
+    }
+    summ(rowSums((u - rowMeans(u))^2) / (ncol(u) - 1))
+  })
+  out$per_dim <- vapply(per_dim, `[`, numeric(1), 1L)
+  out$per_dim_ci <- matrix(as.numeric(unlist(lapply(per_dim, `[`, 2:3))), ncol = 2L,
+                           byrow = TRUE, dimnames = list(names(U), c("lower", "upper")))
+  if (isTRUE(mor)) {
+    rows <- maihda_mor_draw_rows(nrow(Z), J)
+    s <- summ(exp(maihda_pair_median_draws(Z[rows, , drop = FALSE])))
+    out$mor <- s[1]
+    out$mor_ci <- s[2:3]
+  }
+  out$n_strata <- J
+  out$df_interaction <- df_int
+  out$conf_level <- conf_level
+  out$method <- "posterior"
+  out
+}
+
+# Design of the additive fit over the strata: an intercept and the treatment
+# indicators of each dimension that has two or more levels among them.
+maihda_cc_additive_design <- function(cells) {
+  X <- matrix(1, nrow(cells), 1L)
+  for (k in seq_along(cells)) {
+    f <- factor(as.character(cells[[k]]))
+    if (nlevels(f) > 1L) {
+      X <- cbind(X, stats::model.matrix(~ f)[, -1L, drop = FALSE])
+    }
+  }
+  X
+}
+
+# One row per stratum of the fitted data: the stratum (its level of the interaction
+# grouping factor) and its level on each dimension, all as character.
+maihda_cc_realised_cells <- function(data, dim_re, igroup) {
+  cols <- c(dim_re, igroup)
+  if (is.null(data) || !all(cols %in% names(data))) {
+    stop("The fitted data do not hold the stratum and dimension columns.",
+         call. = FALSE)
+  }
+  d <- data[stats::complete.cases(data[, cols, drop = FALSE]), cols, drop = FALSE]
+  d[] <- lapply(d, as.character)
+  d <- unique(d)
+  if (anyDuplicated(d[[igroup]])) {
+    stop("A stratum of the fitted data has more than one level on a dimension.",
+         call. = FALSE)
+  }
+  rownames(d) <- NULL
+  d
+}
+
+# Posterior draws of the intercept effects of the named grouping factors of a brms
+# fit, as a named list of draws x levels matrices whose column names are the levels.
+maihda_level_draws_brms <- function(model, groups) {
+  maihda_level_draws_from_ranef(brms::ranef(model, summary = FALSE, groups = groups),
+                                groups)
+}
+
+# The same from what brms::ranef(summary = FALSE) returns: a list, by grouping factor, of
+# draws x levels x coefficients arrays named by their levels and coefficients.
+maihda_level_draws_from_ranef <- function(re, groups) {
+  out <- lapply(groups, function(g) {
+    arr <- re[[g]]
+    if (is.null(arr)) {
+      stop("No '", g, "' random effects in the brms posterior.", call. = FALSE)
+    }
+    k <- match("Intercept", dimnames(arr)[[3L]])
+    if (is.na(k)) {
+      stop("The '", g, "' random effect has no intercept draws.", call. = FALSE)
+    }
+    matrix(arr[, , k], nrow = dim(arr)[1L], dimnames = list(NULL, dimnames(arr)[[2L]]))
+  })
+  names(out) <- groups
+  out
+}
+
+# Per row of a draws x levels matrix, the variance of the levels' effects with the
+# number of levels minus one as divisor; NA when there are fewer than two levels.
+maihda_fp_var_draws <- function(M) {
+  M <- as.matrix(M)
+  if (ncol(M) < 2L) {
+    return(rep(NA_real_, nrow(M)))
+  }
+  rowSums((M - rowMeans(M))^2) / (ncol(M) - 1)
+}
+
+# The levels of a grouping column in the fitted data, as text, missing values left out.
+maihda_levels_in_data <- function(data, group) {
+  x <- data[[group]]
+  if (is.null(x)) {
+    stop("The fitted data do not hold the '", group, "' column.", call. = FALSE)
+  }
+  unique(as.character(x[!is.na(x)]))
+}
+
+# The realised variance of each named grouping factor of a brms fit, per posterior
+# draw: the variance of the effects of its levels in the fitted data (Gelman 2005,
+# eq. 8, with only their mean removed), divisor the number of those levels minus one.
+# A named list of per-draw vectors.
+maihda_realised_group_vars_brms <- function(object, groups) {
+  lev <- maihda_level_draws_brms(object$model, groups)
+  out <- lapply(groups, function(g) {
+    present <- maihda_levels_in_data(object$data, g)
+    U <- lev[[g]]
+    i <- match(present, colnames(U))
+    if (anyNA(i)) {
+      stop("A level of '", g, "' in the fitted data has no effect in the brms ",
+           "posterior.", call. = FALSE)
+    }
+    maihda_fp_var_draws(U[, i, drop = FALSE])
+  })
+  names(out) <- groups
+  out
+}
+
+# The realised contextual partition of a brms fit with a stratum random intercept
+# (fit_maihda(context = ), the two-model decomposition): the realised variances of the
+# strata, of each context and of any other grouping factor, and their shares where the
+# within-stratum variance stands apart from the variance components
+# (maihda_realised_within_ok()).
+maihda_context_realised_brms <- function(object, ctx_vars, other_groups, within_draws,
+                                         conf_level, point = "median") {
+  v <- maihda_realised_group_vars_brms(object, c("stratum", ctx_vars, other_groups))
+  maihda_context_realised_from_draws(
+    v[["stratum"]], v[ctx_vars],
+    other = if (length(other_groups) > 0) Reduce(`+`, v[other_groups]),
+    within = if (maihda_realised_within_ok(object)) within_draws,
+    conf_level = conf_level, point = point,
+    n_strata = length(maihda_levels_in_data(object$data, "stratum")))
+}
+
+# The realised contextual partition from per-draw variances, a pure function so that
+# the arithmetic can be checked without a fit.
+#   strata    the strata's realised variance per draw
+#   contexts  named list, one per context, of its realised variance per draw
+#   other     the other grouping factors' realised variance per draw, or NULL
+#   within    the within-stratum variance per draw, or NULL: no shares
+# Per draw the total is the sum of these, and each share is a part over the total.
+# Each is summarised by the posterior median (or mean) and the equal-tailed interval
+# at conf_level; a context's interval is a row of a contexts x (lower, upper) matrix.
+maihda_context_realised_from_draws <- function(strata, contexts, other = NULL,
+                                               within = NULL, conf_level = 0.95,
+                                               point = "median",
+                                               n_strata = NA_integer_) {
+  summ <- function(v) {
+    v <- v[is.finite(v)]
+    if (length(v) == 0) {
+      return(c(NA_real_, NA_real_, NA_real_))
+    }
+    a <- 1 - conf_level
+    c(if (point == "median") stats::median(v) else mean(v),
+      stats::quantile(v, probs = c(a / 2, 1 - a / 2), names = FALSE))
+  }
+  by_context <- function(f) {
+    s <- lapply(contexts, function(v) summ(f(v)))
+    list(est = vapply(s, `[`, numeric(1), 1L),
+         ci = matrix(as.numeric(unlist(lapply(s, `[`, 2:3))), ncol = 2L, byrow = TRUE,
+                     dimnames = list(names(contexts), c("lower", "upper"))))
+  }
+  ctx_total <- Reduce(`+`, contexts)
+  out <- list()
+  s <- summ(strata)
+  out$var_stratum <- s[1]
+  out$var_stratum_ci <- s[2:3]
+  pc <- by_context(identity)
+  out$per_context <- pc$est
+  out$per_context_ci <- pc$ci
+  s <- summ(ctx_total)
+  out$context_var_total <- s[1]
+  out$context_var_total_ci <- s[2:3]
+  if (!is.null(other)) {
+    s <- summ(other)
+    out$other_var <- s[1]
+    out$other_var_ci <- s[2:3]
+  }
+  if (!is.null(within)) {
+    total <- if (is.null(other)) {
+      strata + ctx_total + within
+    } else {
+      strata + ctx_total + other + within
+    }
+    s <- summ(strata / total)
+    out$vpc_stratum <- s[1]
+    out$vpc_stratum_ci <- s[2:3]
+    pc <- by_context(function(v) v / total)
+    out$vpc_context <- pc$est
+    out$vpc_context_ci <- pc$ci
+    s <- summ(ctx_total / total)
+    out$vpc_context_total <- s[1]
+    out$vpc_context_total_ci <- s[2:3]
+  }
+  out$n_strata <- as.integer(n_strata)
+  out$conf_level <- conf_level
+  out$method <- "posterior"
+  out
+}
+
+# The draws the median odds ratio is computed from: all of them while the pairs of
+# strata times the draws stay under 2e7, otherwise an evenly spaced subset of at
+# least 1000.
+maihda_mor_draw_rows <- function(n_draws, n_strata) {
+  n_pairs <- n_strata * (n_strata - 1) / 2
+  n_use <- min(n_draws, max(1000, floor(2e7 / n_pairs)))
+  unique(as.integer(round(seq(1, n_draws, length.out = n_use))))
+}
+
+# Per row of Z, the median of |Z[, j] - Z[, k]| over the distinct pairs of columns,
+# taken in blocks of rows holding at most `max_cells` differences at a time.
+maihda_pair_median_draws <- function(Z, max_cells = 1e6) {
+  ij <- which(upper.tri(diag(ncol(Z))), arr.ind = TRUE)
+  per_block <- max(1L, floor(max_cells / nrow(ij)))
+  out <- numeric(nrow(Z))
+  for (s in seq(1L, nrow(Z), by = per_block)) {
+    r <- s:min(nrow(Z), s + per_block - 1L)
+    D <- abs(Z[r, ij[, 1L], drop = FALSE] - Z[r, ij[, 2L], drop = FALSE])
+    out[r] <- apply(D, 1L, stats::median)
+  }
+  out
 }
 
 #' Bootstrap a crossed-dimensions MAIHDA partition (lme4)
@@ -689,23 +1567,31 @@ maihda_cc_summary_brms <- function(object, cc, conf_level, point = c("median", "
 #' @param n_boot Number of bootstrap samples.
 #' @param conf_level Confidence level.
 #' @param ctx_vars Character vector of contextual grouping factors (may be empty).
+#' @param approximation The count level-1 variance approximation of the
+#'   fitted model (\code{maihda_count_approximation()}); inert for every
+#'   non-count family.
 #' @return A list with \code{vpc}, \code{additive_share}, \code{interaction_share}
 #'   (and \code{context_vpc} when \code{ctx_vars} is non-empty), each a length-2
 #'   interval carrying \code{n_ok}/\code{mc_se} attributes.
 #' @keywords internal
 #' @importFrom lme4 refit
-bootstrap_cc <- function(model, cc, n_boot, conf_level, ctx_vars = character(0)) {
+bootstrap_cc <- function(model, cc, n_boot, conf_level, ctx_vars = character(0),
+                         approximation = "lognormal") {
   vpc_boot <- rep(NA_real_, n_boot)
   additive_boot <- rep(NA_real_, n_boot)
   interaction_boot <- rep(NA_real_, n_boot)
   context_boot <- rep(NA_real_, n_boot)
-  sim_data <- stats::simulate(model, nsim = n_boot)
+  # Count contributing draws whose refit optimiser did not converge, so the reported
+  # n_boot_ok does not silently imply convergence (see bootstrap_vpc()).
+  n_nonconv <- 0L
+  sim_data <- maihda_simulate_lme4(model, nsim = n_boot)
 
   for (i in seq_len(n_boot)) {
     tryCatch({
-      boot_model <- lme4::refit(model, newresp = sim_data[[i]])
+      boot_model <- maihda_refit_draw(model, sim_data[[i]])
       var_named <- maihda_random_variances_lme4(boot_model)
-      var_within <- maihda_residual_variance_lme4(boot_model)
+      var_within <- maihda_residual_variance_lme4(boot_model,
+                                                  approximation = approximation)
       split <- maihda_cc_variance_split(var_named, cc$dim_groups, cc$interaction_group)
       var_context <- if (length(ctx_vars) > 0) sum(var_named[ctx_vars]) else 0
       part <- maihda_cc_partition(split$additive, split$interaction, var_within,
@@ -714,8 +1600,14 @@ bootstrap_cc <- function(model, cc, n_boot, conf_level, ctx_vars = character(0))
       additive_boot[i] <- part$additive_share
       interaction_boot[i] <- part$interaction_share
       context_boot[i] <- var_context / part$total
+      if (maihda_lme4_optimizer_failed(boot_model)) n_nonconv <- n_nonconv + 1L
     }, error = function(e) NULL)
   }
+
+  # Non-converged draws are retained but reported, and above a documented share the
+  # interval is flagged unreliable (see maihda_report_nonconvergence()).
+  reliable <- maihda_report_nonconvergence(
+    n_nonconv, sum(is.finite(vpc_boot)), "crossed-dimensions decomposition")
 
   out <- list(
     vpc = maihda_bootstrap_ci(vpc_boot, n_boot, conf_level, "VPC"),
@@ -728,6 +1620,8 @@ bootstrap_cc <- function(model, cc, n_boot, conf_level, ctx_vars = character(0))
     out$context_vpc <- maihda_bootstrap_ci(context_boot, n_boot, conf_level,
                                            "context VPC")
   }
+  attr(out$vpc, "n_nonconverged") <- n_nonconv
+  attr(out$vpc, "interval_reliable") <- reliable
   out
 }
 
@@ -753,7 +1647,8 @@ maihda_context_summary_lme4 <- function(object, ctx, vc, bootstrap, n_boot,
                                         conf_level) {
   model <- object$model
   var_named <- maihda_random_variances_lme4(model)
-  var_within <- maihda_residual_variance_lme4(model, vc)
+  var_within <- maihda_residual_variance_lme4(
+    model, vc, approximation = maihda_count_approximation(object))
   ctx_vars <- ctx$context_vars
   missing_re <- setdiff(c("stratum", ctx_vars), names(var_named))
   if (length(missing_re) > 0) {
@@ -787,7 +1682,8 @@ maihda_context_summary_lme4 <- function(object, ctx, vc, bootstrap, n_boot,
   )
 
   if (bootstrap) {
-    boot <- bootstrap_context(model, ctx_vars, n_boot, conf_level)
+    boot <- bootstrap_context(model, ctx_vars, n_boot, conf_level,
+                              approximation = maihda_count_approximation(object))
     vpc_result <- list(
       estimate = part$vpc_stratum,
       ci_lower = boot$vpc[1],
@@ -796,6 +1692,8 @@ maihda_context_summary_lme4 <- function(object, ctx, vc, bootstrap, n_boot,
       bootstrap = TRUE,
       method = "bootstrap",
       n_boot_ok = attr(boot$vpc, "n_ok"),
+      n_boot_nonconverged = attr(boot$vpc, "n_nonconverged"),
+      interval_reliable = attr(boot$vpc, "interval_reliable"),
       mc_se = attr(boot$vpc, "mc_se")
     )
     context_summary$bootstrap <- TRUE
@@ -815,12 +1713,17 @@ maihda_context_summary_lme4 <- function(object, ctx, vc, bootstrap, n_boot,
 #' brms counterpart of \code{\link{maihda_context_summary_lme4}}: computes the
 #' stratum / context / residual partition per posterior draw and returns posterior
 #' point estimates with credible intervals for the between-stratum VPC and the
-#' contexts' total share (no bootstrap -- the posterior supplies the interval).
+#' contexts' total share (no bootstrap -- the posterior supplies the interval). Each
+#' variance component is the posterior median of its draws, and the contexts' total
+#' variance is the sum of the context components. When the draws hold the level
+#' effects, \code{context$realised} carries the realised partition (see the section
+#' Realised strata and contexts of \code{\link{maihda}}).
 #'
 #' @param object A \code{maihda_model} with \code{context_info} (brms engine).
 #' @param ctx The \code{context_info} list.
 #' @param conf_level Credible-interval level.
-#' @param point Posterior point estimate, "median" (default) or "mean".
+#' @param point Posterior point estimate of the shares, "median" (default) or
+#'   "mean".
 #' @return A list with \code{variance_components}, \code{vpc_result}, \code{context}.
 #' @keywords internal
 maihda_context_summary_brms <- function(object, ctx, conf_level,
@@ -829,7 +1732,8 @@ maihda_context_summary_brms <- function(object, ctx, conf_level,
   model <- object$model
   draws <- maihda_posterior_draws_brms(model)
   gv <- maihda_group_variance_draws_brms(draws)
-  within_draws <- maihda_residual_variance_draws_brms(model, draws)
+  within_draws <- maihda_residual_variance_draws_brms(
+    model, draws, approximation = maihda_count_approximation(object))
 
   ctx_vars <- ctx$context_vars
   missing_re <- setdiff(c("stratum", ctx_vars), names(gv))
@@ -858,14 +1762,21 @@ maihda_context_summary_brms <- function(object, ctx, conf_level,
   vpc_s <- summ(part$vpc_stratum)
   ctx_total_s <- summ(part$vpc_context_total)
 
-  per_context_mean <- vapply(ctx_vars, function(g) mean(gv[[g]]), numeric(1))
-  other_mean <- if (is.numeric(other_draws) && length(other_draws) > 1) {
-    mean(other_draws)
+  # Each variance component is the posterior median of its own draws -- the summary
+  # every variance of a cross-sectional brms fit uses (maihda_stratum_variance_brms()),
+  # so var_stratum is the variance a PCV of this fit compares -- and the contexts' total
+  # is the sum of the context rows, so the table adds up. The shares are summarised
+  # per draw above.
+  var_stratum <- stats::median(stratum_draws)
+  per_context_var <- vapply(ctx_vars, function(g) stats::median(gv[[g]]), numeric(1))
+  other_var <- if (is.numeric(other_draws) && length(other_draws) > 1) {
+    stats::median(other_draws)
   } else {
     other_draws
   }
+  within_var <- stats::median(within_draws)
   variance_components <- maihda_context_components_table(
-    mean(stratum_draws), per_context_mean, other_mean, mean(within_draws)
+    var_stratum, per_context_var, other_var, within_var
   )
 
   vpc_result <- list(
@@ -879,11 +1790,11 @@ maihda_context_summary_brms <- function(object, ctx, conf_level,
 
   context_summary <- list(
     context_vars = ctx_vars,
-    var_stratum = mean(stratum_draws),
-    per_context = per_context_mean,
-    context_var_total = mean(part$context_total),
-    within_var = mean(within_draws),
-    other_var = other_mean,
+    var_stratum = var_stratum,
+    per_context = per_context_var,
+    context_var_total = sum(per_context_var),
+    within_var = within_var,
+    other_var = other_var,
     vpc_stratum = vpc_s$estimate,
     vpc_context = vapply(ctx_vars, function(g) summ(gv[[g]] / part$total)$estimate,
                          numeric(1)),
@@ -891,8 +1802,21 @@ maihda_context_summary_brms <- function(object, ctx, conf_level,
     vpc_context_total_ci = c(ctx_total_s$ci_lower, ctx_total_s$ci_upper),
     bootstrap = FALSE,
     method = "posterior",
-    conf_level = conf_level
+    conf_level = conf_level,
+    context_levels = maihda_context_levels(object$data, ctx_vars)
   )
+  # The realised partition: the variances of the effects of the strata and context
+  # levels in the data, which the data identify however few levels a context has (see
+  # maihda_context_realised_from_draws()).
+  if (any(startsWith(names(draws), "r_"))) {
+    realised <- maihda_try_optional(
+      maihda_context_realised_brms(object, ctx_vars, other_groups, within_draws,
+                                   conf_level, point = point),
+      "The realised contextual partition")
+    if (!is.null(realised)) {
+      context_summary$realised <- realised
+    }
+  }
 
   list(variance_components = variance_components, vpc_result = vpc_result,
        context = context_summary)
@@ -910,21 +1834,29 @@ maihda_context_summary_brms <- function(object, ctx, conf_level,
 #' @param ctx_vars Character vector of context grouping factors.
 #' @param n_boot Number of bootstrap samples.
 #' @param conf_level Confidence level.
+#' @param approximation The count level-1 variance approximation of the
+#'   fitted model (\code{maihda_count_approximation()}); inert for every
+#'   non-count family.
 #' @return A list with \code{vpc} (between-stratum share) and \code{context_vpc}
 #'   (contexts' total share), each a length-2 interval carrying
 #'   \code{n_ok}/\code{mc_se} attributes.
 #' @keywords internal
 #' @importFrom lme4 refit
-bootstrap_context <- function(model, ctx_vars, n_boot, conf_level) {
+bootstrap_context <- function(model, ctx_vars, n_boot, conf_level,
+                              approximation = "lognormal") {
   vpc_boot <- rep(NA_real_, n_boot)
   context_boot <- rep(NA_real_, n_boot)
-  sim_data <- stats::simulate(model, nsim = n_boot)
+  # Count contributing draws whose refit optimiser did not converge, so the reported
+  # n_boot_ok does not silently imply convergence (see bootstrap_vpc()).
+  n_nonconv <- 0L
+  sim_data <- maihda_simulate_lme4(model, nsim = n_boot)
 
   for (i in seq_len(n_boot)) {
     tryCatch({
-      boot_model <- lme4::refit(model, newresp = sim_data[[i]])
+      boot_model <- maihda_refit_draw(model, sim_data[[i]])
       var_named <- maihda_random_variances_lme4(boot_model)
-      var_within <- maihda_residual_variance_lme4(boot_model)
+      var_within <- maihda_residual_variance_lme4(boot_model,
+                                                  approximation = approximation)
       var_stratum <- unname(var_named[["stratum"]])
       per_context <- var_named[ctx_vars]
       var_other <- max(0, sum(var_named, na.rm = TRUE) - var_stratum -
@@ -933,14 +1865,23 @@ bootstrap_context <- function(model, ctx_vars, n_boot, conf_level) {
                                        var_within, var_other)
       vpc_boot[i] <- part$vpc_stratum
       context_boot[i] <- part$vpc_context_total
+      if (maihda_lme4_optimizer_failed(boot_model)) n_nonconv <- n_nonconv + 1L
     }, error = function(e) NULL)
   }
 
-  list(
+  # Non-converged draws are retained but reported, and above a documented share the
+  # interval is flagged unreliable (see maihda_report_nonconvergence()).
+  reliable <- maihda_report_nonconvergence(
+    n_nonconv, sum(is.finite(vpc_boot)), "contextual decomposition")
+
+  out <- list(
     vpc = maihda_bootstrap_ci(vpc_boot, n_boot, conf_level, "VPC"),
     context_vpc = maihda_bootstrap_ci(context_boot, n_boot, conf_level,
                                       "context VPC")
   )
+  attr(out$vpc, "n_nonconverged") <- n_nonconv
+  attr(out$vpc, "interval_reliable") <- reliable
+  out
 }
 
 #' Bootstrap VPC/ICC
@@ -952,37 +1893,700 @@ bootstrap_context <- function(model, ctx_vars, n_boot, conf_level) {
 #' @param formula The model formula
 #' @param n_boot Number of bootstrap samples
 #' @param conf_level Confidence level
+#' @param approximation The count level-1 variance approximation of the fitted
+#'   model (\code{maihda_count_approximation()}); inert for every non-count family.
 #'
 #' @return A vector with lower and upper confidence bounds
 #' @keywords internal
 #' @importFrom lme4 lmer glmer VarCorr
-bootstrap_vpc <- function(model, data, formula, n_boot, conf_level) {
-  # Initialise to NA so iterations whose refit() throws — and never reach the
-  # assignment inside the tryCatch body — stay NA rather than the numeric() default of 0.
+bootstrap_vpc <- function(model, data, formula, n_boot, conf_level,
+                          approximation = "lognormal") {
+  # Initialise to NA so iterations whose refit() throws -- and never reach the
+  # assignment inside the tryCatch body -- stay NA rather than the numeric() default of 0.
   # The error handler runs in its own scope and cannot write back to this vector,
   # so the initial value is what survives a failure.
   vpc_boot <- rep(NA_real_, n_boot)
-  sim_data <- stats::simulate(model, nsim = n_boot)
+  # Count draws that contribute to the interval but whose refit optimiser did not
+  # converge, so the reported n_boot_ok does not silently imply convergence.
+  n_nonconv <- 0L
+  sim_data <- maihda_simulate_lme4(model, nsim = n_boot)
 
   for (i in 1:n_boot) {
     tryCatch({
-      boot_model <- lme4::refit(model, newresp = sim_data[[i]])
+      boot_model <- maihda_refit_draw(model, sim_data[[i]])
 
       # Calculate VPC
       vc <- lme4::VarCorr(boot_model)
       var_random <- maihda_stratum_variance_lme4(boot_model)
       var_total_random <- maihda_total_random_variance_lme4(boot_model)
       var_other_random <- max(0, var_total_random - var_random)
-      var_residual <- maihda_residual_variance_lme4(boot_model, vc)
+      var_residual <- maihda_residual_variance_lme4(
+        boot_model, vc, approximation = approximation)
 
       vpc_boot[i] <- var_random / (var_random + var_other_random + var_residual)
+      if (maihda_lme4_optimizer_failed(boot_model)) {
+        n_nonconv <- n_nonconv + 1L
+      }
     }, error = function(e) NULL)
   }
 
+  # Non-converged draws are retained but reported, and above a documented share the
+  # interval is flagged unreliable (see maihda_report_nonconvergence()).
+  reliable <- maihda_report_nonconvergence(n_nonconv, sum(is.finite(vpc_boot)), "VPC")
+
   # Reduce to an interval, requiring a minimum number of successful refits.
   ci <- maihda_bootstrap_ci(vpc_boot, n_boot, conf_level, "VPC")
+  attr(ci, "n_nonconverged") <- n_nonconv
+  attr(ci, "interval_reliable") <- reliable
 
   return(ci)
+}
+
+# ---------------------------------------------------------------------------
+# Parametric-bootstrap fixed-effect inference
+# ---------------------------------------------------------------------------
+# A Wald z treats the variance components as known. The Gaussian path repairs
+# that with containment degrees of freedom, but a GLMM needs more: with few
+# strata its Wald STANDARD ERROR is itself too small, because glmer is ML-only
+# and an ML stratum variance estimated from a handful of units is biased down --
+# and lands exactly on the boundary in about a tenth of adjusted fits, where the
+# standard error of a stratum-level contrast collapses towards its
+# observation-level value. A t on any degrees of freedom rescales that standard
+# error without repairing it, which is why maihda_containment_df() still returns
+# NULL for a glmerMod.
+#
+# The bootstrap below is null-RESTRICTED, and that is what makes it work. For
+# each fixed-effect COEFFICIENT it refits the model without that coefficient,
+# simulates from the reduced fit, refits the full model on each draw, and refers
+# the observed Wald statistic to the resulting distribution of |t*| =
+# |beta*/se*| under a true null. Simulating from the reduced fit is the point:
+# the reduced model has not spent its stratum degrees of freedom on the tested
+# coefficient, so it estimates the stratum variance from more information and
+# reaches the boundary less often. Only the ONE coefficient is dropped -- the
+# other columns of its own term are nuisance parameters, kept and re-estimated,
+# because dropping them would restrict more than the row claims and would push
+# their effect into that same stratum variance.
+# An UNRESTRICTED bootstrap -- simulating from the fitted model itself -- inherits
+# the same downward-biased variance component and does not repair the level; that
+# was measured, and the numbers are in tests/testthat/test-audit-2026-09-02.R.
+
+# Is `red_form` safe to refit against a stored model FRAME? The frame holds
+# EVALUATED columns under their deparsed names, so a formula that transforms a
+# variable -- log(x), offset(logexp), cbind(a, b) -- would either apply the
+# transform a second time or fail to find its inputs. Refit from the frame only
+# when every name in the formula is an operator or a column already present.
+maihda_frame_refit_safe <- function(red_form, fr) {
+  ops <- c("~", "+", "-", "*", ":", "|", "||", "(")
+  nms <- setdiff(all.names(red_form), ops)
+  length(nms) > 0 && all(nms %in% names(fr))
+}
+
+# The growth structure of an lme4 fit fit_maihda() made for a longitudinal MAIHDA, from
+# the tag it put on the model (`longitudinal`, the object's $longitudinal_info): the
+# person-level grouping factor, the model's time variable, the degree of its time
+# polynomial, whether the stratum level has the slope, and the tag itself. NULL without a
+# tag, so a cross-sectional fit is refitted as before even when its random-effect terms
+# have a growth model's form, and NULL for a fit made from starting values of the user's
+# own (fit_maihda() binds them as `.maihda_arg_start`, a name in the call), which
+# fit_maihda() does not restart either. A numeric start in the call is the start of the
+# restart whose fit was kept, not the user's.
+maihda_lme4_growth_spec <- function(model, longitudinal = NULL) {
+  if (is.null(longitudinal) ||
+      is.name(tryCatch(stats::getCall(model)$start, error = function(e) NULL))) {
+    return(NULL)
+  }
+  degree <- suppressWarnings(as.integer(longitudinal$time_degree))
+  if (!is.character(longitudinal$id) || length(degree) != 1L || is.na(degree)) {
+    return(NULL)
+  }
+  list(id = longitudinal$id, time = maihda_lng_time_term(longitudinal),
+       time_degree = degree, stratum_slope = !isFALSE(longitudinal$stratum_slope),
+       longitudinal = longitudinal)
+}
+
+# Evaluate `fit_call` in `fit_env` as fit_maihda() fits a growth model of the structure
+# `spec` (maihda_lme4_growth_spec()): with the restarts of maihda_fit_lmer_growth() for an
+# lmer fit fit_maihda() restarts (maihda_growth_restarts_apply()), through
+# maihda_fit_glmer_growth() for a glmer fit, and by evaluating the call otherwise.
+# Refitted without them, the null-restricted model stopped more than 0.01 above the lowest
+# criterion found in 14 of 110 refits of quadratic growth fits on a balanced 16-stratum
+# design (up to 1.95 REML units; linear growth: 2 of 60), and at a variance bound in 4 of
+# 18 refits of Poisson growth fits (up to 16.3 in -2 log-likelihood). `first`, a value /
+# conditions pair of maihda_eval_holding_conditions(), is taken as the first fit instead of
+# evaluating `fit_call`, and is returned, its conditions signalled, where no refits apply.
+maihda_refit_growth_call <- function(model, fit_call, fit_env, spec, first = NULL) {
+  if (lme4::isLMM(model)) {
+    if (maihda_growth_restarts_apply(quote(lme4::lmer), spec$longitudinal, list())) {
+      return(maihda_fit_lmer_growth(fit_call, fit_env, spec$id, time = spec$time,
+                                    time_degree = spec$time_degree, first = first))
+    }
+  } else if (lme4::isGLMM(model)) {
+    return(maihda_fit_glmer_growth(fit_call, fit_env, spec$id, first = first))
+  }
+  if (is.null(first)) {
+    return(eval(fit_call, fit_env))
+  }
+  maihda_signal_conditions(first$conditions)
+  first$value
+}
+
+# `call`, a call fit_maihda() made for a growth fit or update() made from it, without the
+# start of the restart whose fit was kept, and with the user's own control (or none) in
+# place of whatever control the call names: the controls of glmer's refit across a bound
+# (`.maihda_arg_refit_control`), from a search (`.maihda_arg_search_control`) and of its last
+# pass (`.maihda_arg_finish_control`) all skip glmer's first stage; `env` is the environment
+# the call's names are bound in.
+maihda_growth_fresh_call <- function(call, env) {
+  call$start <- NULL
+  call$control <- if (exists(".maihda_arg_control", envir = env, inherits = FALSE)) {
+    as.name(".maihda_arg_control")
+  } else {
+    NULL
+  }
+  call
+}
+
+# The call and environment that fit the bootstrap draw `newresp` of the growth fit `model`
+# as fit_maihda() fitted the model: the fit's own call (maihda_growth_fresh_call()) on its
+# own data, with the draw written into a reserved column, aligned to the model frame's rows
+# by name, that the formula's left-hand side names. A two-column draw of a binomial count
+# matrix is written as one matrix column. The call is evaluated in a child of the formula's
+# environment, so the weights, offset, subset and control bound there are the fit's own; a
+# negative-binomial fit's call is glmer() with its fitted theta, held fixed as
+# lme4::refit() holds it. NULL when the call's data is not found by name or its rows do not
+# hold the model frame's.
+maihda_growth_draw_call <- function(model, newresp) {
+  fenv <- environment(stats::formula(model))
+  call <- maihda_growth_fresh_call(stats::getCall(model), fenv)
+  if (!is.name(call$data)) {
+    return(NULL)
+  }
+  data <- get0(as.character(call$data), envir = fenv, inherits = FALSE)
+  column <- ".maihda_boot_y"
+  if (!is.data.frame(data) || column %in% names(data)) {
+    return(NULL)
+  }
+  newresp <- maihda_unpad_fit_rows(newresp, model, "bootstrap draw")
+  # A binomial draw of a factor response (relevel(f, ...) ~ ...) as 0 / 1, as glmer() reads
+  # a factor: its first level is a failure.
+  if (is.factor(newresp)) {
+    newresp <- as.numeric(newresp != levels(newresp)[1L])
+  }
+  rows <- match(rownames(model@frame), rownames(data))
+  if (anyNA(rows) || NROW(newresp) != length(rows)) {
+    return(NULL)
+  }
+  y <- if (is.matrix(newresp)) {
+    matrix(NA_real_, nrow(data), ncol(newresp))
+  } else {
+    rep(NA_real_, nrow(data))
+  }
+  if (is.matrix(newresp)) y[rows, ] <- newresp else y[rows] <- as.numeric(newresp)
+  data[[column]] <- y
+  formula <- stats::formula(model)
+  formula[[2L]] <- as.name(column)
+  environment(formula) <- fenv
+  call$formula <- formula
+  env <- new.env(parent = fenv)
+  assign(as.character(call$data), data, envir = env)
+  list(call = call, env = env)
+}
+
+# Refit the growth fit `model` on the bootstrap draw `newresp`: from the fitted model's
+# estimates (maihda_refit_draw()), and then, with that refit as the first fit, as
+# fit_maihda() fits the model (maihda_refit_growth_call()) -- from further starts and, for
+# glmer, across a variance bound -- keeping the best. Refitted once from the fitted model,
+# 12 to 19 of 100 Poisson growth draws per time unit stopped more than 0.01 short of their
+# maximum (up to 1.9 in log-likelihood), an adjusted model's draw in 20 of 20, and an lmer
+# draw on the wrong side of the stratum block's boundary; none was recorded as failed. As at
+# fit time, a refit replaces the first fit when lower by more than 1e-4: an lmer draw at its
+# optimum keeps its refit, while for glmer that tolerance is within the optimiser's noise,
+# so most draws keep a restart less than 0.01 in log-likelihood above the refit (their
+# VPC(t) moved by a median of 6e-5). `spec` is maihda_lme4_growth_spec() of the model; NULL,
+# or a call that cannot be replayed (maihda_growth_draw_call()), gives the refit alone.
+maihda_refit_growth_draw <- function(model, newresp, spec) {
+  if (is.null(spec)) {
+    return(maihda_refit_draw(model, newresp))
+  }
+  first <- maihda_eval_holding_conditions(quote(maihda_refit_draw(model, newresp)),
+                                          environment())
+  replay <- tryCatch(maihda_growth_draw_call(model, newresp), error = function(e) NULL)
+  if (is.null(replay)) {
+    maihda_signal_conditions(first$conditions)
+    return(first$value)
+  }
+  maihda_refit_growth_call(model, replay$call, replay$env, spec, first = first)
+}
+
+# The criterion a growth fit is compared on: lmer's REML criterion (deviance for an ML
+# fit), -2 log-likelihood for a glmer fit (maihda_glmer_criterion()).
+maihda_growth_fit_criterion <- function(fit) {
+  if (lme4::isLMM(fit)) maihda_lmer_criterion(fit) else maihda_glmer_criterion(fit)
+}
+
+# The null-restricted refit of a growth fit under `red_form`: the reduced call refitted as
+# fit_maihda() fits the model (maihda_refit_growth_call()), from lme4's own start and with
+# the user's own control -- not with the start of the restart whose fit was kept, nor the
+# control of one of glmer's refits (maihda_growth_fresh_call()), which update() carries
+# over -- and, when the kept fit has such a start, the reduced call with that start as well,
+# with the control of glmer's refit across a bound when the kept fit's call names it and the
+# user's own otherwise. A refit from a search's control has its first step and last as
+# fractions of the kept fit's smallest variance entry, and from the kept fit's start bobyqa
+# took up to 35,000 evaluations to reach the null fit the other refit reaches. The control of
+# glmer's last pass (maihda_glmer_finish()) runs Nelder-Mead's second stage alone, which from
+# the kept fit's estimates stopped up to 0.89 above the null's maximum on 4 growth fits; picked
+# over the other refit on lme4's criteria, which differ by the precision of its penalised
+# least squares, it left the null 0.002 above where the other refit was within 1e-4 of it. A
+# glmer fit's refits are evaluated in a child of the fit's environment, so the controls they
+# bind there do not replace those the fit's own call names (a refit from a search binds one
+# with a first step of its own); an lmer fit's, whose centred-time start finds the data by
+# name in the environment itself, in the fit's. The fit with the lowest criterion is kept
+# (maihda_pick_lowest()), so the null is never fitted worse than that reduced call fits it.
+maihda_refit_reduced_growth <- function(model, red_form, spec) {
+  env <- environment(stats::formula(model))
+  carried <- stats::update(model, formula. = red_form, evaluate = FALSE)
+  fresh <- maihda_growth_fresh_call(carried, env)
+  refit_env <- if (lme4::isGLMM(model)) new.env(parent = env) else env
+  fits <- list(tryCatch(suppressMessages(suppressWarnings(
+    maihda_refit_growth_call(model, fresh, refit_env, spec))), error = function(e) NULL))
+  if (!is.null(carried$start)) {
+    if (!identical(carried$control, as.name(".maihda_arg_refit_control"))) {
+      carried$control <- fresh$control
+    }
+    fits[[2L]] <- tryCatch(suppressMessages(suppressWarnings(eval(carried, env))),
+                           error = function(e) NULL)
+  }
+  crit <- vapply(fits, function(f) {
+    if (is.null(f)) NA_real_ else tryCatch(maihda_growth_fit_criterion(f),
+                                           error = function(e) NA_real_)
+  }, numeric(1))
+  fits[[maihda_pick_lowest(crit)]]
+}
+
+# Refit `model` under a reduced fixed-effect formula. stats::update() is tried
+# first because it handles transformed terms correctly, and it reaches the data
+# through the formula environment even for a model fitted inside a function.
+#
+# But update() RE-EVALUATES the original call, so it silently refits on whatever
+# object the `data` argument now names. If that object has changed, the reduced
+# fit describes a different dataset and the null distribution simulated from it
+# would be for that other dataset -- and its response would be the wrong length
+# for refit(). The same mismatch arises legitimately when the dropped term had
+# missing values, since dropping it admits rows the full model excluded. Both are
+# caught by requiring the reduced fit to cover exactly the full model's rows and
+# response; otherwise fall through to the frame, which IS the full model's
+# complete-case data and so cannot disagree with it.
+#
+# `longitudinal` is the model object's $longitudinal_info. With it, a growth fit is
+# refitted as fit_maihda() fits it (maihda_refit_reduced_growth()); without it, every fit
+# is refitted by update().
+maihda_refit_reduced <- function(model, red_form, longitudinal = NULL) {
+  fr <- tryCatch(model@frame, error = function(e) NULL)
+  same_data <- function(red) {
+    if (is.null(red)) return(FALSE)
+    ok <- tryCatch(isTRUE(stats::nobs(red) == stats::nobs(model)),
+                   error = function(e) FALSE)
+    if (!ok || !is.data.frame(fr)) return(ok)
+    tryCatch(isTRUE(all.equal(stats::model.response(red@frame),
+                              stats::model.response(fr))),
+             error = function(e) FALSE)
+  }
+  # A growth fit is refitted as fit_maihda() fits it (maihda_refit_reduced_growth()).
+  spec <- maihda_lme4_growth_spec(model, longitudinal)
+  red <- tryCatch(suppressMessages(suppressWarnings(
+    if (is.null(spec)) {
+      stats::update(model, formula. = red_form)
+    } else {
+      maihda_refit_reduced_growth(model, red_form, spec)
+    })), error = function(e) NULL)
+  if (same_data(red)) return(red)
+
+  if (!is.data.frame(fr) || !maihda_frame_refit_safe(red_form, fr)) return(NULL)
+  # do.call, not a direct call: lme4 evaluates `weights` and `offset`
+  # non-standardly, in the formula's environment rather than here, so passing
+  # local variables by name fails with "object 'w' not found" for every weighted
+  # model. do.call() inlines the values into the call instead.
+  args <- list(formula = red_form, data = fr)
+  w <- stats::model.weights(fr)
+  off <- stats::model.offset(fr)
+  if (!is.null(w)) args$weights <- w
+  if (!is.null(off)) args$offset <- off
+  fun <- if (lme4::isLMM(model)) {
+    args$REML <- lme4::isREML(model)
+    lme4::lmer
+  } else {
+    args$family <- stats::family(model)
+    lme4::glmer
+  }
+  maihda_refit_args(model, fun, args, spec)
+}
+
+# do.call(fun, args) for a reduced fit, with its messages and warnings dropped and NULL
+# for an error; a growth fit (`spec` not NULL) through maihda_refit_growth_call() instead,
+# on a call whose data the restarts can find by name.
+maihda_refit_args <- function(model, fun, args, spec) {
+  if (is.null(spec)) {
+    return(tryCatch(suppressMessages(suppressWarnings(do.call(fun, args))),
+                    error = function(e) NULL))
+  }
+  env <- new.env()
+  env$data <- args$data
+  args$data <- quote(data)
+  fun_name <- if (lme4::isLMM(model)) quote(lme4::lmer) else quote(lme4::glmer)
+  fit_call <- as.call(c(list(fun_name), args))
+  tryCatch(suppressMessages(suppressWarnings(
+    maihda_refit_growth_call(model, fit_call, env, spec))), error = function(e) NULL)
+}
+
+# TRUE when two fixed-effect designs span the SAME column space -- equal ranks,
+# and stacking them side by side adds nothing to either. Rank alone is not
+# enough: it would accept a reduced design of the right size that constrains a
+# different direction.
+maihda_same_column_space <- function(A, B) {
+  if (is.null(A) || is.null(B) || nrow(A) != nrow(B)) return(FALSE)
+  rk <- function(M) tryCatch(qr(M)$rank, error = function(e) NA_integer_)
+  ra <- rk(A)
+  rb <- rk(B)
+  if (is.na(ra) || is.na(rb) || ra != rb) return(FALSE)
+  isTRUE(rk(cbind(A, B)) == ra)
+}
+
+# Refit `model` with the fixed-effect COLUMNS `drop_cols` constrained to zero, in
+# the model's OWN fitted design basis, keeping every other column as it stands.
+#
+# This is the constraint the bootstrap advertises. It is also the ONLY way to
+# restrict ONE coefficient of a term spanning several design columns, no formula
+# being able to drop a single contrast column, so the fixed-effect bootstrap
+# reaches it for every such coefficient; for a one-column term it is instead the
+# fallback, taken when the formula reduction turns out to restrict nothing.
+#
+# Dropping the term from the FORMULA does not always impose it. R's marginality
+# rules recode a surviving higher-order term to absorb the removed one: for
+# `y ~ x * f`, `. ~ . - x` yields `f + x:f`, which R codes with a full dummy
+# expansion (`fa:x`, `fb:x`) rather than a contrast, so the "reduced" design
+# spans exactly the same space as the full one and the coefficient under test is
+# not restricted at all. The same holds for either main effect of `f * g`, for
+# every main effect and two-way term of a three-way interaction, and for a
+# nested `f / g`. Simulating from such a fit draws data that still carry the
+# estimated effect, so the reference distribution of |t*| centres on the OBSERVED
+# statistic and the p-value collapses towards 0.5 however large the effect is.
+#
+# Working from the design matrix sidesteps formula algebra entirely: the retained
+# columns are carried as data under generated names, never re-evaluated, so
+# transformed terms (poly(), log(), I()) need no special handling. The random
+# effects, prior weights and offset are taken from the fit unchanged. A growth fit
+# (`longitudinal`, as for maihda_refit_reduced()) is refitted as fit_maihda() fits it.
+maihda_restrict_fixef <- function(model, drop_cols, longitudinal = NULL) {
+  X <- tryCatch(lme4::getME(model, "X"), error = function(e) NULL)
+  fr <- tryCatch(model@frame, error = function(e) NULL)
+  if (is.null(X) || !is.data.frame(fr)) return(NULL)
+  bars <- tryCatch(reformulas::findbars(stats::formula(model)),
+                   error = function(e) NULL)
+  if (!length(bars)) return(NULL)
+  re_vars <- unique(unlist(lapply(bars, all.vars)))
+  if (!length(re_vars) || !all(re_vars %in% names(fr))) return(NULL)
+
+  # Generated names that cannot collide with a grouping factor or the response
+  # already in the frame.
+  stem <- "maihda_null_"
+  while (any(startsWith(names(fr), stem))) stem <- paste0(".", stem)
+  keep <- setdiff(seq_len(ncol(X)), drop_cols)
+  # if(), not paste0() alone: paste0(stem, "x", integer(0)) is the single string
+  # "<stem>x", not character(0), which would put a column in the formula that the
+  # loop below correctly never creates.
+  nm_x <- if (length(keep)) paste0(stem, "x", seq_along(keep)) else character(0)
+  nm_y <- paste0(stem, "y")
+
+  # Built row-by-row rather than by as.data.frame(X[, keep]): `keep` is empty
+  # when the model's only fixed term is the one under test, and a zero-column
+  # matrix would collapse to a zero-ROW data frame.
+  d <- data.frame(row.names = seq_len(nrow(X)))
+  for (i in seq_along(keep)) d[[nm_x[i]]] <- X[, keep[i]]
+  for (v in re_vars) d[[v]] <- fr[[v]]
+  # An aggregated-binomial cbind() response is a two-column matrix; it is stored
+  # as a single matrix column, exactly as a model frame holds it.
+  d[[nm_y]] <- stats::model.response(fr)
+
+  bar_txt <- vapply(bars, function(b) paste0("(", paste(deparse(b), collapse = ""), ")"),
+                    character(1))
+  args <- list(
+    formula = stats::as.formula(
+      paste(nm_y, "~", paste(c("0", nm_x, bar_txt), collapse = " + "))),
+    data = d)
+  # do.call, for the same reason maihda_refit_reduced() uses it: lme4 evaluates
+  # `weights` and `offset` in the formula's environment, not here.
+  w <- stats::model.weights(fr)
+  off <- stats::model.offset(fr)
+  if (!is.null(w)) args$weights <- w
+  if (!is.null(off)) args$offset <- off
+  fun <- if (lme4::isLMM(model)) {
+    args$REML <- lme4::isREML(model)
+    lme4::lmer
+  } else {
+    args$family <- stats::family(model)
+    lme4::glmer
+  }
+  maihda_refit_args(model, fun, args, maihda_lme4_growth_spec(model, longitudinal))
+}
+
+#' Null-restricted parametric-bootstrap fixed effects for an lme4 fit
+#'
+#' Internal helper. For each fixed-effect \emph{coefficient}, refits the model
+#' with that coefficient constrained to zero, simulates \code{n_boot} responses
+#' from the restricted fit, refits the full model on each, and refers the
+#' observed Wald statistic to the distribution of \eqn{|t^*|} across those
+#' refits. The null is the restricted fit itself, its remaining parameters
+#' estimated from the same data, so the reference is a parametric-bootstrap
+#' approximation rather than the exact null distribution. Returns the shape
+#' \code{\link{maihda_fixed_effects_table}} produces, with \code{df} \code{NA}:
+#' the reference is an empirical distribution, not a \eqn{t}.
+#'
+#' One coefficient at a time, not one term at a time. A term spanning several
+#' design columns -- a factor with three or more levels, a polynomial, an
+#' interaction between factors -- holds several coefficients, each reported on
+#' its own row; constraining the whole term would test every one of them to zero
+#' while the row claims only its own. The siblings are nuisance parameters and
+#' are re-estimated, not deleted: dropping them pushes their effect into the
+#' variance components, so the draws come from a model the data do not describe.
+#' Which coefficients share a term is a property of how the design was spelled --
+#' \code{y ~ f} and \code{y ~ fb + fc} fit the identical model -- and a reference
+#' distribution may not turn on that.
+#'
+#' For a one-column term the restriction is imposed by dropping the term from the
+#' formula and then \emph{verifying} that the refitted design no longer spans the
+#' full model's column space. It usually does not, but R's marginality rules
+#' recode a surviving higher-order term to absorb a removed marginal one --
+#' \code{. ~ . - x} applied to \code{y ~ x * f} gives \code{f + x:f}, whose full
+#' dummy expansion spans exactly the original space -- and such a "reduction"
+#' constrains nothing. Where the spans agree, and for every coefficient of a
+#' multi-column term (no formula drops one contrast column), the constraint is
+#' imposed on the fitted design columns directly
+#' (\code{maihda_restrict_fixef}).
+#'
+#' The intercept has no reduced model to simulate from -- a MAIHDA intercept is a
+#' reference-category level rather than a term that can be dropped -- so its
+#' p-value and interval are \code{NA}, not a Wald z that is miscalibrated in
+#' exactly the regime this function exists for.
+#'
+#' @param model An lme4 model object (\code{lmerMod} or \code{glmerMod}).
+#' @param n_boot Number of bootstrap replicates \emph{per tested coefficient}.
+#' @param conf_level Interval level.
+#' @param longitudinal The model object's \code{longitudinal_info}: for a growth fit
+#'   the null-restricted fits and the refits of the draws are made as
+#'   \code{fit_maihda()} fits the model. \code{NULL} for any other fit.
+#' @return A data frame with \code{term}, \code{estimate}, \code{se},
+#'   \code{statistic}, \code{df}, \code{p_value}, \code{lower} and \code{upper},
+#'   carrying \code{n_boot_ok}, \code{n_boot_nonconverged} and
+#'   \code{interval_reliable} attributes -- the last \code{FALSE} when more than
+#'   half the contributing draws failed to converge, as for the VPC and PCV
+#'   bootstraps (\code{maihda_report_nonconvergence}).
+#' @keywords internal
+#' @importFrom lme4 refit fixef
+maihda_bootstrap_fixef <- function(model, n_boot, conf_level, longitudinal = NULL) {
+  # A growth fit's null-restricted fits and its draws are refitted as fit_maihda() fits
+  # the model (maihda_refit_reduced(), maihda_restrict_fixef(), maihda_refit_growth_draw()).
+  spec <- maihda_lme4_growth_spec(model, longitudinal)
+  est <- lme4::fixef(model)
+  nm <- names(est)
+  se <- sqrt(diag(as.matrix(stats::vcov(model))))
+  # A zero / non-finite standard error leaves the statistic undefined, exactly as
+  # in maihda_fixed_effects_table(); such a term cannot be studentized.
+  se[!is.finite(se) | se <= 0] <- NA_real_
+
+  X <- tryCatch(lme4::getME(model, "X"), error = function(e) NULL)
+  assign_term <- if (is.null(X)) NULL else attr(X, "assign")
+  term_labels <- tryCatch(
+    attr(stats::terms(stats::formula(model, fixed.only = TRUE)), "term.labels"),
+    error = function(e) NULL)
+  if (is.null(assign_term) || length(assign_term) != length(nm) ||
+      is.null(term_labels)) {
+    stop("The fixed-effect design of this model could not be split into terms, ",
+         "so a null-restricted bootstrap cannot be built. Use ",
+         "df_method = \"normal\".", call. = FALSE)
+  }
+  if (!length(term_labels)) {
+    stop("This model has no fixed-effect term to test: its fixed part is the ",
+         "intercept alone, which has no reduced model to simulate from. Use ",
+         "df_method = \"normal\".", call. = FALSE)
+  }
+
+  p_value <- lower <- upper <- rep(NA_real_, length(nm))
+  n_ok <- rep(NA_integer_, length(nm))
+  # Counted over every tested coefficient's draws, so the share handed to
+  # maihda_report_nonconvergence() is non-converged refits out of the refits that
+  # actually contributed -- the same denominator the VPC and PCV bootstraps use.
+  n_nonconv <- 0L
+  n_contrib <- 0L
+
+  for (k in seq_along(term_labels)) {
+    cols <- which(assign_term == k)
+    if (!length(cols)) next
+    for (c_i in seq_along(cols)) {
+      j <- cols[c_i]
+      # The null THIS COEFFICIENT is tested against: its own design column set to
+      # zero, every other column of the FITTED design retained and re-estimated --
+      # including the sibling columns of its own term. That is the hypothesis the
+      # row states. Constraining the whole term instead tests every sibling to
+      # zero as well, which is a different, stronger null: for a three-level
+      # factor it deletes `fb` while reporting a p-value for `fc`, so the sibling
+      # effect lands in the stratum variance and the draws come from a model the
+      # data do not describe (tau^2 1.458 against the 0.299 the stated null
+      # gives). Which columns share a term is a property of how the design was
+      # SPELLED -- `y ~ f` and `y ~ fb + fc` fit the identical model -- and a
+      # reference distribution may not turn on that.
+      #
+      # Restricting one column is exactly the restriction the coefficient names,
+      # under whatever contrasts the model was fitted with: for treatment coding
+      # it merges that level into the reference, for sum coding it sets that
+      # level's deviation from the unweighted mean of the level means to zero
+      # (measured exactly, not argued). The estimate means the same thing there,
+      # so the null does too.
+      red <- NULL
+      if (length(cols) == 1L) {
+        # A one-column term IS its coefficient, so the formula reduction spells
+        # the same restriction, and refitting the formula keeps transformed terms
+        # (poly(), log(), I()) in their natural spelling. Nothing else can be
+        # reached this way: no formula drops one contrast column of a term.
+        X_null <- X[, setdiff(seq_len(ncol(X)), j), drop = FALSE]
+        red_form <- stats::update(stats::formula(model),
+                                  paste(". ~ . -", term_labels[k]))
+        red <- maihda_refit_reduced(model, red_form, longitudinal)
+        # Dropping the term from the formula usually IS that null -- but R's
+        # marginality recoding can hand back a design spanning the full model's
+        # own column space, restricting nothing (see maihda_restrict_fixef).
+        # Verified rather than assumed: when the spans agree the reduction is not
+        # a null at all, and the constraint is imposed on the design columns
+        # directly instead.
+        if (!is.null(red) &&
+            !maihda_same_column_space(tryCatch(lme4::getME(red, "X"),
+                                               error = function(e) NULL), X_null)) {
+          red <- NULL
+        }
+      }
+      if (is.null(red)) red <- maihda_restrict_fixef(model, j, longitudinal)
+      if (is.null(red)) {
+        stop("The model with '", nm[j], "' constrained to zero could not be ",
+             "refitted, so no null distribution can be simulated for that ",
+             "coefficient. Use df_method = \"normal\".", call. = FALSE)
+      }
+
+      sim_data <- tryCatch(maihda_simulate_lme4(red, nsim = n_boot),
+                           error = function(e) NULL)
+      if (is.null(sim_data)) {
+        stop("Responses could not be simulated from the model with '",
+             nm[j], "' constrained to zero, so its null distribution is ",
+             "unavailable. Use df_method = \"normal\".", call. = FALSE)
+      }
+
+      t_star <- rep(NA_real_, n_boot)
+      for (i in seq_len(n_boot)) {
+        tryCatch({
+          boot_model <- maihda_refit_growth_draw(model, sim_data[[i]], spec)
+          bi <- lme4::fixef(boot_model)
+          si <- sqrt(diag(as.matrix(stats::vcov(boot_model))))
+          jb <- match(nm[j], names(bi))
+          t_star[i] <- bi[jb] / si[jb]
+          n_contrib <- n_contrib + 1L
+          if (maihda_lme4_optimizer_failed(boot_model)) n_nonconv <- n_nonconv + 1L
+        }, error = function(e) NULL)
+      }
+
+      ts <- abs(t_star)
+      ts <- ts[is.finite(ts)]
+      n_ok[j] <- length(ts)
+      if (!is.finite(se[j]) || n_ok[j] < 10L) next
+      t_obs <- abs(est[j] / se[j])
+      # (1 + count) / (B + 1), the Monte Carlo p-value: never exactly zero, and on
+      # a grid of step 1 / (B + 1), so a small n_boot cannot resolve a small p.
+      # B sets only that resolution. The draws come from a fit whose parameters
+      # were estimated from these same data, so at any B this is a
+      # parametric-bootstrap approximation, not an exact test.
+      p_value[j] <- min(1, (1 + sum(ts >= t_obs)) / (n_ok[j] + 1))
+      # The critical value INVERTS that p-value rather than being a quantile() of
+      # the same draws: the observed statistic beats the r-th largest |t*| exactly
+      # when at most r - 1 draws reach it, i.e. exactly when p <= 1 - conf_level
+      # (see maihda_boot_critical_rank). So zero falls outside the interval
+      # exactly when the p-value is at or below that level, which a quantile
+      # would only approximate to one draw's resolution. The agreement is a
+      # property of the construction, not a coverage guarantee.
+      r <- maihda_boot_critical_rank(n_ok[j], conf_level)
+      crit <- if (r < 1L) Inf else sort(ts, decreasing = TRUE)[r]
+      lower[j] <- est[j] - crit * se[j]
+      upper[j] <- est[j] + crit * se[j]
+    }
+  }
+
+  ok_tested <- n_ok[assign_term > 0L]
+  if (!any(is.finite(ok_tested))) {
+    stop("Every fixed-effect bootstrap refit failed; no reference distribution ",
+         "could be built.", call. = FALSE)
+  }
+  n_min <- min(ok_tested, na.rm = TRUE)
+  if (n_min < 10L) {
+    stop(sprintf(paste0("Only %d of %d fixed-effect bootstrap refits succeeded for ",
+                        "at least one coefficient; at least 10 are required. Increase ",
+                        "n_boot or check for singular/failing fits."), n_min, n_boot),
+         call. = FALSE)
+  }
+  # Same majority-of-draws rule as maihda_bootstrap_ci(): the survivors of a
+  # mostly-failed bootstrap are the draws that happened to converge, a biased subset.
+  if (n_min < ceiling(0.5 * n_boot)) {
+    stop(sprintf(paste0("Only %d of %d fixed-effect bootstrap refits succeeded (%.0f%%) ",
+                        "for at least one coefficient; at least 50%% must succeed to ",
+                        "form a dependable reference. Increase n_boot or check for ",
+                        "singular/failing fits."), n_min, n_boot,
+                 100 * n_min / n_boot), call. = FALSE)
+  }
+  if (n_boot - n_min > n_boot * 0.25) {
+    warning(sprintf(paste0("%d of %d fixed-effect bootstrap refits failed (%.0f%%) ",
+                           "for at least one coefficient; the p-values and intervals ",
+                           "may be unreliable."), n_boot - n_min, n_boot,
+                    100 * (n_boot - n_min) / n_boot), call. = FALSE)
+  }
+  # Non-converged draws are retained but reported, and above a documented share the
+  # reference distribution is flagged unreliable (see maihda_report_nonconvergence()).
+  reliable <- maihda_report_nonconvergence(n_nonconv, n_contrib, "fixed-effect")
+
+  out <- data.frame(
+    term      = nm,
+    estimate  = as.numeric(est),
+    se        = as.numeric(se),
+    statistic = as.numeric(est / se),
+    df        = NA_real_,
+    p_value   = p_value,
+    lower     = lower,
+    upper     = upper,
+    row.names = NULL,
+    stringsAsFactors = FALSE
+  )
+  attr(out, "n_boot_ok") <- n_ok
+  attr(out, "n_boot_nonconverged") <- n_nonconv
+  attr(out, "interval_reliable") <- reliable
+  out
+}
+
+# Rank, counted from the largest, of the fixed-effect bootstrap's critical value
+# among n |t*| draws: the number of attainable p-values (1 + c) / (n + 1),
+# c = 0..n, at or below alpha = 1 - conf_level. The observed statistic beats the
+# r-th largest draw exactly when at most r - 1 draws reach it, i.e. exactly when
+# its p-value is one of those r, so zero falls outside the interval exactly when
+# p <= alpha -- the usual Monte Carlo test rule, under which a whole-number
+# (n + 1) * alpha (199 or 999 draws at 5%) puts alpha itself on the grid.
+#
+# The count is floor(alpha * (n + 1)), but that product cannot be taken at face
+# value. 1 - 0.95 is stored as 0.05000000000000004 and 1 - 0.90 as
+# 0.09999999999999998, so a product that is a whole number in exact arithmetic
+# lands just above it at one level and just below it at the other. The former
+# ceiling(alpha * (n + 1)) - 1 therefore applied p <= alpha where the complement
+# is stored above its decimal value (0.95, 0.99, and also 0.70, 0.85, 0.975) but
+# p < alpha where it is stored at or below it (0.90, 0.80, 0.75, 0.50), and the
+# interval disagreed with the p-value whenever p fell exactly on alpha. Which
+# level got which rule was an accident of storage, not a design. The tolerance is
+# about 6000 times the representation error of the product, which is at most
+# (n + 1) * 1.7e-16; it can only misread a conf_level given to 12 or more
+# decimal places.
+maihda_boot_critical_rank <- function(n, conf_level) {
+  as.integer(floor((1 - conf_level) * (n + 1) + 1e-12 * (n + 1)))
 }
 
 #' Print the additive vs. intersectional decomposition of a crossed-dimensions summary
@@ -1021,9 +2625,200 @@ maihda_print_cc_decomposition <- function(d) {
       cat(sprintf("    %s: %.4f\n", nm, per_dim[[nm]]))
     }
   }
+  few_note <- maihda_cc_few_levels_note(maihda_cc_few_level_dims(d),
+                                        pointer = !is.null(d$realised))
   cat(maihda_palette()$muted(paste0(
       "  Note: the additive share is the crossed-dimensions analogue of the PCV but\n",
-      "  a different estimator; interpret the interaction share cautiously.\n\n")))
+      "  a different estimator; interpret the interaction share cautiously.\n",
+      if (length(few_note) > 0) paste0(paste(few_note, collapse = "\n"), "\n"),
+      "\n")))
+  if (!is.null(d$realised)) {
+    maihda_print_cc_realised(d$realised)
+  }
+  invisible(NULL)
+}
+
+# Number of levels each stratum dimension has in the fitted data, named by the
+# dimension. NA for a dimension whose grouping column the data do not carry.
+maihda_cc_dim_levels <- function(data, dim_groups) {
+  out <- vapply(unname(dim_groups), function(g) {
+    x <- data[[g]]
+    if (is.null(x)) NA_integer_ else length(unique(x[!is.na(x)]))
+  }, integer(1))
+  names(out) <- names(dim_groups)
+  out
+}
+
+# A dimension with fewer levels than this is named in the printed decomposition of a
+# brms crossed-dimensions fit. Measured with dimension effects of variance about 0.1
+# on the logit scale: under brms's default prior, student_t(3, 0, 2.5), the posterior
+# median of a dimension's variance is about 5, 3, 2, 1.7, 1.3 and 1.25 times the
+# variance of the dimension's effects with 2, 3, 4, 5, 8 and 10 levels, and under
+# normal(0, 0.5), a fifth of that scale, it is 0.2, 0.5, 0.67, 0.8, 0.9 and 0.93 of
+# what it is under the default. With two levels the multiple grows as the effects
+# shrink, the median being roughly proportional to the prior's scale.
+.maihda_cc_few_levels <- 10L
+
+# The dimensions of a brms crossed-dimensions decomposition that have few levels, as
+# a named integer vector of their level counts. Empty for an lme4 decomposition,
+# which has no prior, and when every dimension has enough levels.
+maihda_cc_few_level_dims <- function(d) {
+  if (!identical(d$method, "posterior")) {
+    return(integer(0))
+  }
+  lv <- d$dim_levels
+  if (is.null(lv)) {
+    return(integer(0))
+  }
+  lv[!is.na(lv) & lv < .maihda_cc_few_levels]
+}
+
+# The printed note that names those dimensions, one string per output line;
+# character(0) when there is none to name. The clause on two levels is given only
+# when a two-level dimension is among them, and the pointer to the realised-strata
+# block only when that block is printed below it.
+maihda_cc_few_levels_note <- function(few, pointer = FALSE) {
+  if (length(few) == 0) {
+    return(character(0))
+  }
+  named <- sprintf("%s (%d level%s)", names(few), few, ifelse(few == 1L, "", "s"))
+  listed <- if (length(named) > 1) {
+    paste(paste(named[-length(named)], collapse = ", "), "and", named[length(named)])
+  } else {
+    named
+  }
+  strwrap(paste0(
+    "Note: ", listed, if (length(named) > 1) " have" else " has", " few levels. ",
+    "With engine = \"brms\" the variance of such a dimension depends on the prior on ",
+    "its standard deviation",
+    if (any(few == 2L)) " (with two levels roughly in proportion to that prior's scale)",
+    ", and the VPC and the shares follow it",
+    if (isTRUE(pointer)) {
+      paste("; the realised-strata block below depends little on it when each stratum",
+            "has enough data")
+    },
+    ". See ?maihda."),
+    width = 78, indent = 2, exdent = 2)
+}
+
+# The number of levels of each context in the fitted data, named by context (NA for a
+# column the data do not hold). Stored on the contextual partition of a brms fit.
+maihda_context_levels <- function(data, ctx_vars) {
+  maihda_cc_dim_levels(data, stats::setNames(ctx_vars, ctx_vars))
+}
+
+# A context with fewer levels than this is named in the printed contextual partition
+# of a brms fit. Measured on 8 strata crossed with C contexts, 100 rows a cell, context
+# effects of variance 0.1 on the logit scale: under brms's default prior,
+# student_t(3, 0, 2.5), the posterior median of the context variance is about 6, 2.7,
+# 1.7, 1.25 and 1.1 times the variance of the context effects with 2, 3, 5, 10 and 20
+# contexts (larger multiples for smaller effects and smaller ones for larger effects:
+# above 1 for context variances from 0.025 to 1.6; with two contexts about 1 once the
+# effects' standard deviation reaches the prior's scale and 0.6 to 0.75 at 1.6 times
+# it), and under normal(0, 0.5), a fifth of that scale, about 0.23, 0.5, 0.76 and 0.93
+# of what it is under the default with 2, 3, 5 and 10 contexts. With no context effect
+# at all the default prior still gives two contexts a share of about 0.02 to 0.03 of
+# the unexplained variance.
+.maihda_context_few_levels <- 10L
+
+# The contexts of a brms contextual partition that have few levels, as a named integer
+# vector of their level counts. Empty for an lme4 partition, which has no prior, and
+# when every context has enough levels.
+maihda_context_few_levels <- function(ctx) {
+  if (!identical(ctx$method, "posterior")) {
+    return(integer(0))
+  }
+  lv <- ctx$context_levels
+  if (is.null(lv)) {
+    return(integer(0))
+  }
+  lv[!is.na(lv) & lv < .maihda_context_few_levels]
+}
+
+# The printed note that names those contexts, one string per output line;
+# character(0) when there is none to name. The clause on two levels is given only
+# when a two-level context is among them, and the pointer only when what it points to
+# is printed below the note: "block" for the realised partition of a summary, "lines"
+# for the realised lines of an analysis.
+maihda_context_few_levels_note <- function(few, pointer = c("none", "block", "lines")) {
+  pointer <- match.arg(pointer)
+  if (length(few) == 0) {
+    return(character(0))
+  }
+  and_list <- function(x) {
+    if (length(x) > 1) paste(paste(x[-length(x)], collapse = ", "), "and", x[length(x)]) else x
+  }
+  named <- and_list(sprintf("'%s'", names(few)))
+  counted <- if (length(few) == 1) {
+    sprintf("context %s has %d level%s", named, few, if (few == 1L) "" else "s")
+  } else if (length(unique(few)) == 1) {
+    sprintf("contexts %s have %d level%s each", named, few[1], if (few[1] == 1L) "" else "s")
+  } else {
+    sprintf("contexts %s have %s levels", named, and_list(as.character(few)))
+  }
+  strwrap(paste0(
+    "Note: ", counted, ". With engine = \"brms\" the variance of such a context ",
+    "depends on the prior on its standard deviation",
+    if (any(few == 2L)) " (with two levels roughly in proportion to that prior's scale)",
+    ", and the context share and the VPC depend on it",
+    switch(pointer,
+           none = "",
+           block = paste("; the realised partition below depends little on it when each",
+                         "context has enough data"),
+           lines = paste("; the realised VPC and context share below depend little on it",
+                         "when each context has enough data")),
+    ". See ?maihda."),
+    width = 78, indent = 2, exdent = 2)
+}
+
+# Print the realised-strata block of a brms crossed-dimensions decomposition (see
+# maihda_cc_realised_brms()). A line is left out for a quantity the block does not
+# give: the VPC of a count fit, or of a contextual fit whose context level effects
+# could not be read, and the median odds ratio of a non-logit fit.
+maihda_print_cc_realised <- function(r) {
+  pal <- maihda_palette()
+  fmt <- function(est, ci, scale = 1, digits = 4L, suffix = "") {
+    if (!isTRUE(is.finite(est))) {
+      return("NA")
+    }
+    v <- function(x) sprintf("%.*f%s", digits, scale * x, suffix)
+    if (length(ci) == 2L && all(is.finite(ci))) {
+      sprintf("%s [%s, %s]", v(est), v(ci[1]), v(ci[2]))
+    } else {
+      v(est)
+    }
+  }
+  pct <- function(est, ci) fmt(est, ci, scale = 100, digits = 1L, suffix = "%")
+  line <- function(label, value) cat(sprintf("  %-25s %s\n", label, value))
+  cat(pal$bold(sprintf("Realised strata (the %d strata in the data):",
+                       as.integer(r$n_strata))), "\n", sep = "")
+  cat("  ", pal$muted(maihda_vpc_interval_label(r)), "\n", sep = "")
+  line("Between-strata variance:", fmt(r$between_var, r$between_var_ci))
+  if (!is.null(r$vpc)) {
+    line("VPC:", fmt(r$vpc, r$vpc_ci))
+  }
+  if (isTRUE(r$df_interaction > 0)) {
+    line("Interaction variance:", fmt(r$interaction_var, r$interaction_var_ci))
+    line("Additive share:", pct(r$additive_share, r$additive_share_ci))
+    line("Interaction share:", pct(r$interaction_share, r$interaction_share_ci))
+  } else {
+    cat("  Interaction variance and shares: NA (the strata in the data leave no\n",
+        "  degrees of freedom for an interaction)\n", sep = "")
+  }
+  if (length(r$per_dim) > 0) {
+    cat("  Variance of each dimension's level effects:\n")
+    for (nm in names(r$per_dim)) {
+      ci <- if (!is.null(r$per_dim_ci)) r$per_dim_ci[nm, ] else NULL
+      cat(sprintf("    %s: %s\n", nm, fmt(r$per_dim[[nm]], ci)))
+    }
+  }
+  if (!is.null(r$mor)) {
+    line("Median odds ratio:", fmt(r$mor, r$mor_ci, digits = 3L))
+  }
+  cat(pal$muted(paste0(
+    "  Note: finite-population summaries of the effects of these strata and levels\n",
+    "  (Gelman 2005); they depend little on the prior when each stratum has enough\n",
+    "  data. See ?maihda.\n\n")))
   invisible(NULL)
 }
 
@@ -1059,10 +2854,75 @@ maihda_print_context_partition <- function(ctx) {
     cat(sprintf("  Context share interval: %s\n",
                 fmt_share(ctx$vpc_context_total, ctx$vpc_context_total_ci)))
   }
+  # A brms fit's contexts with few levels are named below the note (see
+  # maihda_context_few_levels()), and its realised partition follows.
+  few_note <- maihda_context_few_levels_note(
+    maihda_context_few_levels(ctx), pointer = if (!is.null(ctx$realised)) "block" else "none")
   cat(maihda_palette()$muted(paste0(
       "  Note: the headline VPC/ICC is the between-stratum share conditional on\n",
       "  the context random effect(s). The context share is the between-context\n",
-      "  component of the unexplained variance.\n\n")))
+      "  component of the unexplained variance.\n",
+      if (length(few_note) > 0) paste0(paste(few_note, collapse = "\n"), "\n"),
+      "\n")))
+  if (!is.null(ctx$realised)) {
+    maihda_print_context_realised(ctx$realised, ctx$context_levels)
+  }
+  invisible(NULL)
+}
+
+# Print the realised contextual partition of a brms fit (see
+# maihda_context_realised_from_draws()); `levels` is the partition's context_levels.
+# The shares are left out where the partition gives none (a Poisson or
+# negative-binomial fit).
+maihda_print_context_realised <- function(r, levels = NULL) {
+  pal <- maihda_palette()
+  fmt <- function(est, ci, scale = 1, digits = 4L, suffix = "") {
+    if (!isTRUE(is.finite(est))) {
+      return("NA")
+    }
+    v <- function(x) sprintf("%.*f%s", digits, scale * x, suffix)
+    if (length(ci) == 2L && all(is.finite(ci))) {
+      sprintf("%s [%s, %s]", v(est), v(ci[1]), v(ci[2]))
+    } else {
+      v(est)
+    }
+  }
+  pct <- function(est, ci) fmt(est, ci, scale = 100, digits = 1L, suffix = "%")
+  ctx <- names(r$per_context)
+  shares <- !is.null(r$vpc_stratum)
+  rows <- list(list("Between-stratum variance:", fmt(r$var_stratum, r$var_stratum_ci),
+                    if (shares) pct(r$vpc_stratum, r$vpc_stratum_ci)))
+  for (nm in ctx) {
+    rows[[length(rows) + 1L]] <- list(
+      sprintf("Context '%s' variance:", nm),
+      fmt(r$per_context[[nm]], r$per_context_ci[nm, ]),
+      if (shares) pct(r$vpc_context[[nm]], r$vpc_context_ci[nm, ]))
+  }
+  if (length(ctx) > 1L) {
+    rows[[length(rows) + 1L]] <- list(
+      "All contexts combined:", fmt(r$context_var_total, r$context_var_total_ci),
+      if (shares) pct(r$vpc_context_total, r$vpc_context_total_ci))
+  }
+  if (!is.null(r$other_var)) {
+    rows[[length(rows) + 1L]] <- list("Other random effects:",
+                                      fmt(r$other_var, r$other_var_ci), NULL)
+  }
+  width <- max(nchar(vapply(rows, `[[`, character(1), 1L)))
+  n_lv <- if (is.null(levels)) rep(NA_integer_, length(ctx)) else unname(levels[ctx])
+  counted <- ifelse(is.na(n_lv), sprintf("'%s'", ctx),
+                    sprintf("%d level%s of '%s'", n_lv, ifelse(n_lv == 1L, "", "s"), ctx))
+  cat(pal$bold(sprintf("Realised strata and contexts (%d strata; %s):",
+                       as.integer(r$n_strata), paste(counted, collapse = ", "))),
+      "\n", sep = "")
+  cat("  ", pal$muted(maihda_vpc_interval_label(r)), "\n", sep = "")
+  for (row in rows) {
+    cat(sprintf("  %-*s %s%s\n", width, row[[1]], row[[2]],
+                if (is.null(row[[3]])) "" else paste0("  share ", row[[3]])))
+  }
+  cat(pal$muted(paste0(
+    "  Note: finite-population summaries of the effects of these strata and\n",
+    "  contexts (Gelman 2005); they depend little on the prior when each has\n",
+    "  enough data. See ?maihda.\n\n")))
   invisible(NULL)
 }
 
@@ -1077,7 +2937,22 @@ print.maihda_summary <- function(x, ...) {
   cat(pal$bold("MAIHDA Model Summary"), "\n", sep = "")
   cat("====================\n\n")
 
-  maihda_print_fit_diagnostics(x$diagnostics)
+  # Say which of a two-model analysis's models this is: the null model's fixed
+  # effects are the intercept and covariates only (its strata dimensions are the
+  # random-effect grouping), so an unlabelled print reads as if the dimensions
+  # were missing. Tagged by maihda(); absent for a bare fit_maihda() summary.
+  role <- attr(x, "maihda_role")
+  if (identical(role, "null")) {
+    cat(pal$muted("Null model. Use which = \"adjusted\" for the adjusted model.\n\n"))
+  } else if (identical(role, "adjusted")) {
+    cat(pal$muted("Adjusted model.\n\n"))
+  }
+  maihda_print_fit_diagnostics(x$diagnostics, cc_info = x$cc_info)
+  # The auto-bin recipe belongs next to the numbers it produced: a tertile-binned
+  # numeric dimension makes the strata (and so the VPC/PCV below) data-dependent,
+  # and make_strata()'s fit-time message is long gone by the time a saved model is
+  # printed in another session.
+  maihda_print_autobin_info(x$strata_autobin_info)
 
   is_lng <- !is.null(x$longitudinal)
   if (is_lng) {
@@ -1091,13 +2966,27 @@ print.maihda_summary <- function(x, ...) {
                 pal$accent(sprintf("%.4f", x$vpc$estimate)), x$vpc$ci_lower, x$vpc$ci_upper))
     cat("  ", pal$muted(maihda_vpc_interval_label(x$vpc)), "\n", sep = "")
     if (!is.null(x$vpc$mc_se) && is.finite(x$vpc$mc_se)) {
-      cat(pal$muted(sprintf("  (%d successful bootstrap draws; Monte Carlo SE %.4f)\n",
-                  as.integer(x$vpc$n_boot_ok), x$vpc$mc_se)))
+      cat(pal$muted(sprintf(
+        "  (%d successful bootstrap draws; Monte Carlo SE of the bootstrap mean %.4f)\n",
+        as.integer(x$vpc$n_boot_ok), x$vpc$mc_se)))
+    }
+    if (!is.null(x$vpc$n_boot_nonconverged) && is.finite(x$vpc$n_boot_nonconverged) &&
+        x$vpc$n_boot_nonconverged > 0) {
+      cat(pal$muted(sprintf(paste0(
+        "  (%d contributing draw(s) had an optimiser that did not converge and were\n",
+        "   retained; n_boot_ok counts them alongside converged refits.)\n"),
+        as.integer(x$vpc$n_boot_nonconverged))))
+    }
+    if (isFALSE(x$vpc$interval_reliable)) {
+      cat(pal$warn(paste0(
+        "  (Interval flagged UNRELIABLE: more than half the contributing draws did\n",
+        "   not converge. Treat it as indicative only and check for singular fits.)\n")))
     }
     cat("\n")
   } else {
     cat(sprintf("  Estimate: %s\n\n", pal$accent(sprintf("%.4f", x$vpc$estimate))))
   }
+  maihda_print_count_vpc_note(x$count_vpc, pal)
 
   cat(pal$bold("Variance Components:"), "\n", sep = "")
   print(x$variance_components, row.names = FALSE, digits = 4)
@@ -1113,6 +3002,51 @@ print.maihda_summary <- function(x, ...) {
     cat("  The between-stratum variance is a function of time (random intercept +\n")
     cat("  slope), so the VPC varies; it depends on where time is zeroed. See\n")
     cat("  plot(type = \"vpc_trajectory\") for the full curve.\n\n")
+    # Bell et al. (2024) eq. (5). A DIFFERENT denominator from the VPC above -- the
+    # occasion-level residual is excluded -- so they answer a different question.
+    # Only the intercept VPC is ordered against the VPC above (larger, at the
+    # reference time); the slope VPC is on the slope scale and is not comparable to
+    # it at all. Kept to a few lines here; ?summary.maihda_model and the
+    # longitudinal vignette carry the full contrast.
+    tv_i <- x$longitudinal$vpc_intercept
+    tv_s <- x$longitudinal$vpc_slope
+    if (!is.null(tv_i) || !is.null(tv_s)) {
+      # Interval when one is available: a posterior credible interval for brms (the
+      # trajectory VPCs are summarised per draw there, like vpc_t) and a bootstrap
+      # band for a bootstrapped lme4 fit. These shares are badly determined when the
+      # strata are few -- 0.58 carrying a [0.34, 0.82] credible interval is a routine
+      # brms result -- so a bare point estimate reads as far more precise than it is.
+      tv_ci <- function(ci) {
+        if (!is.null(ci) && length(ci) == 2L && all(is.finite(ci))) {
+          sprintf(" [%.4f, %.4f]", ci[1], ci[2])
+        } else {
+          ""
+        }
+      }
+      fmt_tv <- function(v) if (isTRUE(is.finite(v))) sprintf("%.4f", v) else "NA"
+      ci_i <- tv_ci(x$longitudinal$vpc_intercept_ci)
+      ci_s <- tv_ci(x$longitudinal$vpc_slope_ci)
+      cat("Trajectory VPCs (Bell et al. 2024, eq. 5; occasion-level variance excluded):\n")
+      cat(sprintf("  Intercept (%s = %g): %s%s    Slope: %s%s\n",
+                  x$longitudinal$time, x$longitudinal$ref_time,
+                  pal$accent(fmt_tv(tv_i)), ci_i,
+                  pal$accent(fmt_tv(tv_s)), ci_s))
+      if (nzchar(ci_i) || nzchar(ci_s)) {
+        cat("  ", pal$muted(maihda_vpc_interval_label(
+          list(method = x$longitudinal$trajectory_vpc_method,
+               conf_level = x$longitudinal$conf_level))), "\n", sep = "")
+      }
+      # One sentence on WHICH QUESTION each answers -- the part a reader cannot infer
+      # from the header, and the one that stops the larger number being reported as
+      # "the VPC". The ordering claim is deliberately split: "at the reference time"
+      # is load-bearing for the intercept (it exceeds the VPC at the same time point,
+      # but not necessarily its maximum over the whole trajectory), and the slope VPC
+      # gets no ordering at all because its numerator is a slope variance.
+      cat("  These ask how intersectionally patterned trajectories are; the VPC\n")
+      cat("  above asks how much of an observed measurement a stratum explains.\n")
+      cat("  Intercept exceeds it at the reference time; Slope is on a different\n")
+      cat("  scale and is not comparable to it. See ?summary.maihda_model.\n\n")
+    }
   }
 
   if (!is.null(x$decomposition)) {
@@ -1123,8 +3057,9 @@ print.maihda_summary <- function(x, ...) {
     maihda_print_context_partition(x$context)
   }
 
-  # Discriminatory accuracy (AUC + MOR) and, when requested, the response-scale VPC --
-  # the binomial companions to the latent-scale VPC. Reuse their own print methods.
+  # Discriminatory accuracy (AUC + MOR), the binomial companion to the latent-scale
+  # VPC, and, when requested, the response-scale VPC (the probability scale for a
+  # binomial fit, the count scale for a count fit). Reuse their own print methods.
   if (!is.null(x$discriminatory_accuracy)) {
     print(x$discriminatory_accuracy)
     cat("\n")
@@ -1134,8 +3069,67 @@ print.maihda_summary <- function(x, ...) {
     cat("\n")
   }
 
-  cat(pal$bold("Fixed Effects:"), "\n", sep = "")
-  print(x$fixed_effects, row.names = FALSE, digits = 4)
+  # The frequentist engines carry Wald statistics and an interval (see
+  # maihda_fixed_effects_table); brms carries the posterior summary matrix,
+  # whose column names already label the quantiles.
+  fe_level <- if (is.null(x$conf_level)) 95 else 100 * x$conf_level
+  fe_print <- x$fixed_effects
+  # A t reference is only ever used where finite-sample degrees of freedom were
+  # available (a Gaussian lme4 fit); everywhere else the df column is all-NA and
+  # is dropped rather than printed as a column of blanks.
+  fe_has_df <- is.data.frame(fe_print) && "df" %in% names(fe_print) &&
+    any(!is.na(fe_print$df))
+  fe_boot <- identical(x$df_method, "bootstrap")
+  fe_header <- if (is.data.frame(fe_print) && "lower" %in% names(fe_print)) {
+    if (fe_boot) {
+      sprintf("Fixed Effects (parametric bootstrap, %s%% intervals):",
+              format(round(fe_level, 1), trim = TRUE))
+    } else {
+      sprintf("Fixed Effects (Wald %s, %s%% intervals):",
+              if (fe_has_df) "t" else "z", format(round(fe_level, 1), trim = TRUE))
+    }
+  } else {
+    "Fixed Effects:"
+  }
+  cat(pal$bold(fe_header), "\n", sep = "")
+  if (is.data.frame(fe_print) && "p_value" %in% names(fe_print)) {
+    # Without this a p of 1e-200 prints as "0.00000" next to a p of 0.04.
+    fe_print$p_value <- format.pval(fe_print$p_value, digits = 3, eps = 1e-16)
+  }
+  if (is.data.frame(fe_print) && "df" %in% names(fe_print) && !fe_has_df) {
+    fe_print$df <- NULL
+  }
+  print(fe_print, row.names = FALSE, digits = 4)
+  if (fe_has_df) {
+    # One line, not a lecture: without it the small df on a dimension main effect
+    # reads as a typo, but this prints on every Gaussian summary.
+    cat("  df: containment (between-within).\n")
+  }
+  if (fe_boot && is.data.frame(fe_print) && "p_value" %in% names(fe_print) &&
+      any(fe_print$term == "(Intercept)" & is.na(x$fixed_effects$p_value))) {
+    # Otherwise the blank intercept row reads as a failure rather than a design
+    # decision: there is no model without an intercept to simulate a null from.
+    cat("  Intercept: no null model to bootstrap, so no p-value or interval.\n")
+  }
+  if (fe_boot) {
+    # Read from x$fixed_effects, not fe_print: formatting the p-value column above
+    # rebuilds the frame and does not carry the bootstrap attributes across.
+    # Same two-part report the VPC interval gets -- how many non-converged draws
+    # were retained, and whether that share makes the reference untrustworthy.
+    fe_nonconv <- attr(x$fixed_effects, "n_boot_nonconverged")
+    if (is.numeric(fe_nonconv) && length(fe_nonconv) == 1L &&
+        !is.na(fe_nonconv) && fe_nonconv > 0) {
+      cat(pal$muted(sprintf(paste0(
+        "  (%d contributing draw(s) had an optimiser that did not converge and were\n",
+        "   retained in the reference distribution.)\n"), as.integer(fe_nonconv))))
+    }
+    if (isFALSE(attr(x$fixed_effects, "interval_reliable"))) {
+      cat(pal$warn(paste0(
+        "  (Reference distribution flagged UNRELIABLE: more than half the contributing\n",
+        "   draws did not converge. Treat these p-values and intervals as indicative\n",
+        "   only and check for singular fits.)\n")))
+    }
+  }
   cat("\n")
 
   if (!is.null(x$thresholds) && nrow(x$thresholds) > 0) {

@@ -147,8 +147,15 @@ plot(cc_grp, type = "group_components")       # additive / interaction / residua
 ### A Bayesian fit
 
 Set `engine = "brms"` for a Bayesian crossed-dimensions fit; the additive and interaction
-shares then carry posterior credible intervals (no bootstrap needed). This is the
-recommended engine when dimensions have few levels (see the caveats below).
+shares then carry posterior credible intervals (no bootstrap needed). When dimensions
+have few levels, those shares and the VPC depend on the prior on the random-effect
+standard deviations (see the caveats below). A `brms` fit therefore also reports the
+*realised strata*: the VPC, the additive and interaction shares, the variances and,
+with a logit link, the median odds ratio of the effects of the strata and dimension
+levels in the data (finite-population summaries, Gelman 2005), which depend little on
+that prior when each stratum has enough data; with few observations per stratum they
+come out too high and move with the prior too. `print()` shows them in a second block
+and `decomposition$realised` holds them; `?maihda` defines each one.
 
 ```{r brms, eval = FALSE}
 cc_b <- maihda(
@@ -158,6 +165,7 @@ cc_b <- maihda(
   decomposition = "crossed-dimensions"
 )
 cc_b$decomposition$additive_share_ci
+cc_b$decomposition$realised$additive_share_ci
 ```
 
 ### Two important caveats
@@ -174,8 +182,20 @@ cc_b$decomposition$additive_share_ci
    variable) contributes a variance estimated from just two groups, so `lme4` may
    estimate one or more variance components at or near zero (a singular fit).
    This makes the additive and interaction shares unstable. Watch for the
-   singular-fit note in the output, and consider `engine = "brms"` with explicit
-   prior sensitivity checks when dimensions are few-levelled.
+   singular-fit note in the output. `engine = "brms"` does not repair this: the
+   posterior of a few-level dimension's variance depends on the prior on its
+   standard deviation, with two levels roughly in proportion to that prior's
+   scale. Under the default prior the VPC and the additive share are overstated,
+   most with two- to four-level dimensions, and with two- or three-level
+   dimensions the additive share comes out high even where the dimensions have no
+   additive effect. The output of a `brms` fit names the dimensions with fewer
+   than 10 levels, and its realised-strata block, which depends little on the
+   prior when each stratum has enough data, is the part of it to report with such
+   dimensions. Otherwise prefer the
+   two-model decomposition (for few strata see `estimation` in
+   `?calculate_pcv`), or pass a `prior` and report how the variance components
+   change with it
+   (`vignette("bayesian_sparse_maihda", package = "MAIHDA")` shows a fit with one).
 
 ## Part 2, Contextual cross-classified MAIHDA (`context =`)
 
@@ -264,8 +284,21 @@ Because they answer different questions, `maihda()` errors if you supply both.
 ### Notes
 
 - Few context levels identify the context variance weakly. The
-  `maihda_country_data` example has only 6 countries resulting in imprecise estimates and `lme4` may fit it singular. Prefer many-level contexts, or `engine = "brms"`, whose priors
-  regularise the variance.
+  `maihda_country_data` example has only 6 countries, so its country variance and
+  share are imprecise. `lme4` may estimate such a variance at zero (a singular fit),
+  and `engine = "brms"` does not repair this: the posterior of a few-level context's
+  variance depends on the prior on its standard deviation and, under the default
+  prior, comes out high when the context effects are smaller than that prior's scale
+  (most with two or three contexts), and the context share and the VPC depend on it.
+  `print()` of a `brms` analysis and of its `summary()` names the contexts with fewer
+  than 10 levels. A `brms` fit also reports the realised partition, the variances and
+  shares of the effects of the strata and context levels in the data
+  (`summary()$context$realised`, defined in `?maihda`), which depend little on that
+  prior when each context and stratum has enough data. Prefer many-level contexts; with
+  few, report the context share with its interval, or enter the context as a fixed effect
+  instead
+  (`math ~ country + (1 | gender:ses)`, without `context =`) when only the strata net
+  of it are wanted.
 - A manually written `+ (1 | school)` in the formula fits the same model, but is
   summarised generically as "Other random effects". Only `context =` activates the
   labelled stratum-vs-context partition.

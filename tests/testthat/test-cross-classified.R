@@ -194,6 +194,70 @@ test_that("crossed-dimensions plots render", {
   expect_s3_class(suppressWarnings(plot(cc, type = "predicted")), "ggplot")
 })
 
+test_that("crossed-dimensions stratum predictions exclude a contextual random effect", {
+  # Finding: a crossed-dimensions fit that ALSO carries a contextual random effect
+  # (context = "site") built its per-stratum predicted-outcome baseline as
+  # predict(ALL random effects) - u_stratum, leaving the site effect in the
+  # baseline. The ranked stratum prediction then depended on each stratum's observed
+  # site composition. The baseline must be fixed effects + the ADDITIVE dimension REs
+  # only; the interaction stratum RE is added back per row.
+  skip_on_cran()
+  set.seed(4242)
+  n <- 2000
+  d <- data.frame(
+    a = sample(c("a1", "a2", "a3"), n, replace = TRUE),
+    b = sample(c("b1", "b2"), n, replace = TRUE),
+    stringsAsFactors = FALSE
+  )
+  # Site MIX depends on dimension a, so strata differ in composition and a leaked
+  # site effect would shift them unevenly.
+  site_pool <- list(a1 = paste0("s", 1:5), a2 = paste0("s", 6:10),
+                    a3 = paste0("s", 11:15))
+  d$site <- vapply(d$a, function(av) sample(site_pool[[av]], 1), character(1))
+  ua <- stats::setNames(stats::rnorm(3, sd = 0.8), c("a1", "a2", "a3"))
+  ub <- stats::setNames(stats::rnorm(2, sd = 0.6), c("b1", "b2"))
+  usite <- stats::setNames(stats::rnorm(15, sd = 1.5), paste0("s", 1:15))
+  strat <- interaction(d$a, d$b, drop = TRUE)
+  uint <- stats::setNames(stats::rnorm(nlevels(strat), sd = 0.5), levels(strat))
+  d$y <- 1 + ua[d$a] + ub[d$b] + uint[as.character(strat)] +
+    usite[d$site] + stats::rnorm(n, sd = 1)
+
+  a <- suppressWarnings(suppressMessages(
+    maihda(y ~ (1 | a:b), data = d, decomposition = "crossed-dimensions",
+           context = "site")))
+  m <- a$model
+  expect_false(is.null(m$cc_info))
+  expect_true("site" %in% names(lme4::ranef(m$model)))   # the fit carries a site RE
+
+  s <- suppressWarnings(summary(m))
+  pred <- MAIHDA:::maihda_stratum_predictions_lme4(m, s, scale = "link")
+  strata_keys <- as.character(m$data$stratum)
+
+  # Correct scoped reconstruction: fixed effects + dimension REs (a, b) ONLY, plus
+  # the interaction stratum RE per row, aggregated to per-stratum means (computed in
+  # pred$stratum order to avoid array-attribute mismatches).
+  eta_dim <- as.numeric(stats::predict(m$model, newdata = m$data,
+                                       re.form = ~ (1 | a) + (1 | b),
+                                       type = "link"))
+  u_map <- stats::setNames(s$stratum_estimates$random_effect,
+                           as.character(s$stratum_estimates$stratum))
+  u_row <- u_map[strata_keys]
+  u_row[is.na(u_row)] <- 0
+  base_row <- eta_dim + u_row
+  expected <- vapply(as.character(pred$stratum),
+                     function(g) mean(base_row[strata_keys == g]), numeric(1))
+  expect_equal(as.numeric(pred$predicted_row), unname(expected), tolerance = 1e-8)
+
+  # Regression guard: the old leaked baseline = predict(all REs) - u_stratum, so the
+  # per-row prediction was eta(all REs) INCLUDING the site effect. That differs
+  # materially from the corrected, site-excluded prediction.
+  eta_all <- as.numeric(stats::predict(m$model, newdata = m$data, type = "link"))
+  leaked <- vapply(as.character(pred$stratum),
+                   function(g) mean(eta_all[strata_keys == g]), numeric(1))
+  expect_false(isTRUE(all.equal(as.numeric(pred$predicted_row), unname(leaked))))
+  expect_gt(max(abs(as.numeric(pred$predicted_row) - unname(leaked))), 0.02)
+})
+
 # ---- group comparison -------------------------------------------------------
 
 test_that("compare_maihda_groups(decomposition = 'crossed-dimensions') reports shares", {
@@ -271,10 +335,29 @@ test_that("crossed-dimensions brms summary returns posterior shares with interva
   skip_if_not_installed("brms")
 
   d <- make_cc_data(seed = 7100, n = 900)
+  # At the old chains = 2, iter = 500 the chains had not mixed. Four variance
+  # components (three dimensions plus the interaction) need iter = 2000 and
+  # adapt_delta = 0.99 -- at 0.95 a single divergent transition survives, which
+  # the package's bar (max Rhat <= 1.01 AND zero divergences) rightly rejects.
+  # adapt_delta = 0.99 roughly doubles the per-iteration cost (838s here against
+  # 505s at 0.95); the block is gated behind MAIHDA_TEST_BRMS and skip_on_cran,
+  # so correctness wins over wall clock.
+  # set.seed() rather than seed =: maihda()'s 'seed' formal is the response-scale
+  # VPC simulation seed and never reaches brms::brm(), so it does not pin the
+  # sampler (maihda() now warns when the two are combined). brms draws its seed
+  # from R's RNG, so this does pin it.
+  set.seed(20260831)
   cc <- suppressWarnings(suppressMessages(
     maihda(y ~ x + (1 | a:b:cc), data = d, engine = "brms",
            decomposition = "crossed-dimensions",
-           chains = 2, iter = 500, refresh = 0, seed = 1)))
+           chains = 2, iter = 2000, warmup = 1000, refresh = 0,
+           control = list(adapt_delta = 0.99))))
+  # Fixture guard -- see the note in test-ordinal-engine.R. NOTE: the
+  # crossed-dimensions path returns a single fitted model; cc$model_adjusted is
+  # NULL here (unlike the longitudinal decomposition, which carries both), so
+  # cc$model is the only object with diagnostics to assert on.
+  expect_null(cc$model_adjusted)
+  expect_true(isTRUE(cc$model$diagnostics$converged))
 
   dcmp <- cc$decomposition
   expect_identical(dcmp$method, "posterior")
@@ -283,6 +366,12 @@ test_that("crossed-dimensions brms summary returns posterior shares with interva
   expect_true(all(is.finite(dcmp$additive_share_ci)))
   expect_identical(cc$summary$vpc$method, "posterior")
   expect_true(cc$summary$vpc$ci_lower < cc$summary$vpc$ci_upper)
+  # No recovery assertion on the shares. Each dimension's variance is estimated
+  # from THREE levels, so the design is near-unidentified: on this seed the "c"
+  # dimension is drawn at sd 0.5 but realizes var 0.0096, putting the realized
+  # additive share at 0.558 against a posterior mean of 0.816. The interval does
+  # cover it, but only because it spans [0.39, 0.97] -- pinning a target that
+  # loose would assert nothing while looking like it asserted something.
 })
 
 # ---- regression: the default two-model path is unchanged --------------------
@@ -304,26 +393,33 @@ test_that("default compare_maihda_groups() keeps the two-model PCV schema", {
   expect_false("additive_share" %in% names(g))
 })
 
-# ---- deprecated alias --------------------------------------------------------
+# ---- the term "cross-classified" ---------------------------------------------
 
-test_that("decomposition = 'cross-classified' warns and maps to 'crossed-dimensions'", {
+test_that("decomposition = 'cross-classified' errors, naming both designs it can mean", {
   d <- make_cc_data()
-  # capture_warnings() so the deprecation warning can be asserted while incidental
-  # lme4 fit warnings (singular dimension REs) are tolerated.
-  w1 <- capture_warnings(
-    a <- suppressMessages(
-      maihda(y ~ x + (1 | a:b:cc), data = d, decomposition = "cross-classified")))
-  expect_true(any(grepl("renamed.*crossed-dimensions", w1)))
-  expect_identical(a$mode, "crossed-dimensions")
-  expect_false(is.null(a$decomposition))
-
-  w2 <- capture_warnings(
-    g <- suppressMessages(
-      compare_maihda_groups(y ~ x + (1 | a:b:cc), data = d, group = "grp",
-                            decomposition = "cross-classified")))
-  expect_true(any(grepl("renamed.*crossed-dimensions", w2)))
-  expect_identical(attr(g, "decomposition"), "crossed-dimensions")
-  expect_true("additive_share" %in% names(g))
+  # One helper raises the error for every entry point, before anything is fitted (a
+  # fit would reach this stub and raise its message instead) and without a warning.
+  local_mocked_bindings(fit_maihda = function(...) stop("a model was fitted"))
+  err <- function(expr) {
+    n_warn <- 0L
+    e <- withCallingHandlers(tryCatch(expr, error = function(e) e),
+                             warning = function(w) {
+                               n_warn <<- n_warn + 1L
+                               invokeRestart("muffleWarning")
+                             })
+    expect_identical(n_warn, 0L)
+    e
+  }
+  e0 <- err(maihda_resolve_decomposition("cross-classified"))
+  e1 <- err(maihda(y ~ x + (1 | a:b:cc), data = d, decomposition = "cross-classified"))
+  e2 <- err(compare_maihda_groups(y ~ x + (1 | a:b:cc), data = d, group = "grp",
+                                  decomposition = "cross-classified"))
+  for (e in list(e0, e1, e2)) expect_s3_class(e, "error")
+  expect_identical(conditionMessage(e1), conditionMessage(e0))
+  expect_identical(conditionMessage(e2), conditionMessage(e0))
+  expect_match(conditionMessage(e0), "decomposition = \"crossed-dimensions\"",
+               fixed = TRUE)
+  expect_match(conditionMessage(e0), "'context' argument", fixed = TRUE)
 })
 
 # ---- brms crossed-dimensions summary with a context (Stan-free) ---------------
@@ -368,7 +464,8 @@ test_that("maihda_cc_summary_brms folds a context into the partition (Stan-free)
   expect_identical(res$context$context_vars, "site")
   expect_equal(res$context$vpc_context_total, stats::median(v_c / total))
   expect_length(res$context$vpc_context_total_ci, 2)
-  expect_equal(unname(res$context$per_context["site"]), mean(v_c))
+  # Each variance component is the posterior median of its own draws.
+  expect_equal(unname(res$context$per_context["site"]), stats::median(v_c))
 
   tab <- res$variance_components
   expect_true("Context: site" %in% tab$component)

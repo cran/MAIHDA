@@ -41,8 +41,59 @@ test_that("tidy.maihda_model returns broom-shaped strata / variance / fixed tibb
 
   fe <- tidy(m, component = "fixed")
   expect_identical(names(fe),
-                   c("term", "estimate", "std.error", "conf.low", "conf.high"))
+                   c("term", "estimate", "std.error", "statistic", "df", "p.value",
+                     "conf.low", "conf.high"))
   expect_true(all(c("(Intercept)", "age") %in% fe$term))
+})
+
+# Regression (2026-08-09): the lme4 summary used to store term/estimate only, so
+# tidy(component = "fixed") returned an all-NA std.error and no interval.
+test_that("tidy(component = 'fixed') carries lme4 SEs, statistics and Wald intervals", {
+  d <- make_tidy_data()
+  m <- fit_maihda(y ~ age + (1 | gender:race), data = d)
+  fe <- tidy(m, component = "fixed")
+
+  cf <- stats::coef(summary(m$model))
+  expect_equal(fe$estimate, unname(cf[, "Estimate"]), tolerance = 1e-10)
+  expect_equal(fe$std.error, unname(cf[, "Std. Error"]), tolerance = 1e-10)
+  expect_true(all(is.finite(fe$std.error)) && all(fe$std.error > 0))
+
+  # Wald statistic, its two-sided t p-value on the containment degrees of freedom,
+  # and the matching 95% interval (2026-09-01: a Gaussian lme4 fit is referred to
+  # a t, not a z -- the intercept here is constant within a stratum).
+  expect_equal(fe$statistic, fe$estimate / fe$std.error, tolerance = 1e-10)
+  expect_true(all(is.finite(fe$df)))
+  expect_equal(fe$p.value, 2 * stats::pt(-abs(fe$statistic), df = fe$df),
+               tolerance = 1e-10)
+  expect_equal(fe$conf.low,
+               fe$estimate - stats::qt(0.975, fe$df) * fe$std.error, tolerance = 1e-10)
+  expect_equal(fe$conf.high,
+               fe$estimate + stats::qt(0.975, fe$df) * fe$std.error, tolerance = 1e-10)
+  # age varies within a stratum, so its t is z to three decimal places.
+  fe_z <- tidy(summary(m, df_method = "normal"), component = "fixed")
+  expect_true(all(is.na(fe_z$df)))
+  expect_equal(fe_z$p.value, 2 * stats::pnorm(-abs(fe_z$statistic)), tolerance = 1e-10)
+  expect_equal(fe$p.value[fe$term == "age"], fe_z$p.value[fe_z$term == "age"],
+               tolerance = 1e-3)
+  # age has a real effect (0.3) at n = 600 -> interval excludes zero.
+  expect_true(fe$conf.low[fe$term == "age"] > 0)
+  expect_lt(fe$p.value[fe$term == "age"], 0.001)
+})
+
+test_that("summary(conf_level =) sets the fixed-effect interval level", {
+  d <- make_tidy_data()
+  m <- fit_maihda(y ~ age + (1 | gender:race), data = d)
+
+  fe99 <- tidy(summary(m, conf_level = 0.99), component = "fixed")
+  fe95 <- tidy(m, component = "fixed")
+  expect_equal(fe99$conf.low,
+               fe99$estimate - stats::qt(0.995, fe99$df) * fe99$std.error,
+               tolerance = 1e-10)
+  expect_true(all(fe99$conf.low < fe95$conf.low))
+  expect_true(all(fe99$conf.high > fe95$conf.high))
+  expect_equal(fe99$p.value, fe95$p.value, tolerance = 1e-10)  # level-free
+
+  expect_error(summary(m, conf_level = 1.5), "conf_level")
 })
 
 test_that("glance.maihda_model is a one-row tibble with the headline columns", {
@@ -122,7 +173,8 @@ test_that("tidy/glance work for the wemix engine (design-weighted)", {
 
   fe <- tidy(m, component = "fixed")
   expect_true(all(c("term", "estimate", "std.error") %in% names(fe)))
-  expect_true(any(is.finite(fe$std.error)))   # WeMix reports design-consistent SEs
+  expect_true(any(is.finite(fe$std.error)))   # WeMix reports sandwich (robust) SEs
+  expect_true(all(is.finite(fe$conf.low)) && all(fe$conf.low < fe$conf.high))
 
   g <- glance(m)
   expect_identical(g$engine, "wemix")
@@ -139,6 +191,13 @@ test_that("tidy/glance work for the ordinal engine", {
   st <- tidy(m)
   expect_equal(nrow(st), N_STRATA)
 
+  # Location coefficients only -- a cumulative model's "intercepts" are the
+  # thresholds, reported by summary()$thresholds.
+  fe <- tidy(m, component = "fixed")
+  expect_identical(fe$term, "age")
+  expect_true(all(is.finite(fe$std.error)) && all(is.finite(fe$conf.low)))
+  expect_true(all(fe$conf.low < fe$estimate & fe$estimate < fe$conf.high))
+
   g <- glance(m)
   expect_identical(g$engine, "ordinal")
   expect_true(g$vpc > 0 && g$vpc < 1)
@@ -150,15 +209,35 @@ test_that("tidy/glance work for the brms engine", {
           "brms Stan tests are opt-in; set MAIHDA_TEST_BRMS=true to run them")
   skip_if_not_installed("brms")
   d <- make_tidy_data()
+  # The old chains = 1, iter = 600 fit reached max Rhat 1.075 with a bulk ESS of
+  # 36, and passed no seed at all -- so the Stan seed came from the ambient RNG
+  # and the block was not reproducible either. brms warned out of the glance()
+  # and tidy() calls below while every assertion passed. Only 6 strata here, so
+  # the intercept/sd_stratum funnel needs adapt_delta above the default to clear
+  # the zero-divergence half of the package's convergence bar.
   m <- suppressWarnings(suppressMessages(
     fit_maihda(y ~ age + (1 | gender:race), data = d, engine = "brms",
-               chains = 1, iter = 600, refresh = 0)))
+               chains = 4, iter = 2000, warmup = 1000, refresh = 0, seed = 101,
+               control = list(adapt_delta = 0.95))))
+  # Fixture guard -- see the note in test-ordinal-engine.R.
+  expect_true(isTRUE(m$diagnostics$converged))
 
   g <- glance(m)
   expect_identical(g$engine, "brms")
   expect_true(is.finite(g$vpc.conf.low) && is.finite(g$vpc.conf.high))  # posterior CI
+  # The band must actually cover the truth, not merely be finite. make_tidy_data
+  # draws 6 stratum effects at sd 0.7, realizing sd 0.6107 (var 0.3730) against a
+  # residual variance of 0.5^2, so the VPC is 0.3730 / (0.3730 + 0.25) = 0.599.
+  expect_true(g$vpc.conf.low < 0.599 && 0.599 < g$vpc.conf.high)
+  expect_true(g$vpc >= g$vpc.conf.low && g$vpc <= g$vpc.conf.high)
 
   fe <- tidy(m, component = "fixed")
   expect_true(all(c("conf.low", "conf.high") %in% names(fe)))
-  expect_true(any(is.finite(fe$conf.low)))
+  expect_true(all(is.finite(fe$conf.low)) && all(is.finite(fe$conf.high)))
+  # any(is.finite(.)) passed on a single finite cell. Assert the estimate the
+  # posterior is actually meant to recover: age enters at 0.3.
+  age <- fe[fe$term == "age", , drop = FALSE]
+  expect_equal(nrow(age), 1L)
+  expect_true(age$conf.low < 0.3 && 0.3 < age$conf.high)
+  expect_true(age$conf.low < age$estimate && age$estimate < age$conf.high)
 })

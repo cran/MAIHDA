@@ -14,9 +14,19 @@ plot_prediction_deviation_panels(
 )
 }
 \arguments{
-\item{model}{A fitted model object (e.g., from `lm()`, `glm()`, `MASS::polr()`, or `lme4::glmer()`).}
+\item{model}{A fitted model object (e.g., from \code{lm()}, \code{glm()},
+\code{MASS::polr()}, or \code{lme4::glmer()}).}
 
-\item{data}{The original data frame used to fit the model. If `NULL`, attempts to extract from the model.}
+\item{data}{The original data frame used to fit the model. If \code{NULL},
+attempts to extract from the model. When supplied, everything is computed for
+its own rows: their predictions, their binomial residuals (from their own
+outcomes and trial counts) and their weights in the stratum summaries. A row's
+weight is read from its column in \code{data} -- the sampling-weight column, or
+the column a bare model's \code{weights =} argument names (\code{glm()},
+\code{lmer()}, \code{MASS::polr()}, ...) -- or else from the fitted row with
+the same row name and prediction (a \code{fit_maihda()} model stores its
+weights as values). If any plotted row's weight cannot be found, every row is
+weighted equally, with a warning.}
 
 \item{type}{Model type: "auto" (default), "gaussian", "poisson", "binomial", or "ordinal".}
 
@@ -28,10 +38,10 @@ prediction for Gaussian/Poisson and the ordinal expected-score mode, absolute
 deviance residual for binomial, and surprise for the ordinal surprise mode.
 Default is 5.}
 
-\item{strata_info}{Optional data frame of strata labels, generally extracted from `maihda_model` objects.}
+\item{strata_info}{Optional data frame of strata labels, generally extracted from \code{maihda_model} objects.}
 }
 \value{
-A `patchwork` object containing two `ggplot2` panels.
+A \pkg{patchwork} object containing two \pkg{ggplot2} panels.
 }
 \description{
 Creates an advanced, publication-ready two-panel dashboard for
@@ -43,10 +53,51 @@ What "notable" means depends on the model type, and the labelled points are
     the cases/strata whose prediction sits furthest from the mean prediction
     (largest deviation), ranked by absolute deviation.
   \item Binomial: the cases/strata with the largest absolute deviance residual,
-    i.e. where the observed 0/1 outcome is least consistent with the fitted
-    probability (worst-fit points), ranked by \eqn{|deviance residual|}.
+    i.e. where the observed 0/1 outcome -- for an aggregated binomial
+    (\code{cbind(successes, failures)}, a proportion with its trial counts as
+    prior weights, or a brms \code{y | trials(n)} fit), the observed successes
+    out of trials -- is least consistent with the fitted probability (worst-fit
+    points), ranked by \eqn{|deviance residual|}. As in R's binomial family, a
+    prior weight counts as that many trials, so a 0/1 outcome with weights is
+    scored as that many successes or failures. Every row's outcome is coded as
+    the model coded it -- by label, whatever the order of a factor's levels in
+    \code{data} -- and a factor with more than two levels, as in R's binomial
+    family, as its first level against all the others. Predictions are per-trial
+    probabilities for every binomial fit. A row whose outcome or trial count is
+    unknown has no residual: it is left out of the stratum residual means, is
+    never labelled, and is drawn as a hollow point.
   \item Ordinal \code{"surprise"} mode: the cases/strata with the highest
     surprise \eqn{-\log P(\text{observed category})}, i.e. the least probable
-    observations under the model.
+    observations under the model. It needs the observed response in
+    \code{data}: a row whose response is missing is left out, and one whose
+    category is not among the model's fitted categories is left out with a
+    warning.
 }
+}
+\details{
+The vertical bars are 95\% intervals for the plotted values. On a stratum
+panel each bar is an interval for the stratum's weighted mean prediction, the point
+drawn: posterior quantiles of that mean for a \pkg{brms} fit, and for an \pkg{lme4}
+fit a delta-method interval from the joint covariance of the fixed and random
+effects (Henderson's mixed-model equations), formed on the logit scale for a
+probability and the log scale for a count, so that a bar stays inside the range of
+the response. A case-level panel of an \pkg{lme4} fit draws the same interval for
+each row. The \pkg{lme4} interval treats the variance parameters as known: it runs
+narrow when strata are few or small or an outcome is rare, and a random effect whose
+variance is estimated at zero adds no uncertainty to it. Other models draw
+case-level bars from the standard errors of their \code{predict()} method and no
+stratum bars; \pkg{WeMix} and ordinal fits draw none.
+}
+\references{
+Henderson, C. R. (1975). Best linear unbiased estimation and prediction under a
+selection model. \emph{Biometrics}, 31(2), 423-447. \doi{10.2307/2529430}
+
+Bates, D., Maechler, M., Bolker, B., & Walker, S. (2015). Fitting linear
+mixed-effects models using lme4. \emph{Journal of Statistical Software}, 67(1),
+1-48. \doi{10.18637/jss.v067.i01}
+
+Kackar, R. N., & Harville, D. A. (1984). Approximations for standard errors of
+estimators of fixed and random effects in mixed linear models. \emph{Journal of the
+American Statistical Association}, 79(388), 853-862.
+\doi{10.1080/01621459.1984.10477102}
 }

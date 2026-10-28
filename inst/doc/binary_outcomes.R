@@ -52,6 +52,36 @@ model_adj <- fit_maihda(
 pcv <- calculate_pcv(model_null2, model_adj)
 print(pcv)
 
+## ----adjusted-reml------------------------------------------------------------
+calculate_pcv(model_null2, model_adj, estimation = "REML")
+
+## ----interactions-------------------------------------------------------------
+model_int <- fit_maihda(
+  Obese ~ Gender + Race + Education + (1 | Gender:Race:Education),
+  data = health_complete, family = "binomial"
+)
+
+maihda_interactions(model_int)
+
+## ----scale-dependence---------------------------------------------------------
+p <- function(a, b) plogis(-2 + 0.7 * a + 0.7 * b)
+
+c(`risk added by B, at A = 0` = p(0, 1) - p(0, 0),
+  `risk added by B, at A = 1` = p(1, 1) - p(1, 0))
+
+## ----scale-dependence-zero----------------------------------------------------
+rd_int <- function(b0, a, b) {
+  (plogis(b0 + a + b) - plogis(b0 + a)) - (plogis(b0 + b) - plogis(b0))
+}
+
+vapply(c(`-2.0` = -2, `-0.7` = -0.7, `0.0` = 0), rd_int, numeric(1), a = 0.7, b = 0.7)
+
+## ----interactions-response----------------------------------------------------
+maihda_interactions(model_int, scale = "response")
+
+## ----interactions-rope--------------------------------------------------------
+table(maihda_interactions(model_int, scale = "response", rope = 0.02)$decision)
+
 ## ----da-----------------------------------------------------------------------
 da_null <- maihda_discriminatory_accuracy(model_null2)
 da_adj  <- maihda_discriminatory_accuracy(model_adj)

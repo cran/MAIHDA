@@ -141,12 +141,13 @@ test_that("summary() partitions stratum vs. context vs. residual coherently", {
   expect_gt(s$context$vpc_context_total, 0.05)
 })
 
-test_that("summary() of a binomial contextual fit attaches no discriminatory accuracy or response VPC", {
-  # The DA's AUC is built from full predictions that INCLUDE the context random
-  # effects, while the response-scale VPC simulates only the stratum variance -- so
-  # neither matches the stratum-vs-context partition the contextual summary reports.
-  # Both are therefore skipped for a contextual fit (as they are for crossed-dimensions
-  # and longitudinal fits), rather than pinning a mismatched estimand to the partition.
+test_that("summary() of a binomial contextual fit attaches scoped discriminatory accuracy and response VPC", {
+  # Audit finding: the earlier skip was stale. maihda_discriminatory_accuracy()
+  # now reports an intersectional-scope headline AUC that EXCLUDES the context
+  # random effect (the all-effects value is auc_full), and maihda_vpc_response()
+  # now integrates the context variance into its denominator -- so both sit on the
+  # same stratum-vs-context estimand this summary reports and are attached (only
+  # crossed-dimensions and longitudinal fits still skip them).
   set.seed(8131)
   d <- make_context_data(n = 2000, n_sites = 25)
   d$yb <- stats::rbinom(nrow(d), 1, stats::plogis(d$y - mean(d$y)))
@@ -159,12 +160,28 @@ test_that("summary() of a binomial contextual fit attaches no discriminatory acc
   s <- suppressWarnings(suppressMessages(summary(m, response_vpc = TRUE, seed = 1)))
   # The contextual partition is still produced...
   expect_false(is.null(s$context))
-  # ...but the binomial companions that would carry a mismatched estimand are not.
-  expect_null(s$discriminatory_accuracy)
-  expect_null(s$vpc_response)
+  # ...and now so are the binomial companions, on the matching (context-scoped)
+  # estimand rather than a mismatched one.
+  expect_s3_class(s$discriminatory_accuracy, "maihda_da")
+  expect_s3_class(s$vpc_response, "maihda_vpc_response")
 
-  # A single-stratum binomial fit on the same data DOES surface the DA -- confirming
-  # the skip is specific to the contextual structure, not the family.
+  # The headline AUC is the intersectional scope (excludes the context RE); the
+  # all-effects AUC is reported separately as auc_full and is at least as large.
+  expect_identical(s$discriminatory_accuracy$auc_scope, "intersectional")
+  expect_gte(s$discriminatory_accuracy$auc_full, s$discriminatory_accuracy$auc)
+
+  # The response-scale VPC integrates the context variance into its denominator
+  # (var_other > 0) rather than simulating the stratum effect alone.
+  expect_gt(s$vpc_response$var_other, 0)
+
+  # summary() attaches exactly what the standalone helpers compute (no refit).
+  da <- suppressWarnings(suppressMessages(maihda_discriminatory_accuracy(m)))
+  vr <- suppressWarnings(suppressMessages(maihda_vpc_response(m, seed = 1)))
+  expect_equal(s$discriminatory_accuracy$auc, da$auc, tolerance = 1e-10)
+  expect_equal(s$vpc_response$estimate, vr$estimate, tolerance = 1e-10)
+
+  # A single-stratum binomial fit on the same data also surfaces the DA -- the
+  # companions are attached for both structures now.
   m_plain <- suppressWarnings(suppressMessages(
     fit_maihda(yb ~ x + (1 | g1:g2), data = d, family = "binomial")
   ))
@@ -353,10 +370,19 @@ test_that("group + context is rejected up front for wemix / ordinal", {
     maihda(y ~ x + (1 | g1:g2), data = d, group = "region", context = "site",
            engine = "ordinal"),
     "does not support 'context'")
+  # An otherwise-valid wemix call: the context is refused before any group is fitted.
+  d$w <- 1
+  expect_error(
+    compare_maihda_groups(y ~ x + (1 | g1:g2), data = d, group = "region",
+                          context = "site", engine = "wemix", sampling_weights = "w"),
+    "does not support 'context'")
+  # Without the design weights, the engine's own requirement comes first, as it does
+  # in fit_maihda() (audit 2026-09-17c: compare_maihda_groups() used to report neither,
+  # failing every group in turn instead).
   expect_error(
     compare_maihda_groups(y ~ x + (1 | g1:g2), data = d, group = "region",
                           context = "site", engine = "wemix"),
-    "does not support 'context'")
+    "requires 'sampling_weights'")
 })
 
 test_that("context may not name the group variable", {
@@ -534,9 +560,11 @@ test_that("maihda_context_summary_brms partitions per draw (Stan-free)", {
   expect_equal(res$context$vpc_context_total_ci,
                stats::quantile(ctx_draws, c(0.05, 0.95), names = FALSE))
   expect_identical(res$context$method, "posterior")
-  expect_equal(res$context$var_stratum, mean(v_s))
-  expect_equal(unname(res$context$per_context["site"]), mean(v_c))
-  expect_equal(res$context$within_var, mean(v_e))
+  # Each variance component is the posterior median of its own draws.
+  expect_equal(res$context$var_stratum, stats::median(v_s))
+  expect_equal(unname(res$context$per_context["site"]), stats::median(v_c))
+  expect_equal(res$context$context_var_total, stats::median(v_c))
+  expect_equal(res$context$within_var, stats::median(v_e))
 
   tab <- res$variance_components
   expect_identical(attr(tab, "kind"), "contextual")
@@ -565,7 +593,8 @@ test_that("maihda_context_summary_brms keeps extra REs in the denominator; point
   v_x <- draws$sd_extra__Intercept^2
   v_e <- draws$sigma^2
   expect_equal(res$vpc_result$estimate, mean(v_s / (v_s + v_c + v_x + v_e)))
-  expect_equal(res$context$other_var, mean(v_x))
+  # `point` summarises the shares; the variance components stay posterior medians.
+  expect_equal(res$context$other_var, stats::median(v_x))
   expect_true("Other random effects" %in% res$variance_components$component)
   tab <- res$variance_components
   expect_equal(sum(tab$proportion[tab$component != "Total"]), 1, tolerance = 1e-8)
@@ -636,15 +665,33 @@ test_that("contextual brms summary returns posterior shares with intervals", {
   skip_if_not_installed("brms")
 
   d <- make_context_data(seed = 8200, n = 900, n_sites = 20)
+  # At the old chains = 2, iter = 500 this fit had not mixed. Two variance
+  # components over 6 strata and 20 sites make the intercept/sd funnel tight
+  # enough that iter = 2000 (1000 warmup) is not sufficient on its own: at
+  # adapt_delta = 0.95 one divergent transition survives, so 0.99 it is.
   m <- suppressWarnings(suppressMessages(
     fit_maihda(y ~ x + (1 | g1:g2), data = d, engine = "brms", context = "site",
-               chains = 2, iter = 500, refresh = 0, seed = 1)))
+               chains = 2, iter = 2000, warmup = 1000, refresh = 0, seed = 1,
+               control = list(adapt_delta = 0.99))))
+  # Fixture guard -- see the note in test-ordinal-engine.R.
+  expect_true(isTRUE(m$diagnostics$converged))
+
   s <- summary(m)
   expect_identical(s$vpc$method, "posterior")
   expect_true(s$vpc$ci_lower < s$vpc$ci_upper)
   expect_identical(s$context$method, "posterior")
   expect_length(s$context$vpc_context_total_ci, 2)
   expect_true(all(is.finite(s$context$vpc_context_total_ci)))
+  # Both bands must cover the truth, not merely be finite and ordered. On this
+  # seed make_context_data realizes var 0.4362 across the 6 strata and 0.8289
+  # across the 20 sites, against a residual variance of 1.2^2 = 1.44, so the
+  # stratum VPC is 0.161 and the site share 0.306. The strata are few, so the
+  # first band is wide -- but a partition that sent variance to the wrong level
+  # would still miss it.
+  expect_true(s$vpc$ci_lower < 0.161 && 0.161 < s$vpc$ci_upper)
+  expect_true(s$context$vpc_context_total_ci[1] < 0.306 &&
+              0.306 < s$context$vpc_context_total_ci[2])
+
   vc <- s$variance_components
   expect_true("Context: site" %in% vc$component)
   expect_equal(sum(vc$proportion[vc$component != "Total"]), 1, tolerance = 1e-6)
@@ -669,18 +716,19 @@ test_that("stepwise_pcv(context = ) isolates the between-stratum PCV net of cont
   expect_true("Context_Variance" %in% names(out))
 
   # The final step's between-stratum Variance equals the direct contextual fit's
-  # (ML-refit) stratum variance -- proving the (1 | site) effect is held every step
-  # and the stratum variance is read net of it.
+  # fitted (REML) stratum variance -- proving the (1 | site) effect is held every
+  # step and the stratum variance is read net of it. (stepwise_pcv defaults to
+  # estimation = "fitted", so no ML refit here.)
   m_ctx <- suppressWarnings(suppressMessages(
     fit_maihda(y ~ g1 + g2 + x + (1 | stratum), data = s$data, context = "site")))
-  v_ctx <- extract_between_variance(maihda_pcv_refit_ml(m_ctx))
+  v_ctx <- extract_between_variance(m_ctx)
   expect_equal(out$Variance[nrow(out)], v_ctx, tolerance = 1e-6)
 
   # Context genuinely matters for this data: the same fit WITHOUT the context has a
   # materially different stratum variance, so the match above is discriminating.
   m_noctx <- suppressWarnings(suppressMessages(
     fit_maihda(y ~ g1 + g2 + x + (1 | stratum), data = s$data)))
-  v_noctx <- extract_between_variance(maihda_pcv_refit_ml(m_noctx))
+  v_noctx <- extract_between_variance(m_noctx)
   expect_false(isTRUE(all.equal(v_ctx, v_noctx, tolerance = 1e-4)))
 })
 
@@ -703,12 +751,12 @@ test_that("stepwise_pcv Context_Variance reports the between-context variance an
   expect_equal(which(names(out) == "Context_Variance"),
                which(names(out) == "Variance") + 1L)
 
-  # Positive at every step and equal to the fitted site variance at the final step.
+  # Positive at every step and equal to the fitted (REML) site variance at the final
+  # step (stepwise_pcv defaults to estimation = "fitted", so no ML refit).
   expect_true(all(out$Context_Variance > 0))
   m_ctx <- suppressWarnings(suppressMessages(
     fit_maihda(y ~ g1 + g2 + x + (1 | stratum), data = s$data, context = "site")))
-  site_var <- unname(maihda_random_variances_lme4(
-    maihda_pcv_refit_ml(m_ctx)$model)["site"])
+  site_var <- unname(maihda_random_variances_lme4(m_ctx$model)["site"])
   expect_equal(out$Context_Variance[nrow(out)], site_var, tolerance = 1e-6)
 })
 
@@ -726,27 +774,30 @@ test_that("stepwise_pcv(context = ) filters context to one shared complete-case 
   m_null <- suppressWarnings(suppressMessages(
     fit_maihda(y ~ (1 | stratum), data = s_cc, context = "site")))
   expect_equal(out$Variance[1],
-               extract_between_variance(maihda_pcv_refit_ml(m_null)),
+               extract_between_variance(m_null),
                tolerance = 1e-6)
 })
 
-test_that("stepwise_pcv omits the AUC/MOR trajectory for a binary contextual fit", {
+test_that("stepwise_pcv reports the AUC/MOR trajectory for a binary contextual fit", {
   set.seed(4242)
   d <- make_context_data(n = 1500, n_sites = 20)
   d$yb <- stats::rbinom(nrow(d), 1, stats::plogis(d$y - mean(d$y)))
   s <- make_strata(d, vars = c("g1", "g2"))
 
-  # No discriminatory-accuracy columns (the AUC would include the context effect),
-  # but the net-of-context PCV trajectory and the context variance are reported.
+  # The discriminatory-accuracy columns ARE reported: maihda_discriminatory_accuracy()'s
+  # headline AUC is the intersectional-scope concordance (excluding the context random
+  # effect) and the MOR is the between-stratum quantity, so both share the scope of the
+  # net-of-context PCV columns -- matching summary.maihda_model(). (Earlier code
+  # suppressed them on the obsolete assumption the AUC included the context effect.)
   outb <- suppressWarnings(suppressMessages(
     stepwise_pcv(s$data, "yb", c("g1", "g2"), family = "binomial",
                  context = "site")))
-  expect_false(any(c("AUC", "Step_AUC", "Total_AUC", "MOR") %in% names(outb)))
+  expect_true(all(c("AUC", "Step_AUC", "Total_AUC", "MOR") %in% names(outb)))
   expect_true("Context_Variance" %in% names(outb))
   expect_true(all(is.finite(outb$Total_PCV)))
 
-  # The same binary stepwise WITHOUT context still carries the AUC trajectory --
-  # confirming the omission is specific to the contextual structure, not the family.
+  # The same binary stepwise WITHOUT context also carries the AUC trajectory --
+  # confirming the AUC is reported regardless of the contextual structure.
   outb0 <- suppressWarnings(suppressMessages(
     stepwise_pcv(s$data, "yb", c("g1", "g2"), family = "binomial")))
   expect_true(all(c("AUC", "MOR") %in% names(outb0)))

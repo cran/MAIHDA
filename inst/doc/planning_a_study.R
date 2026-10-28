@@ -21,6 +21,18 @@ nrow(s3$strata_info)
 summary(s3$strata_info$n)
 sum(s3$strata_info$n < 10)             # how many strata have < 10 people
 
+## ----describe-----------------------------------------------------------------
+desc <- maihda_describe(BMI ~ Age + (1 | Gender:Race:Education),
+                        data = maihda_health_data, flag_stratum_n = 20)
+desc
+
+## ----describe-strata----------------------------------------------------------
+head(desc$strata[order(desc$strata$n),
+                 c("label", "n", "n_analytic", "outcome_mean", "small")])
+
+## ----describe-plot, fig.alt="Histogram of stratum sizes with the small-stratum threshold marked"----
+plot(desc, type = "stratum_size")
+
 ## ----singular-----------------------------------------------------------------
 over <- fit_maihda(
   BMI ~ 1 + (1 | Gender:Race:Education),

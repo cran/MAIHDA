@@ -32,8 +32,12 @@
 #' (e.g. null vs covariate-adjusted) on the \emph{same} data and strata, to show
 #' how the VPC attenuates. If the supplied models differ in any of these,
 #' \code{compare_maihda()} still returns the table but issues a single warning,
-#' because the VPCs are then not directly comparable. The same comparability caveat
-#' applies to the appended information criteria (see \code{\link{maihda_ic}}). In
+#' because the VPCs are then not directly comparable. The appended information
+#' criteria follow the rules of \code{\link{maihda_ic}} instead: they need the same
+#' outcome, analytic sample and weights but not the same strata, and Poisson and
+#' negative-binomial fits of the same counts, or binomial or cumulative fits
+#' differing in their link, have comparable criteria although their VPCs are not
+#' comparable. In
 #' addition, when the appended criteria mix scales -- likelihood \code{AIC}/\code{BIC}
 #' (lme4/ordinal) shown alongside Bayesian \code{WAIC}/\code{LOOIC} (brms), which can
 #' happen for a same-family lme4-vs-brms comparison that the family/link check does
@@ -104,14 +108,18 @@ compare_maihda <- function(..., model_names = NULL, bootstrap = FALSE,
       if (is.finite(n)) as.integer(n) else NA_integer_
     }, integer(1))
     # Row identity of the analytic sample and the row-wise stratum assignment, so
-    # disjoint samples of the SAME size and strata are still flagged.
+    # disjoint samples of the SAME size and strata are still flagged. Both keys are
+    # made order-invariant (the id set is sorted; the stratum vector is aligned to
+    # the row names) so a reordered-but-identical fit is NOT reported as a different
+    # sample.
     row_keys <- vapply(models, function(m) {
       rid <- maihda_wrapper_row_ids(m)
-      if (is.null(rid)) NA_character_ else paste(rid, collapse = "\r")
+      if (is.null(rid)) NA_character_ else paste(sort(rid), collapse = "\r")
     }, character(1))
     row_stratum_keys <- vapply(models, function(m) {
       if (!is.null(m$data) && "stratum" %in% names(m$data)) {
-        paste(as.character(m$data$stratum), collapse = "\r")
+        paste(maihda_stratum_partition_key(m$data$stratum, rownames(m$data)),
+              collapse = "\r")
       } else {
         NA_character_
       }
@@ -148,11 +156,23 @@ compare_maihda <- function(..., model_names = NULL, bootstrap = FALSE,
       maihda_weight_fingerprint(m$model)
     }, character(1))
     # Likewise for SAMPLING weights (design-weighted fits): the prior-weight
-    # fingerprint above cannot see them (it degrades to "unit" for wemix/brms),
-    # so differing design weights -- or a weighted vs. unweighted mix -- get
-    # their own key, mirroring the calculate_pcv() guard.
+    # fingerprint above does not see them (it degrades to "unit" for wemix and
+    # leaves brms's weights(.maihda_sw) to this key), so differing design weights
+    # -- or a weighted vs. unweighted mix -- get their own key, mirroring the
+    # calculate_pcv() guard.
     sampling_keys <- vapply(models, function(m) {
       maihda_sampling_weight_fingerprint(m)
+    }, character(1))
+    # Random-effects grouping structure beyond the stratum: an added, dropped, or
+    # relabelled grouping (e.g. (1 | stratum) vs (1 | stratum) + (1 | site)) changes
+    # the variance decomposition, so the between-stratum VPCs are not directly
+    # comparable even on the same sample and strata. Mirrors the calculate_pcv()
+    # guard, as a warning to keep compare_maihda() flexible.
+    re_struct_keys <- vapply(models, function(m) {
+      bars <- tryCatch(reformulas::findbars(m$formula), error = function(e) NULL)
+      if (is.null(bars)) return(NA_character_)
+      paste(sort(vapply(bars, function(b) paste(deparse(b[[3]]), collapse = ""),
+                        character(1))), collapse = "|")
     }, character(1))
 
     issues <- character(0)
@@ -178,11 +198,15 @@ compare_maihda <- function(..., model_names = NULL, bootstrap = FALSE,
     if (length(unique(stats::na.omit(strata_keys))) > 1) {
       issues <- c(issues, "stratum definitions")
     }
+    if (length(unique(stats::na.omit(re_struct_keys))) > 1) {
+      issues <- c(issues, "random-effects structure")
+    }
     if (length(issues) > 0) {
       # Single aggregated warning even when several aspects differ.
       warning("compare_maihda(): models differ in ", paste(issues, collapse = " and "),
               ". VPCs are only directly comparable across models that share an ",
-              "outcome, family/link, analytic sample, and strata.", call. = FALSE)
+              "outcome, family/link, analytic sample, strata, and random-effects ",
+              "structure.", call. = FALSE)
     }
   }
 
@@ -321,26 +345,6 @@ plot.maihda_comparison <- function(x, ...) {
   return(p)
 }
 
-#' Plot Model Comparison (deprecated)
-#'
-#' Deprecated. Use \code{plot()} on the \code{\link{compare_maihda}} result
-#' instead, e.g. \code{plot(compare_maihda(...))}.
-#'
-#' @param comparison_df A data frame from \code{compare_maihda()}.
-#' @return A ggplot2 object.
-#' @keywords internal
-#' @export
-plot_comparison <- function(comparison_df) {
-  .Deprecated("plot", msg = paste(
-    "'plot_comparison()' is deprecated.",
-    "Use plot() on the compare_maihda() result, e.g. plot(compare_maihda(...))."
-  ))
-  if (is.data.frame(comparison_df) && !inherits(comparison_df, "maihda_comparison")) {
-    class(comparison_df) <- c("maihda_comparison", class(comparison_df))
-  }
-  plot(comparison_df)
-}
-
 #' Compare MAIHDA Metrics Across Levels of a Grouping Variable
 #'
 #' Fits a separate random-intercept MAIHDA model (intercept-only \emph{random}
@@ -354,8 +358,11 @@ plot_comparison <- function(comparison_df) {
 #' share of that group's intersectional inequality.
 #'
 #' It estimates one VPC per group as a stratified analysis: each group is modelled
-#' independently. It is \emph{not} a cross-classified model and does not adjust the
-#' strata for the grouping variable.
+#' independently -- the grouping variable itself is not modelled as a crossed
+#' random effect, and the strata are not adjusted for it. (A \code{context}
+#' argument, if supplied, does add a crossed contextual random intercept
+#' \emph{within} each group's model, making each per-group fit contextual
+#' cross-classified; the groups themselves remain independently fitted.)
 #'
 #' The VPC is the \emph{share} of the unexplained variance that lies between strata,
 #' not the absolute magnitude of intersectional inequality. Because it is a ratio,
@@ -377,6 +384,11 @@ plot_comparison <- function(comparison_df) {
 #'   \code{outcome ~ covars + (1 | var1:var2)} (strata are built automatically)
 #'   or \code{outcome ~ covars + (1 | stratum)} when \code{data} already contains
 #'   a \code{stratum} column from \code{\link{make_strata}}.
+#'   Any dimension main effect listed must be written as its bare column name: a
+#'   transformed term such as \code{factor(edu)} is rejected, because only a bare
+#'   name is recognised as a dimension's main effect and the transform would
+#'   otherwise survive into the derived null model. Transform the column in
+#'   \code{data} instead (\code{data$edu <- factor(data$edu)}).
 #' @param data A data frame containing the variables in \code{formula} and the
 #'   grouping variable.
 #' @param group Character string naming the grouping variable in \code{data}
@@ -412,8 +424,7 @@ plot_comparison <- function(comparison_df) {
 #'   binning of numeric grouping variables. Default TRUE.
 #' @param decomposition Per-group additive-vs-interaction decomposition: the two-model
 #'   null -> adjusted PCV (\code{"two-model"}, default) or the single crossed-dimensions
-#'   model (\code{"crossed-dimensions"}; \code{"cross-classified"} is a deprecated
-#'   alias that warns). The crossed-dimensions form requires
+#'   model (\code{"crossed-dimensions"}). The crossed-dimensions form requires
 #'   \code{shared_strata = TRUE} and at least two stratum dimensions, and adds the
 #'   \code{var_additive}, \code{var_interaction}, \code{additive_share} and
 #'   \code{interaction_share} columns (in place of \code{pcv} /
@@ -449,30 +460,58 @@ plot_comparison <- function(comparison_df) {
 #'   \code{\link{maihda_adjusted_terms}}). Set to \code{FALSE} internally when
 #'   \code{\link{maihda}} delegates here, because it has already warned on the same
 #'   data.
+#' @param estimation Variance-estimation basis for each group's per-group PCV,
+#'   \code{"fitted"} (default) or \code{"ML"}; see \code{\link{calculate_pcv}}.
+#'   Affects Gaussian \code{lmer} fits only. Recorded as an \code{"estimation"}
+#'   attribute on the returned comparison; the basis actually used is recorded as
+#'   \code{"estimation_used"} (\code{"mixed"} when a group's ML refit was skipped at
+#'   the boundary, leaving it on REML). Both are shown by \code{print()}. An
+#'   \code{"ml_variances"} attribute is \code{TRUE} when the groups' fits estimate their
+#'   variances by maximum likelihood (\code{glmer}, wemix or ordinal fits, or
+#'   \code{lmer} fits made with \code{REML = FALSE}) or the PCVs compare
+#'   maximum-likelihood refits (\code{estimation = "ML"}); under the default
+#'   \code{estimation} \code{print()} notes it below a table with PCVs, as
+#'   \code{\link{calculate_pcv}} does.
 #' @param ... Additional arguments passed to \code{\link{fit_maihda}} (and on to
-#'   \code{lmer}/\code{glmer}).
+#'   \code{lmer}/\code{glmer}). \code{weights}, \code{subset} and \code{offset} are
+#'   an error on the \code{wemix}, \code{brms} and \code{ordinal} engines.
 #'
 #' @return A \code{data.frame} of class \code{maihda_group_comparison} with one
 #'   row per group and columns \code{group}, \code{n}, \code{n_strata},
 #'   \code{vpc}, \code{var_between}, \code{var_other}, \code{var_residual},
-#'   \code{status} (and \code{ci_lower}/\code{ci_upper} when
-#'   \code{bootstrap = TRUE}). When the strata are defined by at least two
+#'   \code{status} (and \code{ci_lower}/\code{ci_upper} whenever a group's
+#'   summary supplies an interval: an lme4 bootstrap CI with
+#'   \code{bootstrap = TRUE}, or a brms posterior credible interval, which is
+#'   returned without bootstrapping). When the strata are defined by at least two
 #'   dimensions, two further columns report the per-group null -> adjusted
 #'   decomposition: \code{pcv} (proportional change in between-stratum variance when
-#'   the dimensions' additive main effects are added; computed on the
-#'   maximum-likelihood scale -- see \code{\link{calculate_pcv}} -- because REML
-#'   variances are not comparable across the null vs. adjusted fixed effects),
+#'   the dimensions' additive main effects are added; computed on the variance basis
+#'   set by \code{estimation} -- see \code{\link{calculate_pcv}}),
 #'   \code{var_between_adjusted} (a \emph{derived} coherence quantity, reported as
 #'   \code{var_between * (1 - pcv)} so it shares the scale of the REML
 #'   \code{var_between}/\code{vpc} and the table satisfies
 #'   \code{pcv = (var_between - var_between_adjusted) / var_between} exactly -- it is
 #'   \strong{not} the adjusted fit's own variance), and
 #'   \code{var_between_adjusted_ml} (the adjusted model's \emph{actual}
-#'   between-stratum variance, read straight off the adjusted fit on the same
-#'   maximum-likelihood scale as the PCV; it differs from \code{var_between_adjusted}
-#'   only by the small REML-vs-ML gap in the null variance). All three are
-#'   \code{NA} for a group whose adjusted fit failed, and the columns are
-#'   omitted entirely when the strata have a single dimension. When \code{context}
+#'   between-stratum variance, read straight off the adjusted fit on the same basis as
+#'   the PCV; under the default \code{estimation = "fitted"} this is the REML variance,
+#'   coinciding with \code{var_between_adjusted}, and under \code{estimation = "ML"} it
+#'   is the ML variance, differing from \code{var_between_adjusted} only by the small
+#'   REML-vs-ML gap in the null variance; despite its name it is not always a
+#'   maximum-likelihood estimate; for a \code{brms} fit it is the posterior median of
+#'   the adjusted variance, which \code{var_between_adjusted} equals as well). All
+#'   three are
+#'   \code{NA} for a group whose adjusted fit failed. A fourth column,
+#'   \code{pcv_status}, records the decomposition outcome per group:
+#'   \code{"ok"} when the PCV was computed, \code{"failed"} when the adjusted model
+#'   or PCV errored (\code{pcv} is then \code{NA} and the group is named in a
+#'   warning -- the group's own \code{status} can still be \code{"ok"} because its
+#'   null VPC model succeeded), and \code{"singular"} when the adjusted fit was
+#'   singular and the PCV saturated near 100\% -- \emph{not} warned about, since a
+#'   singular adjusted fit is indistinguishable from genuinely additive strata (a
+#'   legitimate, common result), so it is flagged only in this column.
+#'   These four columns are omitted entirely when the strata have a single
+#'   dimension. When \code{context}
 #'   is supplied, two further columns report each group's contextual partition:
 #'   \code{var_context} (the between-context variance, summed over contexts) and
 #'   \code{vpc_context} (the contexts' share of the group's unexplained variance);
@@ -484,7 +523,8 @@ plot_comparison <- function(comparison_df) {
 #'   frame cannot be built. \code{var_other} is the variance of any additional
 #'   random effects and is 0 for the canonical single-stratum model. Groups that
 #'   were skipped or failed have \code{NA} metrics and an explanatory
-#'   \code{status}.
+#'   \code{status}; for a failed fit it is \code{"fit failed: "} followed by the
+#'   first line of the error, whose whole message is in a warning.
 #'
 #' @details
 #' Robustness: a group whose \emph{analytic} sample (rows surviving the model
@@ -497,13 +537,21 @@ plot_comparison <- function(comparison_df) {
 #' instead reported with a "fit failed" status rather than a pre-fit skip. A
 #' singular fit yields a VPC of 0 rather than an error (unlike
 #' \code{\link{calculate_pcv}}). A hard fit failure in one group records \code{NA}
-#' and a status note without aborting the whole comparison.
+#' and a status note without aborting the whole comparison; one warning names the
+#' groups whose fit failed and gives each distinct reason once.
 #'
-#' Fit-quality diagnostics: for the \code{lme4} engine, groups whose model is
-#' singular or fails to converge keep a \code{status} of \code{"ok"} (the fit did
-#' complete) but are named in a single aggregated warning, because their VPC/ICC
-#' may be unreliable -- a singular fit usually pins the between-stratum variance at
-#' the boundary, giving a VPC of 0.
+#' Fit-quality diagnostics: on every engine, one warning names the groups with a fit
+#' problem, and such a group keeps a \code{status} of \code{"ok"} (the fit did
+#' complete). A group is named for a singular fit when its between-stratum variance
+#' is estimated at zero, so that \code{var_between} and the VPC are 0. A zero in
+#' another variance component -- a context, a further random effect, the interaction
+#' or a dimension of the crossed-dimensions model -- leaves them as estimated and does
+#' not name the group. A group is also named when its model did not converge and, in
+#' a two-model decomposition, when its adjusted model did not. The warning says
+#' which: an adjusted model affects the group's PCV, not its VPC, and
+#' \code{pcv_status} does not record it. A \code{brms} model is named when its
+#' largest R-hat is above 1.01 or its sampler had a divergent transition, and is never
+#' reported as singular.
 #'
 #' @examples
 #' \donttest{
@@ -532,8 +580,10 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
                                   context = NULL,
                                   sampling_weights = NULL,
                                   warn_linear = TRUE,
+                                  estimation = c("fitted", "ML"),
                                   ...) {
   decomposition <- maihda_resolve_decomposition(decomposition)
+  estimation <- match.arg(estimation)
   if (identical(decomposition, "longitudinal")) {
     stop("compare_maihda_groups() does not support decomposition = ",
          "\"longitudinal\" (a per-group longitudinal comparison is out of scope). ",
@@ -601,17 +651,61 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
   # engine handshake, so the ordinal pre-check detects the cumulative outcome on
   # the same analytic sample the per-group family resolution uses.
   dot_vals <- lapply(rlang::enquos(...), function(q) rlang::eval_tidy(q, data = data))
+  # A partial spelling (subse = keep) reaches the engine as subset: rename it before
+  # the reads below (see maihda_resolve_engine_dots()).
+  dot_vals <- maihda_resolve_engine_dots(dot_vals, engine, family)
   n_full <- nrow(data)
   # A numeric `subset` (e.g. subset = c(1:10, 31:40)) holds GLOBAL row indices into
-  # `data`, and a recycled logical mask is likewise positional over the full data.
-  # Expand both to a full-length logical mask BEFORE the per-group slicing below;
-  # otherwise the same vector is reinterpreted relative to each subgroup (numeric
-  # index k picks the k-th row of the group, not global row k), silently fitting
-  # the wrong rows. Store the normalized value back into dot_vals so the per-group
-  # fit (slice_dots_for_group) slices it too, not just the row-count guard.
-  subset_value <- maihda_normalize_subset(dot_vals[["subset"]], n_full)
+  # `data`, a recycled logical mask is likewise positional over the full data, and a
+  # character subset names rows of the full data. Resolve ALL THREE to a full-length
+  # logical mask (character names via rownames(data), by exact %in%) BEFORE the
+  # per-group slicing below; otherwise the same vector is reinterpreted relative to
+  # each subgroup (numeric index k picks the k-th row of the group, not global row k;
+  # a character name is re-matched against the group's de-duplicated row names), so
+  # the min_group_n guard and the per-group fit end up selecting different, wrong
+  # rows. A character subset was previously left as-is, so slice_full() dropped it
+  # from the guard (length != n_full -> NULL) while slice_dots_for_group() still
+  # forwarded the whole vector to the fit: the guard ignored the subset (undersized
+  # groups slipped through) and lme4's base `[` character indexing partial-matched
+  # per group. Store the normalized value back into dot_vals so the per-group fit
+  # (slice_dots_for_group) slices it too, not just the row-count guard.
+  subset_value <- maihda_normalize_subset(dot_vals[["subset"]], n_full,
+                                          rownames(data))
   dot_vals[["subset"]] <- subset_value
   weights_value <- dot_vals[["weights"]]
+  # Design weights beside precision weights: refused here, before the normalization
+  # below, exactly where fit_maihda() refuses it -- otherwise a zero precision weight
+  # would first warn about a sample this call is never going to fit.
+  maihda_check_weights_conflict(sampling_weights, dot_vals)
+  # Normalize invalid lme4 precision weights (zero / negative / non-finite -> NA,
+  # the rows lme4 drops) BEFORE family/engine detection, the shared-strata binning,
+  # the per-group analytic-size guard (min_group_n), and the per-group fits -- so all
+  # of them key off the same analytic sample the engine fits, exactly as fit_maihda()
+  # does. Without it a zero-weight row carrying an out-of-sample outcome value flipped
+  # the detected family (e.g. gaussian instead of binomial) and inflated a group's
+  # analytic n past min_group_n. Updates both `weights_value` (feeding detect_weights
+  # and the size guard's slice) and dot_vals$weights (sliced to each per-group fit).
+  if (is.numeric(weights_value)) {
+    weights_value <- maihda_normalize_precision_weights(
+      weights_value, n_full, engine, "compare_maihda_groups()")
+    dot_vals[["weights"]] <- weights_value
+  }
+  # The rest of the refusals fit_maihda() makes before it fits, made ONCE here
+  # instead: per-group, each becomes a "fit failed" status row and a warning, so a
+  # call that cannot work at all returned a table of failures rather than saying so.
+  # The engine is already final for wemix/brms (the sampling_weights switch above);
+  # the ordinal engine can still be selected by the handshake below, so its dots are
+  # refused there.
+  if (engine %in% c("wemix", "brms")) {
+    maihda_refuse_engine_dots(engine, dot_vals)
+  }
+  # The external offset= (lme4 only) is dropped by na.omit for offset-NA rows, so it
+  # must inform family detection and the analytic row count exactly as it does in
+  # fit_maihda(); otherwise an offset-NA row carrying an out-of-sample outcome value
+  # flips the detected family, or overstates a group's analytic n. It is full-length
+  # here and sliced per group below (slice_dots_for_group already slices it for the
+  # per-group fit).
+  offset_value <- dot_vals[["offset"]]
   # Family detection and the analytic row-count must see the same sample the engine
   # fits. Sampling weights drop non-finite/<= 0 rows (mapped to NA here so the shared
   # row mask drops them); precision weights only drop NA. Mirrors fit_maihda().
@@ -633,7 +727,8 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
   if (missing(family) && missing(engine) && is.null(sampling_weights) &&
       isTRUE(tryCatch(maihda_response_is_ordinal(formula, data,
                                                  subset = subset_value,
-                                                 weights = detect_weights),
+                                                 weights = detect_weights,
+                                                 offset = offset_value),
                       error = function(e) FALSE))) {
     engine <- "ordinal"
     message("compare_maihda_groups(): the outcome is an ordered factor; using ",
@@ -660,6 +755,11 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     stop("'engine' should be one of: lme4, brms, wemix, ordinal", call. = FALSE)
   }
   if (identical(engine, "wemix")) {
+    if (is.null(sampling_weights)) {
+      stop("engine = \"wemix\" is the design-weighted MAIHDA fit and requires ",
+           "'sampling_weights' (the sampling-weight column). For an unweighted ",
+           "fit use engine = \"lme4\" or \"brms\".", call. = FALSE)
+    }
     if (decomposition == "crossed-dimensions") {
       stop("decomposition = \"crossed-dimensions\" needs crossed random effects, ",
            "which WeMix does not fit. Use the default two-model decomposition with ",
@@ -671,8 +771,15 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
            "random effects). Use engine = \"lme4\" or \"brms\" for a contextual ",
            "cross-classified model.", call. = FALSE)
     }
+    # Refused once, here, rather than as a failed fit in every group.
+    maihda_wemix_check_offset(formula)
   }
   if (identical(engine, "ordinal")) {
+    if (!is.null(sampling_weights)) {
+      stop("engine = \"ordinal\" does not support 'sampling_weights'. Use ",
+           "engine = \"brms\" for a sampling-weighted cumulative model ",
+           "(pseudo-posterior).", call. = FALSE)
+    }
     if (decomposition == "crossed-dimensions") {
       stop("decomposition = \"crossed-dimensions\" needs crossed random effects, ",
            "which the ordinal (clmm) engine does not fit. Use the default ",
@@ -691,6 +798,13 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
            "\"brms\" for a contextual cross-classified cumulative model.",
            call. = FALSE)
     }
+    maihda_refuse_engine_dots(engine, dot_vals)
+  }
+  # A brms response addition term fit_maihda() refuses (se(), rate(), cens(), ...):
+  # refused once, here, rather than as a failed fit in every group.
+  if (identical(engine, "brms") && !maihda_family_is_ordinal(
+    if (is.function(family)) tryCatch(family(), error = function(e) NULL) else family)) {
+    maihda_brms_check_addition_terms(formula)
   }
   if (!is.logical(shared_strata) || length(shared_strata) != 1 || is.na(shared_strata)) {
     stop("'shared_strata' must be TRUE or FALSE.", call. = FALSE)
@@ -736,7 +850,7 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
   if (missing(family)) {
     is_binary <- tryCatch(
       maihda_response_is_binary(formula, data, subset = subset_value,
-                                weights = detect_weights),
+                                weights = detect_weights, offset = offset_value),
       error = function(e) FALSE)
     if (isTRUE(is_binary)) {
       warning("The outcome variable appears to be binary. Using family = 'binomial' ",
@@ -745,7 +859,7 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
       family <- "binomial"
     } else if (isTRUE(tryCatch(
       maihda_response_is_ordinal(formula, data, subset = subset_value,
-                                 weights = detect_weights),
+                                 weights = detect_weights, offset = offset_value),
       error = function(e) FALSE))) {
       warning("The outcome variable is an ordered factor. Using the cumulative ",
               "(ordinal) model, family = 'ordinal', for every group. Specify a ",
@@ -763,8 +877,43 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     family <- family()
   }
 
+  # The remaining family <-> engine refusals fit_maihda() makes, applied once on the
+  # resolved family rather than per group (see the block above). `family` itself is
+  # left as given, so the per-group fits resolve it exactly as they did before.
+  fam_obj <- maihda_resolve_family_spec(family)
+  if (identical(engine, "ordinal") && !maihda_family_is_ordinal(fam_obj)) {
+    stop("engine = \"ordinal\" fits cumulative (ordinal) models; supply ",
+         "family = \"ordinal\" / maihda_cumulative() (or let an ordered-factor ",
+         "outcome select it automatically).", call. = FALSE)
+  }
+  if (identical(engine, "wemix")) {
+    maihda_wemix_check_family(fam_obj)
+  }
+
   # ---- build shared strata (or defer to per-group) and the fitting formula ----
-  prepared <- maihda_prepare_group_strata(formula, data, shared_strata, autobin)
+  # Shared numeric strata must be auto-binned on the pooled ANALYTIC sample -- exactly
+  # the rows some group's fit will use -- not on every raw input row. Otherwise a
+  # row excluded by subset=, a missing/zero weight, a missing offset, missingness, or a
+  # missing group still shifts the tertile cut-points, silently redefining OTHER rows'
+  # strata, so compare_maihda_groups(data, subset = keep) disagrees with fitting the
+  # pre-filtered data (different bins -> different VPCs). Mirror fit_maihda()'s
+  # strata_bin_rows: the transformation-aware analytic keep mask, plus dropping rows
+  # with a missing group (which no group fits). Per-group (non-shared) strata are binned
+  # inside each fit_maihda() call on that group's rows, so they need no pooled mask here.
+  bin_rows <- NULL
+  if (isTRUE(shared_strata)) {
+    keep <- tryCatch(
+      maihda_analytic_keep_mask(formula, data, subset = subset_value,
+                                weights = detect_weights, offset = offset_value),
+      error = function(e) NULL)
+    if (is.null(keep)) {
+      keep <- maihda_row_mask(data, subset = subset_value,
+                              weights = detect_weights, offset = offset_value)
+    }
+    bin_rows <- keep & !is.na(data[[group]])
+  }
+  prepared <- maihda_prepare_group_strata(formula, data, shared_strata, autobin,
+                                          bin_rows = bin_rows)
   data <- prepared$data
   fit_formula <- prepared$formula
 
@@ -805,10 +954,18 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     dim_terms <- maihda_adjusted_terms(decomp_vars,
                                        carried_attrs[["strata_autobin_info"]],
                                        data)$terms
-    # Reject a fixed interaction among the stratum dimensions (e.g. `gender * ses`).
-    # Stripping only the main effects below would leave the fixed gender:ses term in
-    # place, duplicating the (1 | stratum) random intercept and driving every group's
-    # PCV to NA. (maihda() catches this earlier; this guards a direct call.)
+    # Reject a stratum dimension written in transformed form (e.g. `factor(gender)`):
+    # the main-effect stripping below matches bare column names only, so the transform
+    # would stay in every group's null model and corrupt that group's PCV. (maihda()
+    # catches this earlier; this guards a direct call.)
+    maihda_check_no_transformed_dimension(fit_formula, decomp_vars, dim_terms,
+                                          fn = "compare_maihda_groups")
+    # Reject a fixed interaction involving a stratum dimension (`gender * ses`, or
+    # `age * gender` with a covariate). Stripping only the main effects below would
+    # leave the interaction in place: among dimensions it duplicates the (1 | stratum)
+    # random intercept and drives every group's PCV to NA; with a covariate it survives
+    # into every group's null model, which then already adjusts for that dimension.
+    # (maihda() catches this earlier; this guards a direct call.)
     maihda_check_no_dimension_interaction(fit_formula, decomp_vars, dim_terms,
                                           fn = "compare_maihda_groups")
     # Warn once about any numeric stratum dimension entering the per-group adjusted
@@ -819,19 +976,19 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
                                      carried_attrs[["strata_autobin_info"]], data,
                                      fn = "compare_maihda_groups")
     }
-    supplied_fixed <- attr(stats::terms(reformulas::nobars(fit_formula)),
+    supplied_fixed <- attr(stats::terms(maihda_nobars(fit_formula)),
                            "term.labels")
     present_terms <- dim_terms[
       vapply(dim_terms, maihda_quote_name, character(1)) %in% supplied_fixed]
-    if (length(present_terms) > 0) {
-      # Quote through maihda_quote_name() (the same path used to DETECT the terms
-      # against supplied_fixed) rather than a manual sprintf("`%s`", .): a bare
-      # backtick wrap mis-parses a name that itself contains a backtick, so the two
-      # paths would disagree for that rare-but-legal case.
-      quoted_terms <- vapply(present_terms, maihda_quote_name, character(1))
-      fit_formula <- stats::update(fit_formula, stats::as.formula(
-        paste(". ~ . -", paste(quoted_terms, collapse = " - "))))
-    }
+    # maihda_drop_fixed_terms() quotes each term through maihda_quote_name() -- the
+    # same path used to DETECT them against supplied_fixed, so a name containing a
+    # backtick cannot make the two disagree -- and keeps the grand mean that a
+    # no-intercept spelling of the same model would otherwise lose with the
+    # dimensions. (maihda() does this before delegating here; this guards a direct
+    # call, where every group's var_between would otherwise absorb the outcome mean.)
+    fit_formula <- maihda_drop_fixed_terms(fit_formula, present_terms, data,
+                                           notify = TRUE,
+                                           fn = "compare_maihda_groups")
   }
 
   group_values <- as.character(data[[group]])
@@ -841,11 +998,17 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
   }
 
   rows <- vector("list", length(group_levels))
-  # Collect groups whose lme4 fit was singular or failed to converge, so a single
-  # aggregated warning can be raised at the end (these make a group's VPC
-  # unreliable). brms fits report NA here and are diagnosed via Rhat elsewhere.
+  # Groups to name, on any engine, in one aggregated fit-quality warning after the
+  # loop. singular_groups: the fit is singular and the zero is the between-stratum
+  # variance (maihda_between_variance_singular()); a zero in another variance
+  # component names no group. nonconverged_groups: the group's own model did not
+  # converge. adjusted_nonconverged_groups: the adjusted model of its two-model
+  # decomposition did not, and a PCV was computed from it. A brms fit is never
+  # recorded as singular, and counts as not converged when its largest R-hat is above
+  # 1.01 or its sampler had a divergent transition (maihda_fit_diagnostics()).
   singular_groups <- character(0)
   nonconverged_groups <- character(0)
+  adjusted_nonconverged_groups <- character(0)
   # Set of strata actually populated in each successfully fitted group, used to
   # warn when shared strata still leave groups with different stratum support
   # (their VPCs are then estimated over different level sets).
@@ -857,6 +1020,29 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
   # context variance, aggregated into a single weak-identification warning below.
   context_per <- list()
   weak_context_cells <- character(0)
+  # Groups whose own model could not be fitted, with the whole error message, for one
+  # aggregated warning after the loop (the status cell keeps the message's first line).
+  fit_failed_groups <- list()
+  # Per-group PCV decomposition (two-model mode) can fail even when the group's null
+  # VPC model succeeds -- e.g. a stratum dimension that is constant within the group
+  # makes the adjusted model's main effect a one-level factor no engine can fit. Those
+  # failures are genuine and must not be silent: collect the reason per group
+  # (pcv_failed_groups) for an aggregated warning, and, for a group whose error is that
+  # one-level factor, the dimensions concerned (pcv_single_level_dims), so the warning
+  # names that cause where it applies and nowhere else. A group whose adjusted fit is
+  # merely SINGULAR (PCV saturated near 100%) is NOT an error and NOT warned about -- a
+  # singular adjusted fit is indistinguishable from genuinely additive strata (the
+  # common, legitimate MAIHDA result), so it is recorded only in the pcv_status column
+  # ("singular") for the analyst to read, not surfaced as a caution.
+  pcv_failed_groups <- list()
+  pcv_single_level_dims <- list()
+  # Set when any group's per-group calculate_pcv() reports a "mixed" basis (estimation =
+  # "ML" but a boundary model kept its REML fit), so the header does not claim a pure ML
+  # comparison for the whole table when one group's comparison was partly REML.
+  any_mixed_basis <- FALSE
+  # Set when any group's variances are maximum-likelihood estimates (its own fit, or
+  # the pair its PCV compares), as calculate_pcv() records it, so print() can say so.
+  any_ml_variances <- FALSE
 
   for (gi in seq_along(group_levels)) {
     g <- group_levels[gi]
@@ -882,7 +1068,11 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
         maihda_sampling_weight_mask(sub[[sampling_weights]])
       } else {
         slice_full(weights_value, idx)
-      }
+      },
+      # An offset-NA row is dropped by na.omit too, so exclude it from the analytic
+      # row count / min_group_n guard just as the engine's fit will (offset sliced to
+      # this group's rows).
+      offset = slice_full(offset_value, idx)
     )
     n_g <- if (is.null(analytic_fr)) nrow(sub) else nrow(analytic_fr)
     row <- data.frame(
@@ -890,7 +1080,7 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
       vpc = NA_real_, var_between = NA_real_, var_other = NA_real_,
       var_residual = NA_real_,
       pcv = NA_real_, var_between_adjusted = NA_real_,
-      var_between_adjusted_ml = NA_real_,
+      var_between_adjusted_ml = NA_real_, pcv_status = NA_character_,
       var_additive = NA_real_, var_interaction = NA_real_,
       additive_share = NA_real_, interaction_share = NA_real_,
       var_context = NA_real_, vpc_context = NA_real_,
@@ -936,7 +1126,8 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
         # weights/subset/offset align with this group's rows.
         if (do_cc) {
           cc <- maihda_cross_classified_formula(
-            fit_formula, decomp_vars, carried_attrs[["strata_autobin_info"]], sub)
+            fit_formula, decomp_vars, carried_attrs[["strata_autobin_info"]], sub,
+            context = context)
           model <- do.call(
             fit_maihda,
             c(list(cc$formula, cc$data, engine = engine, family = family,
@@ -962,8 +1153,10 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     )
 
     if (!is.null(fit_obj$error)) {
-      row$status <- paste0("fit failed: ", fit_obj$error)
-      warning(sprintf("Group '%s' model fit failed: %s", g, fit_obj$error), call. = FALSE)
+      # The cell holds the first line of the message; the aggregated warning raised
+      # after the loop gives all of it.
+      row$status <- paste0("fit failed: ", maihda_first_line(fit_obj$error))
+      fit_failed_groups[[g]] <- fit_obj$error
       rows[[gi]] <- row
       next
     }
@@ -977,6 +1170,7 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     row$n_strata <- length(group_strata)
     populated_strata[[g]] <- group_strata
     row$status <- "ok"
+    if (maihda_pcv_ml_variances(fit_obj$model)) any_ml_variances <- TRUE
 
     # Contextual partition (when context = ): summary()$context carries the summed
     # between-context variance and the contexts' total share of the unexplained
@@ -995,7 +1189,7 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
       if (!is.null(cs$per_context)) context_per[[g]] <- cs$per_context
       for (cv in context) {
         n_lvl <- length(unique(stats::na.omit(fit_obj$model$data[[cv]])))
-        if (is.finite(n_lvl) && n_lvl < 10) {
+        if (is.finite(n_lvl) && n_lvl < .maihda_context_few_levels) {
           weak_context_cells <- c(weak_context_cells,
                                   sprintf("%s x %s (%d level%s)", g, cv, n_lvl,
                                           if (n_lvl == 1) "" else "s"))
@@ -1036,6 +1230,15 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
                                       fit_obj$model$strata_autobin_info,
                                       fit_obj$model$original_data)
         if (!is.null(af)) {
+          # Optimistic default, overwritten to "failed"/"singular" below. The adjusted
+          # fit and calculate_pcv() are the only steps here that can fail while the
+          # group's null VPC model already succeeded, so isolate their error, record
+          # it, and surface it: a NULL pcv_obj must not read as a successful (but
+          # empty) decomposition with status still "ok".
+          row$pcv_status <- "ok"
+          adj_model <- NULL
+          pcv_err <- NULL
+          pcv_one_level <- FALSE
           pcv_obj <- tryCatch({
             adj_model <- do.call(
               fit_maihda,
@@ -1043,35 +1246,90 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
                      context = context, sampling_weights = sampling_weights),
                 slice_dots_for_group(idx))
             )
-            calculate_pcv(fit_obj$model, adj_model)
-          }, error = function(e) NULL)
+            calculate_pcv(fit_obj$model, adj_model, estimation = estimation)
+          }, error = function(e) {
+            pcv_err <<- conditionMessage(e)
+            pcv_one_level <<- maihda_one_level_factor_error(e)
+            NULL
+          })
           if (!is.null(pcv_obj)) {
+            if (identical(pcv_obj$estimation_used, "mixed")) any_mixed_basis <- TRUE
+            if (isTRUE(pcv_obj$ml_variances)) any_ml_variances <- TRUE
             row$pcv <- pcv_obj$pcv
             # Report the adjusted between-stratum variance on the SAME scale as
             # var_between / vpc (the REML single-model VPC variance), so the table stays
             # internally coherent: PCV = (var_between - var_between_adjusted) /
-            # var_between. The PCV itself is calculate_pcv()'s ML-refit value, since REML
-            # variances are not comparable across the null vs. adjusted fixed effects;
-            # the small REML-vs-ML gap in the null variance is absorbed here rather than
-            # left as an apparent inconsistency between the columns. NOTE: this is a
-            # derived bookkeeping value, NOT the adjusted fit's own variance.
+            # var_between. The PCV itself is calculate_pcv()'s value on the requested
+            # `estimation` basis: with the default "fitted" it uses the REML variances
+            # (so this derived value coincides with the adjusted fit's own REML
+            # variance below), and with "ML" the small REML-vs-ML gap in the null
+            # variance is absorbed here rather than left as an apparent inconsistency
+            # between the columns. NOTE: this is a derived bookkeeping value, NOT the
+            # adjusted fit's own variance.
             row$var_between_adjusted <- row$var_between * (1 - pcv_obj$pcv)
-            # The adjusted MODEL's actual between-stratum variance, on the ML scale the
-            # PCV is computed on (var_model2 from calculate_pcv()). Unlike
-            # var_between_adjusted above, this is read straight off the adjusted fit, so
-            # it is the literal "adjusted between-stratum variance" -- it differs from
-            # var_between_adjusted only by the REML-vs-ML gap in the null variance.
+            # The adjusted MODEL's actual between-stratum variance, read straight off
+            # the adjusted fit on the SAME basis the PCV was computed on (var_model2
+            # from calculate_pcv() -- REML for the default estimation = "fitted", ML for
+            # estimation = "ML"). Unlike var_between_adjusted above, this is the literal
+            # "adjusted between-stratum variance"; it differs from var_between_adjusted
+            # only by any REML-vs-ML gap in the null variance (zero under "fitted"). The
+            # "_ml" suffix is retained for output-schema continuity.
             row$var_between_adjusted_ml <- pcv_obj$var_model2
+            # A singular adjusted fit pins the adjusted between-stratum variance at the
+            # boundary (~0), so the PCV saturates near 100%. Record it in pcv_status
+            # (separately from an outright failure) so the near-100% value can be read
+            # with the right caveat -- but do NOT warn: a singular adjusted fit cannot be
+            # distinguished from genuinely additive strata, which is a legitimate (and
+            # common) MAIHDA result, so a caution would misfire on the normal case.
+            adj_singular <- isTRUE(tryCatch(adj_model$diagnostics$singular,
+                                            error = function(e) FALSE))
+            if (adj_singular && is.finite(pcv_obj$pcv) && pcv_obj$pcv >= 0.999) {
+              row$pcv_status <- "singular"
+            }
+            # A PCV computed from an adjusted model that did not converge is reported
+            # like any other, so the group is named for that model in the fit-quality
+            # warning. pcv_status does not record it, as status does not for a group
+            # whose own model did not converge.
+            if (isFALSE(adj_model$diagnostics$converged)) {
+              adjusted_nonconverged_groups <- c(adjusted_nonconverged_groups, g)
+            }
+          } else {
+            # Adjusted fit or PCV computation failed: pcv stays NA, but record WHY and
+            # mark this group's decomposition failed, so it is not reported as a silent
+            # success. An aggregated warning naming the groups is raised after the loop.
+            row$pcv_status <- "failed"
+            pcv_failed_groups[[g]] <- if (is.null(pcv_err) || !nzchar(pcv_err)) {
+              "unknown error"
+            } else {
+              pcv_err
+            }
+            # The erroring call tells a one-level factor; the strata the group's null
+            # fit populated tell which dimension it is.
+            if (pcv_one_level) {
+              pcv_single_level_dims[[g]] <- maihda_single_level_dims(fit_obj$model)
+            }
           }
         }
       }
     }
 
     # Flag fit-quality problems (singular / non-converged) for an aggregated
-    # warning. The fit still "succeeded" (status stays "ok"), but the VPC may be
-    # unreliable -- a singular fit typically pins the stratum variance at 0.
+    # warning. The fit still "succeeded" (status stays "ok"). A singular fit names
+    # the group only when the zero is the between-stratum variance, so that
+    # var_between and the VPC are 0: the stratum variance, or in the
+    # crossed-dimensions model every dimension and the interaction together. On lme4 a
+    # fit is also singular for a zero in one of those terms alone, in a context or in a
+    # further random effect, which leaves var_between and the VPC as estimated.
     diag <- fit_obj$model$diagnostics
-    if (isTRUE(diag$singular)) singular_groups <- c(singular_groups, g)
+    between_blocks <- if (do_cc) {
+      c(unname(fit_obj$model$cc_info$dim_groups),
+        fit_obj$model$cc_info$interaction_group)
+    } else {
+      "stratum"
+    }
+    if (maihda_between_variance_singular(diag, between_blocks)) {
+      singular_groups <- c(singular_groups, g)
+    }
     if (isFALSE(diag$converged)) nonconverged_groups <- c(nonconverged_groups, g)
 
     # Keep whatever interval the summary provides -- an lme4 bootstrap CI or a
@@ -1083,6 +1341,17 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     }
 
     rows[[gi]] <- row
+  }
+
+  # One warning for the groups whose own model could not be fitted (NA estimates and a
+  # "fit failed" status), giving each distinct reason once with the groups it applies
+  # to: the same error in every group is one message, not one per group.
+  if (length(fit_failed_groups) > 0) {
+    warning("compare_maihda_groups(): the model fit failed for group(s) ",
+            paste(names(fit_failed_groups), collapse = ", "),
+            ". Their estimates are NA and status gives the first line of the reason.\n",
+            paste(maihda_failure_entries(fit_failed_groups), collapse = "\n"),
+            call. = FALSE)
   }
 
   # Even with shared/global strata, groups can end up with different *populated*
@@ -1103,37 +1372,46 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     }
   }
 
-  # Single aggregated warning when any group's lme4 fit was singular or did not
-  # converge, naming the affected groups so their VPCs can be read with caution.
-  diag_notes <- character(0)
-  if (length(singular_groups) > 0) {
-    diag_notes <- c(diag_notes,
-                    paste0("singular fit: ", paste(singular_groups, collapse = ", ")))
-  }
-  if (length(nonconverged_groups) > 0) {
-    diag_notes <- c(diag_notes,
-                    paste0("did not converge: ", paste(nonconverged_groups, collapse = ", ")))
-  }
-  if (length(diag_notes) > 0) {
-    warning("compare_maihda_groups(): lme4 reported fit problems (",
-            paste(diag_notes, collapse = "; "),
-            "). A singular fit means the between-stratum variance is at the boundary ",
-            "(often VPC = 0); a non-converged fit may be unreliable. Interpret these ",
-            "groups' VPC/ICC values with caution.", call. = FALSE)
+  # Single aggregated warning naming the groups with a fit problem: a between-stratum
+  # variance estimated at zero or a model that did not converge (their VPC is to be
+  # read with caution), or an adjusted model that did not converge (their PCV is).
+  fit_quality <- maihda_group_fit_quality_message(engine, singular_groups,
+                                                  nonconverged_groups,
+                                                  adjusted_nonconverged_groups)
+  if (!is.null(fit_quality)) {
+    warning(fit_quality, call. = FALSE)
   }
 
   # Contextual weak identification: stratifying by group shrinks each group x
   # context cell, so a context that identifies its variance on the pooled data can
   # have too few levels within a group. Name the offending cells in one warning so
-  # the per-group context variances there are read with caution (the brms engine's
-  # weakly-informative priors regularise this better than lme4).
-  if (length(weak_context_cells) > 0) {
-    warning("compare_maihda_groups(): few context levels within group(s) (",
-            paste(weak_context_cells, collapse = "; "),
-            "). A context with < 10 levels weakly identifies its variance (often a ",
-            "singular lme4 fit, VPC_context near 0); interpret those groups' context ",
-            "partition with caution or use engine = \"brms\".", call. = FALSE)
+  # the per-group context variances there are read with caution, worded for the
+  # engine that fitted them (maihda_weak_context_message()).
+  weak_context <- maihda_weak_context_message(engine, weak_context_cells)
+  if (!is.null(weak_context)) {
+    warning(weak_context, call. = FALSE)
   }
+
+  # Aggregated warning for per-group PCV decompositions that FAILED even though the
+  # group's null VPC model succeeded (pcv is NA, pcv_status = "failed"). Without this
+  # the missing PCV is silent and the row still reads status = "ok"; name the groups
+  # and their error so an incomplete decomposition is never mistaken for a successful
+  # one. Each distinct reason is given once with the groups it applies to. A stratum
+  # dimension with a single level in a group is named as the cause for the groups whose
+  # error was that one-level factor, and for no other failure.
+  if (length(pcv_failed_groups) > 0) {
+    warning("compare_maihda_groups(): the per-group PCV decomposition failed for ",
+            "group(s) ", paste(names(pcv_failed_groups), collapse = ", "),
+            ". Their null VPC model succeeded (status = \"ok\") but the adjusted ",
+            "model or PCV did not, so pcv is NA and pcv_status = \"failed\".\n",
+            paste(maihda_failure_entries(pcv_failed_groups, pcv_single_level_dims),
+                  collapse = "\n"),
+            call. = FALSE)
+  }
+  # A singular adjusted fit (pcv_status = "singular", PCV saturated near 100%) is NOT
+  # warned about: it is indistinguishable from genuinely additive strata, a legitimate
+  # and common MAIHDA result, so it is signalled only through the pcv_status column
+  # rather than a caution that would fire on every additive comparison.
 
   out <- do.call(rbind, rows)
   # Drop the interval columns only when no group supplied one (e.g. unbootstrapped
@@ -1151,6 +1429,7 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
     out$pcv <- NULL
     out$var_between_adjusted <- NULL
     out$var_between_adjusted_ml <- NULL
+    out$pcv_status <- NULL
   }
   if (!do_cc) {
     out$var_additive <- NULL
@@ -1171,6 +1450,15 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
   attr(out, "family") <- if (is.character(family)) family else family$family
   attr(out, "shared_strata") <- shared_strata
   attr(out, "decomposition") <- decomposition
+  # Variance-estimation basis behind every per-group PCV, recorded so a serialized
+  # comparison keeps this provenance (mirrors calculate_pcv()'s $estimation).
+  attr(out, "estimation") <- estimation
+  # any_mixed_basis already folds in a failed refitML() per group (each group's PCV comes
+  # from calculate_pcv(), which reports "mixed" for a boundary skip or a failed refit);
+  # the engine steers a brms comparison to "posterior" (never an ML-refit).
+  attr(out, "estimation_used") <- maihda_pcv_estimation_used(
+    estimation, any_mixed_basis, engine = engine)
+  attr(out, "ml_variances") <- any_ml_variances
   # The context variable name(s) and the per-group, per-context between-context
   # variances (a named list keyed by group). NULL when no context was supplied.
   attr(out, "context_var") <- context
@@ -1185,10 +1473,14 @@ compare_maihda_groups <- function(formula, data, group, engine = "lme4",
 #' @param data Full data frame.
 #' @param shared_strata Logical; build strata once on the full data.
 #' @param autobin Logical passed to make_strata.
+#' @param bin_rows Optional logical mask (over rows of \code{data}) restricting the
+#'   rows used to compute shared numeric auto-bin cut-points to the pooled analytic
+#'   sample; forwarded to \code{make_strata()}. \code{NULL} bins on all rows.
 #' @return list(data, formula, strata_vars).
 #' @keywords internal
 #' @importFrom reformulas findbars nobars
-maihda_prepare_group_strata <- function(formula, data, shared_strata, autobin = TRUE) {
+maihda_prepare_group_strata <- function(formula, data, shared_strata, autobin = TRUE,
+                                        bin_rows = NULL) {
   re_terms <- reformulas::findbars(formula)
   if (length(re_terms) == 0) {
     stop("'formula' must include a random effect such as (1 | gender:race) or (1 | stratum).",
@@ -1247,11 +1539,12 @@ maihda_prepare_group_strata <- function(formula, data, shared_strata, autobin = 
          call. = FALSE)
   }
 
-  fixed_formula <- reformulas::nobars(formula)
+  fixed_formula <- maihda_nobars(formula)
   fit_formula <- stats::update(fixed_formula, . ~ . + (1 | stratum))
 
   if (shared_strata) {
-    strata_result <- make_strata(data, vars = strata_vars, autobin = autobin)
+    strata_result <- make_strata(data, vars = strata_vars, autobin = autobin,
+                                 bin_rows = bin_rows)
     return(list(data = strata_result$data, formula = fit_formula,
                 strata_vars = strata_vars))
   }
@@ -1261,6 +1554,197 @@ maihda_prepare_group_strata <- function(formula, data, shared_strata, autobin = 
   list(data = data, formula = formula, strata_vars = strata_vars)
 }
 
+# TRUE when a fit's diagnostics record a singular fit whose zero is the between-stratum
+# variance, which is what compare_maihda_groups() names a group for: var_between and
+# the VPC are then 0. `between_blocks` holds the random-effect terms that add up to
+# that variance, "stratum" or, for the crossed-dimensions model, every dimension and
+# the interaction; all of them have to be at zero. An lme4 record lists the terms at
+# zero (singular_terms), and a zero in a context, in a further random effect or in
+# some of the crossed-dimensions terms only is not the between-stratum variance. A
+# record without such a list is taken as one: wemix and ordinal flag the stratum
+# variance itself, and an lme4 fit whose terms could not be read is not known to have
+# its zero elsewhere.
+maihda_between_variance_singular <- function(diagnostics, between_blocks = "stratum") {
+  if (!isTRUE(diagnostics$singular)) {
+    return(FALSE)
+  }
+  at_zero <- diagnostics$singular_terms
+  if (length(at_zero) == 0L) {
+    return(TRUE)
+  }
+  all(between_blocks %in% at_zero)
+}
+
+# The text of compare_maihda_groups()'s fit-quality warning: the groups whose fit is
+# singular, those whose own model did not converge and those whose adjusted model did
+# not, each followed by what its entry means; NULL when no group is listed. A group is
+# listed as singular only for a between-stratum variance of zero
+# (maihda_between_variance_singular()), so the sentence says that it is. The same
+# words serve lme4, wemix and ordinal. On brms the convergence entries stand for what
+# maihda_fit_diagnostics() checks there, a largest R-hat above 1.01 or a divergent
+# transition, and are worded as that; no brms fit is recorded as singular. A group's
+# own model gives its VPC and an adjusted model enters its PCV only, which is what the
+# closing sentence points to.
+maihda_group_fit_quality_message <- function(engine, singular_groups,
+                                             nonconverged_groups,
+                                             adjusted_nonconverged_groups = character(0)) {
+  entries <- character(0)
+  meaning <- character(0)
+  if (length(singular_groups) > 0L) {
+    entries <- c(entries,
+                 paste0("singular fit: ", paste(singular_groups, collapse = ", ")))
+    meaning <- c(meaning,
+                 paste0("A singular fit listed here has its between-stratum variance ",
+                        "estimated at zero, so var_between and the VPC are 0."))
+  }
+  own <- length(nonconverged_groups) > 0L
+  adjusted <- length(adjusted_nonconverged_groups) > 0L
+  if (own || adjusted) {
+    who <- paste(nonconverged_groups, collapse = ", ")
+    who_adjusted <- paste(adjusted_nonconverged_groups, collapse = ", ")
+    if (identical(engine, "brms")) {
+      flagged <- "largest R-hat above 1.01 or divergent transitions: "
+      if (own) {
+        entries <- c(entries, paste0(flagged, who))
+      }
+      if (adjusted) {
+        entries <- c(entries, paste0("adjusted model, ", flagged, who_adjusted))
+      }
+      meaning <- c(meaning,
+                   "The posterior summaries of these brms fits may be unreliable.")
+    } else {
+      if (own) {
+        entries <- c(entries, paste0("did not converge: ", who))
+      }
+      if (adjusted) {
+        entries <- c(entries,
+                     paste0("adjusted model did not converge: ", who_adjusted))
+      }
+      meaning <- c(meaning, "A fit that did not converge may be unreliable.")
+    }
+  }
+  if (length(entries) == 0L) {
+    return(NULL)
+  }
+  own_listed <- length(singular_groups) > 0L || own
+  closing <- if (!adjusted) {
+    " Interpret these groups' VPC/ICC values with caution."
+  } else if (own_listed) {
+    paste0(" Interpret these groups' VPC/ICC values with caution; for an adjusted ",
+           "model, the PCV instead.")
+  } else {
+    " Interpret these groups' PCV values with caution."
+  }
+  paste0("compare_maihda_groups(): fit problems (", paste(entries, collapse = "; "),
+         "). ", paste(meaning, collapse = " "), closing)
+}
+
+# The text of compare_maihda_groups()'s warning on the group x context cells whose
+# analytic sample holds fewer than .maihda_context_few_levels context levels, worded
+# for the engine that fitted them: an lme4 variance from so few levels is imprecise
+# and sits at zero when the levels differ little; a brms posterior depends on the
+# prior on the context's standard deviation (see maihda_context_few_levels()). NULL
+# when no cell is listed.
+maihda_weak_context_message <- function(engine, cells) {
+  if (length(cells) == 0L) {
+    return(NULL)
+  }
+  why <- if (identical(engine, "brms")) {
+    sprintf(paste0("With fewer than %d levels a context's variance depends on the prior ",
+                   "on its standard deviation, and the context share with it"),
+            .maihda_context_few_levels)
+  } else {
+    sprintf(paste0("A context variance estimated from fewer than %d levels is ",
+                   "imprecise, and at zero (a singular fit) when the levels differ ",
+                   "little"),
+            .maihda_context_few_levels)
+  }
+  paste0("compare_maihda_groups(): few context levels within group(s) (",
+         paste(cells, collapse = "; "), "). ", why,
+         "; interpret those groups' context partition with caution.")
+}
+
+# The first line of an error message, which is what a "fit failed" status cell holds:
+# a message of several lines would otherwise spread over the printed table. Blank
+# leading lines are passed over. A message that is not valid text in its encoding
+# cannot be split and stays whole.
+maihda_first_line <- function(msg) {
+  if (!isTRUE(validEnc(msg))) {
+    return(msg)
+  }
+  lines <- trimws(strsplit(msg, "\r?\n")[[1L]])
+  lines <- lines[is.na(lines) | nzchar(lines)]
+  if (length(lines) == 0L) "" else lines[1L]
+}
+
+# TRUE when `e` is the error a design matrix stops with for a factor that has a single
+# level among the rows being fitted. Every engine builds its fixed-effect design with
+# model.matrix(), which sets a factor's contrasts through `contrasts<-`, so the erroring
+# CALL identifies the case; its message is translated and is not read.
+maihda_one_level_factor_error <- function(e) {
+  cl <- conditionCall(e)
+  if (!is.call(cl)) {
+    return(FALSE)
+  }
+  fn <- cl[[1L]]
+  # A namespace-qualified call names the same function.
+  if (is.call(fn) && length(fn) == 3L &&
+      (identical(fn[[1L]], as.name("::")) || identical(fn[[1L]], as.name(":::")))) {
+    fn <- fn[[3L]]
+  }
+  identical(fn, as.name("contrasts<-"))
+}
+
+# The stratum dimensions that take a single value among the rows a model was fitted to,
+# read from the strata it populated: strata_info counts the analytic rows per stratum
+# and holds an auto-binned dimension as its bins, which is how the adjusted model
+# enters it.
+maihda_single_level_dims <- function(model) {
+  info <- model$strata_info
+  dims <- intersect(model$strata_vars, names(info))
+  if (length(dims) == 0L || !"n" %in% names(info)) {
+    return(character(0))
+  }
+  populated <- info[!is.na(info$n) & info$n > 0L, , drop = FALSE]
+  if (nrow(populated) == 0L) {
+    return(character(0))
+  }
+  dims[vapply(dims, function(v) length(unique(as.character(populated[[v]]))) == 1L,
+              logical(1))]
+}
+
+# The lines an aggregated failure warning lists under its opening sentence: one entry
+# per distinct reason, "<groups>: <message>", so a reason several groups share is given
+# once. `reasons` is a named list, group -> message, in the order the groups were
+# fitted. `single_level` holds, for the groups whose failure was a one-level factor,
+# the stratum dimensions with a single level there; their entry gains the sentence that
+# says so, and groups differing in those dimensions get separate entries.
+maihda_failure_entries <- function(reasons, single_level = list()) {
+  groups <- names(reasons)
+  msgs <- vapply(reasons, function(m) as.character(m)[1L], character(1),
+                 USE.NAMES = FALSE)
+  msgs[is.na(msgs) | !nzchar(msgs)] <- "unknown error"
+  dims <- lapply(groups, function(g) single_level[[g]])
+  key <- paste(msgs, vapply(dims, paste, character(1), collapse = "\r"), sep = "\r\r")
+  vapply(unique(key), function(k) {
+    same <- which(key == k)
+    who <- paste(groups[same], collapse = ", ")
+    entry <- paste0(who, ": ", msgs[same[1L]])
+    d <- dims[[same[1L]]]
+    if (length(d) == 1L) {
+      entry <- paste0(entry, "\n  In ", who, " the stratum dimension '", d,
+                      "' has a single level, so its main effect cannot be estimated ",
+                      "there.")
+    } else if (length(d) > 1L) {
+      entry <- paste0(entry, "\n  In ", who, " the stratum dimensions ",
+                      paste(sprintf("'%s'", d), collapse = ", "),
+                      " have a single level each, so their main effects cannot be ",
+                      "estimated there.")
+    }
+    entry
+  }, character(1), USE.NAMES = FALSE)
+}
+
 #' Print method for MAIHDA group comparisons
 #'
 #' @param x A maihda_group_comparison object.
@@ -1268,18 +1752,31 @@ maihda_prepare_group_strata <- function(formula, data, shared_strata, autobin = 
 #' @return No return value, called for side effects.
 #' @export
 print.maihda_group_comparison <- function(x, ...) {
+  maihda_print_group_comparison(x)
+}
+
+# The body of print.maihda_group_comparison(). The two-model print of a maihda()
+# analysis passes ml_note = FALSE when its PCV block has printed the
+# maximum-likelihood note already.
+maihda_print_group_comparison <- function(x, ml_note = TRUE) {
   cat(maihda_palette()$bold("MAIHDA Group Comparison"), "\n", sep = "")
   cat("=======================\n\n")
   # `[.maihda_group_comparison` re-attaches the metadata attributes after a row/column
   # subset, but degrade gracefully if they are missing anyway (e.g. an object built by
   # some other path): print the bare data frame rather than blank header fields.
   group_var <- attr(x, "group_var")
+  basis <- maihda_pcv_series_basis(x)
   if (!is.null(group_var)) {
     cat("Group variable:", group_var, "\n")
     cat("Engine:", attr(x, "engine"),
         " | Family:", attr(x, "family"),
         " | Strata:", if (isTRUE(attr(x, "shared_strata"))) "shared/global" else "per-group",
         "\n")
+    if (!is.null(basis)) {
+      # The PCV's basis label. For a brms comparison it describes the variance columns
+      # too: they are the posterior medians the PCV compares.
+      cat("Variance basis:", maihda_pcv_result_basis_label(basis), "\n")
+    }
     # Contextual comparison: each per-group fit is a contextual cross-classified
     # model, so vpc/var_between are the between-stratum share NET of the context and
     # var_context/vpc_context are the (summed) between-context partition.
@@ -1292,6 +1789,12 @@ print.maihda_group_comparison <- function(x, ...) {
     cat("\n")
   }
   print(as.data.frame(x), row.names = FALSE, digits = 4)
+  # The note is about the PCV, so it follows a table that has PCVs.
+  # compare_maihda_groups() takes no estimation = "REML", so the note does not name it.
+  if (ml_note && !is.null(group_var) && !is.null(basis) &&
+      maihda_pcv_show_ml_note(basis) && any(is.finite(x[["pcv"]]))) {
+    cat(maihda_palette()$muted(maihda_pcv_ml_note()))
+  }
   invisible(x)
 }
 
@@ -1316,7 +1819,8 @@ print.maihda_group_comparison <- function(x, ...) {
   # method relies on.
   if (is.data.frame(out)) {
     for (a in c("group_var", "engine", "family", "shared_strata", "decomposition",
-                "context_var", "context_per")) {
+                "context_var", "context_per", "estimation", "estimation_used",
+                "ml_variances")) {
       attr(out, a) <- attr(x, a)
     }
     class(out) <- class(x)
@@ -1666,23 +2170,4 @@ plot.maihda_group_comparison <- function(x, type = c("vpc", "components", "betwe
       plot.caption = element_text(hjust = 0.5, face = "italic", size = 9),
       axis.text.x = element_text(angle = 45, hjust = 1)
     )
-}
-
-#' Plot a MAIHDA Group Comparison (deprecated)
-#'
-#' Deprecated. Use \code{plot()} on the \code{\link{compare_maihda_groups}}
-#' result instead, e.g. \code{plot(cmp, type = "vpc")}.
-#'
-#' @param x A \code{maihda_group_comparison} object.
-#' @param type One of "vpc" (default), "components", "between_variance", "pcv", or
-#'   "additive_share".
-#' @return A ggplot2 object.
-#' @keywords internal
-#' @export
-plot_group_comparison <- function(x, type = c("vpc", "components", "between_variance", "pcv", "additive_share")) {
-  .Deprecated("plot", msg = paste(
-    "'plot_group_comparison()' is deprecated.",
-    "Use plot() on the compare_maihda_groups() result, e.g. plot(cmp, type = 'vpc')."
-  ))
-  plot(x, type = match.arg(type))
 }

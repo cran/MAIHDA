@@ -11,12 +11,13 @@ stepwise_pcv(
   engine = "lme4",
   family = "gaussian",
   context = NULL,
-  sampling_weights = NULL
+  sampling_weights = NULL,
+  estimation = c("fitted", "ML")
 )
 }
 \arguments{
-\item{data}{Data frame with observations. Ensure `make_strata()` was run first
-so the `stratum` variable exists.}
+\item{data}{Data frame with observations. Ensure \code{\link{make_strata}} was
+run first so the \code{stratum} variable exists.}
 
 \item{outcome}{Character string; the dependent variable.}
 
@@ -50,6 +51,10 @@ only (\code{wemix} and \code{ordinal} fit no crossed random effects). See
 design-weighted stepwise fits; see \code{\link{fit_maihda}}. The weight
 column joins the complete-case filter so every step uses the same analytic
 sample.}
+
+\item{estimation}{Variance-estimation basis for the between-stratum variances
+compared across steps, \code{"fitted"} (default) or \code{"ML"}; see
+\code{\link{calculate_pcv}}. Affects Gaussian \code{lmer} fits only.}
 }
 \value{
 A data.frame (class \code{maihda_stepwise}) showing the sequential
@@ -61,11 +66,32 @@ A data.frame (class \code{maihda_stepwise}) showing the sequential
   delta-AUC, versus the previous step and versus the null), and \code{MOR} (the
   Median Odds Ratio, logit link only). These columns are absent for non-binary
   outcomes. When \code{context} is supplied, a \code{Context_Variance} column
-  reports the between-context variance held at each step, and the
-  discriminatory-accuracy trajectory is omitted even for a binary outcome -- the
-  AUC would include the context random effect and so mismatch the net-of-context
-  \code{Step_PCV} / \code{Total_PCV}, exactly as \code{\link{summary.maihda_model}}
-  drops it for a contextual fit.
+  reports the between-context variance held at each step (for a \code{brms} fit the
+  posterior median of each context's variance, summed over the contexts;
+  \code{Variance} is a posterior median too). For a binary
+  outcome the discriminatory-accuracy trajectory is still reported alongside it: the
+  \code{AUC} and \code{MOR} are the intersectional-scope (between-stratum)
+  quantities -- the concordance of the fixed effects plus the stratum interaction,
+  \emph{excluding} the context random effect -- so they carry the same
+  net-of-context scope as the \code{Step_PCV} / \code{Total_PCV} columns, exactly
+  as \code{\link{summary.maihda_model}} reports the intersectional-scope AUC for a
+  contextual fit.
+
+  The variance-estimation basis chosen by \code{estimation} is recorded as an
+  \code{"estimation"} attribute on the returned table; the basis actually used is
+  recorded as \code{"estimation_used"} (\code{"mixed"} when \code{estimation = "ML"}
+  but a step's ML refit was skipped at the boundary, leaving it on REML). Both are
+  shown by \code{print()}. An \code{"ml_variances"} attribute is \code{TRUE} when the
+  compared variances are maximum-likelihood estimates (\code{glmer}, wemix or
+  ordinal fits, or \code{lmer} fits refitted by maximum likelihood); \code{print()}
+  notes it under the default \code{estimation}, as \code{\link{calculate_pcv}} does.
+
+  \code{Step_PCV} is \code{NA} for any step whose \emph{preceding} model has a
+  between-stratum variance at the singularity boundary: that variance is the step's
+  denominator, and at the boundary it carries only optimizer noise, so the ratio is
+  undefined rather than small. Those steps are listed in an
+  \code{"undefined_step_pcv"} attribute and noted by \code{print()}. \code{Total_PCV}
+  is unaffected, since it divides by the null model's variance.
 }
 \description{
 Estimates the proportional change in variance (PCV) sequentially by fitting
@@ -76,9 +102,9 @@ sequential it is order-dependent: it reflects each variable's marginal,
 model-dependent change, not an order-invariant \dQuote{unique} contribution.
 }
 \details{
-All models are fit on the complete cases for `outcome`, `stratum`, and all
-variables in `vars` so that each sequential variance comparison uses the same
-analytic sample.
+All models are fit on the complete cases for \code{outcome}, \code{stratum},
+and all variables in \code{vars} so that each sequential variance comparison
+uses the same analytic sample.
 
 For a binary (or ordinal) outcome the sequential between-stratum variances
 live on the latent scale, whose level-1 variance is fixed by the link: a step
@@ -94,8 +120,9 @@ For a binary outcome the table additionally tracks discriminatory accuracy
 \code{Total_AUC} are its \emph{absolute} change (delta-AUC), in contrast to the
 \emph{proportional} \code{Step_PCV} / \code{Total_PCV}. The \code{MOR} is reported
 for the logit link (\code{NA} otherwise) and is a monotone transform of the
-between-stratum variance already in \code{Variance}. For a design-weighted fit
-(\code{sampling_weights}) the AUC is the design-weighted (population) C-statistic.
+between-stratum variance already in \code{Variance}. For a
+design-weighted fit (\code{sampling_weights}) the AUC is the design-weighted
+(population) C-statistic.
 Reuses \code{\link{maihda_discriminatory_accuracy}} on each step's fitted model, so
 no additional models are fit. Note that adding a \emph{stratum-defining} dimension
 (one already encoded by the strata) typically leaves the AUC essentially unchanged:

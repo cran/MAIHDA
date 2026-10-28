@@ -4,7 +4,12 @@
 \alias{maihda_longitudinal_pcv}
 \title{Longitudinal MAIHDA proportional change in variance (PCV)}
 \usage{
-maihda_longitudinal_pcv(null_model, adjusted_model, times = NULL)
+maihda_longitudinal_pcv(
+  null_model,
+  adjusted_model,
+  times = NULL,
+  estimation = c("fitted", "ML")
+)
 }
 \arguments{
 \item{null_model, adjusted_model}{Longitudinal \code{maihda_model}s from a
@@ -12,9 +17,18 @@ maihda_longitudinal_pcv(null_model, adjusted_model, times = NULL)
 
 \item{times}{Optional numeric times for the time-specific PCV; defaults to the
 null model's reporting grid.}
+
+\item{estimation}{Variance-estimation basis, \code{"fitted"} (default) or
+\code{"ML"}; see \code{\link{calculate_pcv}}.}
 }
 \value{
-An object of class \code{maihda_long_pcv}.
+An object of class \code{maihda_long_pcv}. \code{variance_summary} names
+  what \code{var_baseline_*}, \code{var_slope_*} and the variances in \code{pcv_t}
+  are (\code{"estimate"} for lme4, \code{"posterior median"} for brms), and
+  \code{Sigma_summary} what the two stored blocks are (\code{"estimate"} or
+  \code{"posterior mean"}). \code{ml_variances} is \code{TRUE} when the compared
+  variances are maximum-likelihood estimates: a \code{glmer} growth pair, or
+  \code{lmer} growth fits made or refitted by maximum likelihood.
 }
 \description{
 Compares the stratum-level random-effect covariance block of the null growth
@@ -28,14 +42,39 @@ invariant to how the time axis is coded (for linear growth the slope variance
 is the same at every time, so this reduces to the slope-variance cell).
 }
 \details{
-As in \code{\link{calculate_pcv}}, REML \code{lmer} growth fits are refitted
-with maximum likelihood (\code{\link[lme4]{refitML}}) before the comparison:
-the null and adjusted models differ in fixed effects (the dimensions' main
-effects and their \code{dim:time} interactions), across which REML variance
-estimates are not comparable -- using them biases both PCVs downward,
-overstating the multiplicative/interaction share. The stored models (and the
-single-model summaries computed from them, e.g. the time-varying VPC) keep
-their REML fit; \code{ml_refit} on the result records whether the refit
-applied. glmer (GLMM) and brms fits are already on the ML / posterior scale.
+As in \code{\link{calculate_pcv}}, the \code{estimation} argument selects the
+variance-estimation basis. With \code{estimation = "fitted"} (the default) each
+fit's own REML covariance block is used, matching the single-model summaries. With
+\code{estimation = "ML"}, REML \code{lmer} growth fits are refitted with maximum
+likelihood (\code{\link[lme4]{refitML}}) before the comparison, which overstates
+both PCVs when strata are few. The stored models (and the single-model summaries
+computed from them, e.g. the time-varying VPC) always keep their REML fit;
+\code{ml_refit} on the result records
+whether an ML refit fully applied, and \code{estimation_used} records the basis
+ACTUALLY used -- \code{"fitted"}, \code{"ML"}, or \code{"mixed"} when an ML refit
+was requested but a model kept its REML fit (a boundary skip or a failed refit),
+so a mixed REML/ML comparison is not mistaken for a clean one. glmer (GLMM) and
+brms fits are already on the ML / posterior scale, so the choice does not affect
+them.
+
+A variance estimate cannot fall below zero. When the strata differ little after
+adjustment next to the precision of one stratum's own baseline or slope, the
+adjusted model's variance is too large on average and the null model's is not, so
+the PCV is understated on average and single values can be far too low or negative.
+This affects the slope first, where strata usually differ least, and eases with
+more strata, larger strata and more measurement occasions.
+
+For a \code{brms} pair every variance compared is the posterior median of its
+per-draw value: the between-stratum variance \eqn{a(t)' \Sigma a(t)} at the
+baseline and at each reporting time, and the slope variance. The stored blocks
+\code{Sigma_stratum_null} and \code{Sigma_stratum_adjusted} are the posterior
+means \code{summary()} tabulates, so those variances are not quadratic forms of
+them. The posterior of a between-stratum variance is right-skewed when strata are
+few, and more so in the adjusted model, so the PCV of a \code{brms} pair is
+understated on average with few strata -- by more when the additive share is
+moderate, when the strata are small, or, for the slope, when the strata differ
+little in slope next to the precision of a stratum's slope -- and can be negative
+where the true value is positive. The \code{lme4} (REML) decomposition is less
+biased then; neither is precise with so few strata.
 }
 \keyword{internal}

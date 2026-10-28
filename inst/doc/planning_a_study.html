@@ -12,7 +12,7 @@
 
 <meta name="author" content="Hamid Bulut" />
 
-<meta name="date" content="2026-07-09" />
+<meta name="date" content="2026-10-28" />
 
 <title>Planning a MAIHDA analysis</title>
 
@@ -341,7 +341,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 <h1 class="title toc-ignore">Planning a MAIHDA analysis</h1>
 <h4 class="author">Hamid Bulut</h4>
-<h4 class="date">2026-07-09</h4>
+<h4 class="date">2026-10-28</h4>
 
 
 
@@ -401,6 +401,79 @@ have consequences (next section). A useful rule: choose the fewest
 dimensions that answer your question, and look at the cell-size
 distribution before committing.</p>
 </div>
+<div id="one-call-maihda_describe" class="section level2">
+<h2>One call: <code>maihda_describe()</code></h2>
+<p>The checks above — and the rest of a pre-model “Table 1” — come
+bundled in <code>maihda_describe()</code>. It builds the strata with the
+same machinery as <code>fit_maihda()</code> (identical stratum IDs,
+labels, and counts), then reports the total and complete-case analytic
+sample, the observed vs. expected strata (empty cells enumerated, small
+cells flagged), each dimension’s distribution, a family-aware outcome
+summary per stratum (proportions for a binary outcome, never a Gaussian
+mean/SD), missingness, and a set of data-quality warnings:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>desc <span class="ot">&lt;-</span> <span class="fu">maihda_describe</span>(BMI <span class="sc">~</span> Age <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> Gender<span class="sc">:</span>Race<span class="sc">:</span>Education),</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>                        <span class="at">data =</span> maihda_health_data, <span class="at">flag_stratum_n =</span> <span class="dv">20</span>)</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>desc</span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a><span class="co">#&gt; MAIHDA Sample Description</span></span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a><span class="co">#&gt; =========================</span></span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a><span class="co">#&gt; </span></span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a><span class="co">#&gt; Outcome: BMI | Family: gaussian | Summary: mean/SD (gaussian)</span></span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a><span class="co">#&gt; Dimensions: Gender, Race, Education</span></span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a><span class="co">#&gt; </span></span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a><span class="co">#&gt; Sample:</span></span>
+<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a><span class="co">#&gt;   Rows (total):                    3,000</span></span>
+<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a><span class="co">#&gt;   Missing outcome:                 0 (0.0%)</span></span>
+<span id="cb4-13"><a href="#cb4-13" tabindex="-1"></a><span class="co">#&gt;   Outside strata (missing dims):   0</span></span>
+<span id="cb4-14"><a href="#cb4-14" tabindex="-1"></a><span class="co">#&gt;   Analytic sample (complete case): 3,000</span></span>
+<span id="cb4-15"><a href="#cb4-15" tabindex="-1"></a><span class="co">#&gt; </span></span>
+<span id="cb4-16"><a href="#cb4-16" tabindex="-1"></a><span class="co">#&gt; Observed outcome (3,000 non-missing): mean 28.883 (SD 6.743), median 27.865, range 15.800 to 81.250</span></span>
+<span id="cb4-17"><a href="#cb4-17" tabindex="-1"></a><span class="co">#&gt; </span></span>
+<span id="cb4-18"><a href="#cb4-18" tabindex="-1"></a><span class="co">#&gt; Strata (50 observed / 50 expected, 0 empty):</span></span>
+<span id="cb4-19"><a href="#cb4-19" tabindex="-1"></a><span class="co">#&gt;   Cell sizes: min 1, median 25.5, max 349; 21 strata at/below n = 20 (flagged)</span></span>
+<span id="cb4-20"><a href="#cb4-20" tabindex="-1"></a><span class="co">#&gt;   Smallest strata:</span></span>
+<span id="cb4-21"><a href="#cb4-21" tabindex="-1"></a><span class="co">#&gt;     female × Black × 8th Grade             n = 1</span></span>
+<span id="cb4-22"><a href="#cb4-22" tabindex="-1"></a><span class="co">#&gt;     female × Mexican × College Grad        n = 5</span></span>
+<span id="cb4-23"><a href="#cb4-23" tabindex="-1"></a><span class="co">#&gt;     female × Other × 9 - 11th Grade        n = 7</span></span>
+<span id="cb4-24"><a href="#cb4-24" tabindex="-1"></a><span class="co">#&gt;     male × Black × 8th Grade               n = 8</span></span>
+<span id="cb4-25"><a href="#cb4-25" tabindex="-1"></a><span class="co">#&gt;     female × Other × High School           n = 9</span></span>
+<span id="cb4-26"><a href="#cb4-26" tabindex="-1"></a><span class="co">#&gt;   (full table in $strata)</span></span>
+<span id="cb4-27"><a href="#cb4-27" tabindex="-1"></a><span class="co">#&gt; </span></span>
+<span id="cb4-28"><a href="#cb4-28" tabindex="-1"></a><span class="co">#&gt; Dimensions:</span></span>
+<span id="cb4-29"><a href="#cb4-29" tabindex="-1"></a><span class="co">#&gt;   Gender: female 1,527 (50.9%), male 1,473 (49.1%)</span></span>
+<span id="cb4-30"><a href="#cb4-30" tabindex="-1"></a><span class="co">#&gt;   Race: Black 336 (11.2%), Hispanic 166 (5.5%), Mexican 242 (8.1%), White</span></span>
+<span id="cb4-31"><a href="#cb4-31" tabindex="-1"></a><span class="co">#&gt;     2,034 (67.8%), Other 222 (7.4%)</span></span>
+<span id="cb4-32"><a href="#cb4-32" tabindex="-1"></a><span class="co">#&gt;   Education: 8th Grade 196 (6.5%), 9 - 11th Grade 366 (12.2%), High School</span></span>
+<span id="cb4-33"><a href="#cb4-33" tabindex="-1"></a><span class="co">#&gt;     632 (21.1%), Some College 960 (32.0%), College Grad 846 (28.2%)</span></span>
+<span id="cb4-34"><a href="#cb4-34" tabindex="-1"></a><span class="co">#&gt; </span></span>
+<span id="cb4-35"><a href="#cb4-35" tabindex="-1"></a><span class="co">#&gt; Warnings:</span></span>
+<span id="cb4-36"><a href="#cb4-36" tabindex="-1"></a><span class="co">#&gt;   ! 21 strata have n &lt;= 20; smallest: &#39;female × Black × 8th Grade&#39; (n=1),</span></span>
+<span id="cb4-37"><a href="#cb4-37" tabindex="-1"></a><span class="co">#&gt;     &#39;female × Mexican × College Grad&#39; (n=5), &#39;female × Other × 9 - 11th</span></span>
+<span id="cb4-38"><a href="#cb4-38" tabindex="-1"></a><span class="co">#&gt;     Grade&#39; (n=7). Partial pooling shrinks small-stratum estimates toward</span></span>
+<span id="cb4-39"><a href="#cb4-39" tabindex="-1"></a><span class="co">#&gt;     the mean; expect wide intervals for these cells.</span></span></code></pre></div>
+<p>Every element is an export-ready data frame —
+<code>desc$strata</code> is the per-stratum Table 1, ready for
+<code>write.csv()</code> or <code>knitr::kable()</code>:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="fu">head</span>(desc<span class="sc">$</span>strata[<span class="fu">order</span>(desc<span class="sc">$</span>strata<span class="sc">$</span>n),</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>                 <span class="fu">c</span>(<span class="st">&quot;label&quot;</span>, <span class="st">&quot;n&quot;</span>, <span class="st">&quot;n_analytic&quot;</span>, <span class="st">&quot;outcome_mean&quot;</span>, <span class="st">&quot;small&quot;</span>)])</span>
+<span id="cb5-3"><a href="#cb5-3" tabindex="-1"></a><span class="co">#&gt;                              label  n n_analytic outcome_mean small</span></span>
+<span id="cb5-4"><a href="#cb5-4" tabindex="-1"></a><span class="co">#&gt; 50      female × Black × 8th Grade  1          1     24.05000  TRUE</span></span>
+<span id="cb5-5"><a href="#cb5-5" tabindex="-1"></a><span class="co">#&gt; 31 female × Mexican × College Grad  5          5     24.95800  TRUE</span></span>
+<span id="cb5-6"><a href="#cb5-6" tabindex="-1"></a><span class="co">#&gt; 47 female × Other × 9 - 11th Grade  7          7     24.96143  TRUE</span></span>
+<span id="cb5-7"><a href="#cb5-7" tabindex="-1"></a><span class="co">#&gt; 33        male × Black × 8th Grade  8          8     25.16000  TRUE</span></span>
+<span id="cb5-8"><a href="#cb5-8" tabindex="-1"></a><span class="co">#&gt; 32    female × Other × High School  9          9     31.92778  TRUE</span></span>
+<span id="cb5-9"><a href="#cb5-9" tabindex="-1"></a><span class="co">#&gt; 4      male × Hispanic × 8th Grade 10         10     31.30700  TRUE</span></span></code></pre></div>
+<p>The stratum-size view makes the sparsity of the strata space visible
+at a glance (the dashed line is <code>flag_stratum_n</code>):</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="fu">plot</span>(desc, <span class="at">type =</span> <span class="st">&quot;stratum_size&quot;</span>)</span></code></pre></div>
+<p><img role="img" aria-label="Histogram of stratum sizes with the small-stratum threshold marked" src="data:image/png;base64,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" alt="Histogram of stratum sizes with the small-stratum threshold marked" /></p>
+<p>For a contextual cross-classified design, pass <code>context =</code>
+(as in <code>fit_maihda()</code>) and <code>maihda_describe()</code>
+also tabulates the context units and flags a weakly identified context
+(few levels) before you fit. A fitted <code>maihda_model</code> or
+<code>maihda()</code> analysis can be described the same way —
+<code>maihda_describe(model)</code> — to document the exact analytic
+sample post hoc.</p>
+</div>
 <div id="what-sparse-cells-do-singular-fits" class="section level2">
 <h2>What sparse cells do: singular fits</h2>
 <p>When cells get very small the maximum-likelihood (<code>lme4</code>)
@@ -408,45 +481,48 @@ estimate of the between-stratum variance can collapse to the boundary (
 a singular fit) and report a VPC of (near) zero with no uncertainty. The
 package records this and surfaces it in a “Fit diagnostics” note rather
 than letting it pass silently:</p>
-<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>over <span class="ot">&lt;-</span> <span class="fu">fit_maihda</span>(</span>
-<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a>  BMI <span class="sc">~</span> <span class="dv">1</span> <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> Gender<span class="sc">:</span>Race<span class="sc">:</span>Education),</span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a>  <span class="at">data =</span> maihda_health_data[<span class="dv">1</span><span class="sc">:</span><span class="dv">60</span>, ]       <span class="co"># deliberately too few people per stratum</span></span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>)</span>
-<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a><span class="co">#&gt; boundary (singular) fit: see help(&#39;isSingular&#39;)</span></span>
-<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>over</span>
-<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a><span class="co">#&gt; MAIHDA Model</span></span>
-<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a><span class="co">#&gt; ============</span></span>
-<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a><span class="co">#&gt; </span></span>
-<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a><span class="co">#&gt; Engine: lme4 </span></span>
-<span id="cb4-11"><a href="#cb4-11" tabindex="-1"></a><span class="co">#&gt; Family: gaussian </span></span>
-<span id="cb4-12"><a href="#cb4-12" tabindex="-1"></a><span class="co">#&gt; Formula: BMI ~ (1 | stratum) </span></span>
-<span id="cb4-13"><a href="#cb4-13" tabindex="-1"></a><span class="co">#&gt; </span></span>
-<span id="cb4-14"><a href="#cb4-14" tabindex="-1"></a><span class="co">#&gt; Fit diagnostics:</span></span>
-<span id="cb4-15"><a href="#cb4-15" tabindex="-1"></a><span class="co">#&gt;   Singular fit: at least one variance component is estimated at (or near) zero.</span></span>
-<span id="cb4-16"><a href="#cb4-16" tabindex="-1"></a><span class="co">#&gt;     The between-stratum variance and any VPC/PCV derived from it may be unreliable.</span></span>
-<span id="cb4-17"><a href="#cb4-17" tabindex="-1"></a><span class="co">#&gt;   Convergence warnings reported by lme4:</span></span>
-<span id="cb4-18"><a href="#cb4-18" tabindex="-1"></a><span class="co">#&gt;     - boundary (singular) fit: see help(&#39;isSingular&#39;)</span></span>
-<span id="cb4-19"><a href="#cb4-19" tabindex="-1"></a><span class="co">#&gt; </span></span>
-<span id="cb4-20"><a href="#cb4-20" tabindex="-1"></a><span class="co">#&gt; </span></span>
-<span id="cb4-21"><a href="#cb4-21" tabindex="-1"></a><span class="co">#&gt; Underlying model:</span></span>
-<span id="cb4-22"><a href="#cb4-22" tabindex="-1"></a><span class="co">#&gt; Linear mixed model fit by REML [&#39;lmerMod&#39;]</span></span>
-<span id="cb4-23"><a href="#cb4-23" tabindex="-1"></a><span class="co">#&gt; Formula: BMI ~ (1 | stratum)</span></span>
-<span id="cb4-24"><a href="#cb4-24" tabindex="-1"></a><span class="co">#&gt;    Data: data</span></span>
-<span id="cb4-25"><a href="#cb4-25" tabindex="-1"></a><span class="co">#&gt; REML criterion at convergence: 386.8857</span></span>
-<span id="cb4-26"><a href="#cb4-26" tabindex="-1"></a><span class="co">#&gt; Random effects:</span></span>
-<span id="cb4-27"><a href="#cb4-27" tabindex="-1"></a><span class="co">#&gt;  Groups   Name        Std.Dev.</span></span>
-<span id="cb4-28"><a href="#cb4-28" tabindex="-1"></a><span class="co">#&gt;  stratum  (Intercept) 0.000   </span></span>
-<span id="cb4-29"><a href="#cb4-29" tabindex="-1"></a><span class="co">#&gt;  Residual             6.203   </span></span>
-<span id="cb4-30"><a href="#cb4-30" tabindex="-1"></a><span class="co">#&gt; Number of obs: 60, groups:  stratum, 24</span></span>
-<span id="cb4-31"><a href="#cb4-31" tabindex="-1"></a><span class="co">#&gt; Fixed Effects:</span></span>
-<span id="cb4-32"><a href="#cb4-32" tabindex="-1"></a><span class="co">#&gt; (Intercept)  </span></span>
-<span id="cb4-33"><a href="#cb4-33" tabindex="-1"></a><span class="co">#&gt;        28.8  </span></span>
-<span id="cb4-34"><a href="#cb4-34" tabindex="-1"></a><span class="co">#&gt; optimizer (nloptwrap) convergence code: 0 (OK) ; 0 optimizer warnings; 1 lme4 warnings</span></span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>over <span class="ot">&lt;-</span> <span class="fu">fit_maihda</span>(</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  BMI <span class="sc">~</span> <span class="dv">1</span> <span class="sc">+</span> (<span class="dv">1</span> <span class="sc">|</span> Gender<span class="sc">:</span>Race<span class="sc">:</span>Education),</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  <span class="at">data =</span> maihda_health_data[<span class="dv">1</span><span class="sc">:</span><span class="dv">60</span>, ]       <span class="co"># deliberately too few people per stratum</span></span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>)</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a><span class="co">#&gt; boundary (singular) fit: see help(&#39;isSingular&#39;)</span></span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>over</span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a><span class="co">#&gt; MAIHDA Model</span></span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a><span class="co">#&gt; ============</span></span>
+<span id="cb7-9"><a href="#cb7-9" tabindex="-1"></a><span class="co">#&gt; </span></span>
+<span id="cb7-10"><a href="#cb7-10" tabindex="-1"></a><span class="co">#&gt; Engine: lme4 </span></span>
+<span id="cb7-11"><a href="#cb7-11" tabindex="-1"></a><span class="co">#&gt; Family: gaussian </span></span>
+<span id="cb7-12"><a href="#cb7-12" tabindex="-1"></a><span class="co">#&gt; Formula: BMI ~ (1 | stratum) </span></span>
+<span id="cb7-13"><a href="#cb7-13" tabindex="-1"></a><span class="co">#&gt; </span></span>
+<span id="cb7-14"><a href="#cb7-14" tabindex="-1"></a><span class="co">#&gt; Fit diagnostics:</span></span>
+<span id="cb7-15"><a href="#cb7-15" tabindex="-1"></a><span class="co">#&gt;   Singular fit: the random-effects block for &#39;stratum&#39; is at (or near) the boundary</span></span>
+<span id="cb7-16"><a href="#cb7-16" tabindex="-1"></a><span class="co">#&gt;     (a variance estimated at ~0, or a perfect correlation between an intercept and a slope).</span></span>
+<span id="cb7-17"><a href="#cb7-17" tabindex="-1"></a><span class="co">#&gt;     The between-stratum variance and any VPC/PCV derived from it may be unreliable.</span></span>
+<span id="cb7-18"><a href="#cb7-18" tabindex="-1"></a><span class="co">#&gt; </span></span>
+<span id="cb7-19"><a href="#cb7-19" tabindex="-1"></a><span class="co">#&gt; </span></span>
+<span id="cb7-20"><a href="#cb7-20" tabindex="-1"></a><span class="co">#&gt; Underlying model:</span></span>
+<span id="cb7-21"><a href="#cb7-21" tabindex="-1"></a><span class="co">#&gt; Linear mixed model fit by REML [&#39;lmerMod&#39;]</span></span>
+<span id="cb7-22"><a href="#cb7-22" tabindex="-1"></a><span class="co">#&gt; Formula: BMI ~ (1 | stratum)</span></span>
+<span id="cb7-23"><a href="#cb7-23" tabindex="-1"></a><span class="co">#&gt;    Data: data</span></span>
+<span id="cb7-24"><a href="#cb7-24" tabindex="-1"></a><span class="co">#&gt; REML criterion at convergence: 386.8857</span></span>
+<span id="cb7-25"><a href="#cb7-25" tabindex="-1"></a><span class="co">#&gt; Random effects:</span></span>
+<span id="cb7-26"><a href="#cb7-26" tabindex="-1"></a><span class="co">#&gt;  Groups   Name        Std.Dev.</span></span>
+<span id="cb7-27"><a href="#cb7-27" tabindex="-1"></a><span class="co">#&gt;  stratum  (Intercept) 0.000   </span></span>
+<span id="cb7-28"><a href="#cb7-28" tabindex="-1"></a><span class="co">#&gt;  Residual             6.203   </span></span>
+<span id="cb7-29"><a href="#cb7-29" tabindex="-1"></a><span class="co">#&gt; Number of obs: 60, groups:  stratum, 24</span></span>
+<span id="cb7-30"><a href="#cb7-30" tabindex="-1"></a><span class="co">#&gt; Fixed Effects:</span></span>
+<span id="cb7-31"><a href="#cb7-31" tabindex="-1"></a><span class="co">#&gt; (Intercept)  </span></span>
+<span id="cb7-32"><a href="#cb7-32" tabindex="-1"></a><span class="co">#&gt;        28.8  </span></span>
+<span id="cb7-33"><a href="#cb7-33" tabindex="-1"></a><span class="co">#&gt; optimizer (nloptwrap) convergence code: 0 (OK) ; 0 optimizer warnings; 1 lme4 warnings</span></span></code></pre></div>
 <p>If you see a singular-fit note, do not read the VPC as a clean zero.
 The solution is to collapse dimensions or categories (fewer, larger
-cells), or to use <code>engine = &quot;brms&quot;</code>, whose weakly-informative
-priors regularise the variance off the boundary and return a posterior
-interval, the subject of the <a href="bayesian_sparse_maihda.html">Bayesian sparse vignette</a>.</p>
+cells). <code>engine = &quot;brms&quot;</code> does not repair this: it never puts
+the variance at zero, but with cells this small its estimate depends
+more on the prior than on the data, and its posterior interval shows how
+little the cells say (the <a href="bayesian_sparse_maihda.html">Bayesian
+sparse vignette</a>). The interval is what <code>brms</code> adds: its
+PCV is a point estimate without one, and with few strata it is
+understated (see <code>?calculate_pcv</code>).</p>
 </div>
 <div id="continuous-variables-and-the-analytic-sample" class="section level2">
 <h2>Continuous variables and the analytic sample</h2>
@@ -495,15 +571,27 @@ modest AUC)</td>
 </tr>
 </tbody>
 </table>
+<p>The PCV of a binary or Poisson count outcome fitted with
+<code>lme4</code> compares maximum-likelihood variances. With few or
+small strata these run low, the adjusted model’s most, so that PCV runs
+high. <code>maihda(estimation = &quot;REML&quot;)</code> and
+<code>calculate_pcv(estimation = &quot;REML&quot;)</code> compare REML-type
+variances instead, which corrects this when strata are few but not small
+(see <code>?calculate_pcv</code>).</p>
 </div>
 <div id="which-engine-which-design" class="section level2">
 <h2>Which engine, which design?</h2>
 <ul>
 <li><strong><code>lme4</code> (default)</strong> – fast frequentist fits
 for adequately-sized cells.</li>
-<li><strong><code>brms</code></strong> – Bayesian; preferred when cells
-are sparse or dimensions have few levels (regularising priors, posterior
-intervals).</li>
+<li><strong><code>brms</code></strong> – Bayesian; posterior intervals
+for the VPC and the variance shares. With few-level dimensions the
+variance components of a crossed-dimensions fit depend on the prior on
+the random-effect standard deviations, and its realised-strata block
+depends little on it when each stratum has enough data (see
+<code>vignette(&quot;cross_classified&quot;, package = &quot;MAIHDA&quot;)</code>). Its
+two-model PCV has no interval and is understated when strata are
+few.</li>
 </ul>
 <p>For extensions beyond the cross-sectional case, see the <a href="cross_classified.html">crossed random effects</a>
 (dimensions/contexts) and <a href="longitudinal.html">longitudinal</a>

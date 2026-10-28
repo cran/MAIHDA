@@ -33,29 +33,58 @@ maihda_chr <- function(v) {
 }
 
 # Normalise the engine-specific fixed_effects slot to a broom-shaped tibble:
-#   term / estimate / std.error / conf.low / conf.high
-# lme4 gives data.frame(term, estimate); wemix/ordinal add `se`; brms::fixef() gives a
-# matrix with columns Estimate / Est.Error / Q2.5 / Q97.5.
+#   term / estimate / std.error / statistic / p.value / conf.low / conf.high
+# The lme4, wemix and ordinal summaries store the full Wald table (term / estimate /
+# se / statistic / p_value / lower / upper) built by maihda_fixed_effects_table();
+# brms::fixef() gives a matrix with Estimate / Est.Error and two quantile columns
+# (named for the quantiles themselves, e.g. Q2.5 / Q97.5), and a posterior summary
+# carries no test statistic or p-value, so those are NA there.
+#
+# The estimate/se fallbacks below cover a summary built before those columns existed
+# (a stored maihda_summary object from an older version).
 maihda_tidy_fixed <- function(fe) {
   if (is.null(fe)) return(tibble::tibble())
 
   if (is.matrix(fe)) {
     cn <- colnames(fe)
+    # Interval columns are the two extreme quantile columns, whatever level the
+    # fit was summarised at (Q2.5/Q97.5 at the 95% default).
+    qcol <- grep("^Q[0-9.]+$", cn, value = TRUE)
+    qval <- suppressWarnings(as.numeric(sub("^Q", "", qcol)))
+    has_q <- length(qcol) >= 2L && !anyNA(qval)
     return(tibble::tibble(
       term      = rownames(fe),
       estimate  = if ("Estimate" %in% cn) fe[, "Estimate"] else fe[, 1],
       std.error = if ("Est.Error" %in% cn) fe[, "Est.Error"] else NA_real_,
-      conf.low  = if ("Q2.5" %in% cn) fe[, "Q2.5"] else NA_real_,
-      conf.high = if ("Q97.5" %in% cn) fe[, "Q97.5"] else NA_real_
+      statistic = NA_real_,
+      df        = NA_real_,
+      p.value   = NA_real_,
+      conf.low  = if (has_q) fe[, qcol[which.min(qval)]] else NA_real_,
+      conf.high = if (has_q) fe[, qcol[which.max(qval)]] else NA_real_
     ))
   }
 
+  est <- as.numeric(fe$estimate)
+  se  <- if ("se" %in% names(fe)) as.numeric(fe$se) else NA_real_
+  se[!is.na(se) & se <= 0] <- NA_real_
+  z <- stats::qnorm(0.975)
+
   tibble::tibble(
     term      = as.character(fe$term),
-    estimate  = as.numeric(fe$estimate),
-    std.error = if ("se" %in% names(fe)) as.numeric(fe$se) else NA_real_,
-    conf.low  = NA_real_,
-    conf.high = NA_real_
+    estimate  = est,
+    std.error = se,
+    statistic = if ("statistic" %in% names(fe)) as.numeric(fe$statistic) else est / se,
+    # NA on every engine but the Gaussian lme4 one, which reports containment
+    # (between-within) denominator degrees of freedom; broom's lmerTest tidier
+    # carries the same column.
+    df        = if ("df" %in% names(fe)) as.numeric(fe$df) else NA_real_,
+    p.value   = if ("p_value" %in% names(fe)) {
+      as.numeric(fe$p_value)
+    } else {
+      2 * stats::pnorm(-abs(est / se))
+    },
+    conf.low  = if ("lower" %in% names(fe)) as.numeric(fe$lower) else est - z * se,
+    conf.high = if ("upper" %in% names(fe)) as.numeric(fe$upper) else est + z * se
   )
 }
 
@@ -78,9 +107,9 @@ maihda_tidy_fixed <- function(fe) {
 #'     \item{\code{"variance"}}{the variance-components table (between-stratum, any
 #'       other random effects, residual, and total) with each component's variance,
 #'       SD and proportion.}
-#'     \item{\code{"fixed"}}{the fixed-effect estimates, in broom's
-#'       \code{term}/\code{estimate}/\code{std.error} shape (with
-#'       \code{conf.low}/\code{conf.high} for the brms engine).}
+#'     \item{\code{"fixed"}}{the fixed-effect estimates in broom's
+#'       \code{term}/\code{estimate}/\code{std.error}/\code{statistic}/
+#'       \code{p.value}/\code{conf.low}/\code{conf.high} shape.}
 #'   }
 #' @param which For a \code{maihda_analysis}, whether to tidy the \code{"null"}
 #'   (default) or \code{"adjusted"} model's summary.
@@ -90,7 +119,23 @@ maihda_tidy_fixed <- function(fe) {
 #'   \code{stratum}, \code{label}, \code{estimate}, \code{std.error},
 #'   \code{conf.low}, \code{conf.high}. For \code{"variance"}: \code{component},
 #'   \code{variance}, \code{sd}, \code{proportion}. For \code{"fixed"}: \code{term},
-#'   \code{estimate}, \code{std.error}, \code{conf.low}, \code{conf.high}.
+#'   \code{estimate}, \code{std.error}, \code{statistic}, \code{df}, \code{p.value},
+#'   \code{conf.low}, \code{conf.high}.
+#'
+#' @section Fixed-effect statistics: For the lme4, WeMix and ordinal engines
+#'   \code{statistic} is the Wald statistic (\code{estimate / std.error}),
+#'   \code{p.value} its two-sided p-value, \code{conf.low}/\code{conf.high} the
+#'   matching Wald interval at the summary's \code{conf_level}, and \code{df}
+#'   the denominator degrees of freedom they were built on.
+#'
+#'   A Gaussian \pkg{lme4} fit reports containment (between-within) \code{df}
+#'   and a \eqn{t}; every other engine leaves \code{df} \code{NA} and uses a z.
+#'   Under \code{summary(df_method = "bootstrap")} \code{p.value} and the
+#'   interval come from the parametric bootstrap and \code{df} is \code{NA}.
+#'   See \code{\link{summary.maihda_model}}. For brms the estimate is the
+#'   posterior mean with its \code{Est.Error} and credible interval, and
+#'   \code{statistic}/\code{df}/\code{p.value} are \code{NA}. Standard errors
+#'   are \code{NA} where they are undefined (a boundary fit).
 #'
 #' @seealso \code{\link{glance.maihda_analysis}} for the one-row model summary.
 #'
@@ -148,6 +193,7 @@ tidy.maihda_analysis <- function(x, component = c("strata", "variance", "fixed")
     stop("No '", which, "' summary is available on this maihda_analysis (mode = '",
          maihda_chr(x$mode), "').", call. = FALSE)
   }
+  maihda_warn_centred_analysis(x)
   tidy(s, component = component, ...)
 }
 
@@ -165,9 +211,9 @@ tidy.maihda_analysis <- function(x, component = c("strata", "variance", "fixed")
 #' @param ... Unused, for S3 consistency.
 #'
 #' @return A one-row \code{tibble}. \code{glance.maihda_analysis} adds \code{pcv}
-#'   (with \code{pcv.conf.low}/\code{pcv.conf.high} when bootstrapped or from a brms
-#'   posterior), the adjusted-model \code{auc.adjusted}, \code{nobs}, \code{family}
-#'   and \code{mode} to the columns produced for a single summary.
+#'   (with \code{pcv.conf.low}/\code{pcv.conf.high} when bootstrapped; a \code{brms}
+#'   PCV is a point estimate), the adjusted-model \code{auc.adjusted}, \code{nobs},
+#'   \code{family} and \code{mode} to the columns produced for a single summary.
 #'
 #' @seealso \code{\link{maihda_tidiers}} for the per-estimate \code{tidy()} methods.
 #'
@@ -215,6 +261,7 @@ glance.maihda_model <- function(x, ...) {
 #' @method glance maihda_analysis
 #' @export
 glance.maihda_analysis <- function(x, ...) {
+  maihda_warn_centred_analysis(x)
   g <- glance(x$summary)
 
   pcv <- x$pcv
