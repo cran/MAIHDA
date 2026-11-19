@@ -4510,6 +4510,75 @@ maihda_variance_components_table <- function(var_stratum, var_other_random, var_
   )
 }
 
+# Central intervals of variance components from their replicates: the refits of a
+# parametric bootstrap, or a brms fit's posterior draws. `draws` is a named list with one
+# numeric vector per component, named by the row label of the variance-components table
+# it belongs to; a length-1 element is recycled. Only the replicates that are finite in
+# every element are used, which for a bootstrap are the refits that formed the VPC
+# interval. Returns a data frame with component, lower and upper (the alpha / 2 and
+# 1 - alpha / 2 quantiles, type 7, as for the VPC interval).
+maihda_variance_draw_intervals <- function(draws, conf_level) {
+  n <- max(lengths(draws))
+  m <- matrix(vapply(draws, function(v) {
+    v <- as.numeric(v)
+    if (length(v) == 1L) rep(v, n) else v
+  }, numeric(n)), nrow = n)
+  ok <- rowSums(!is.finite(m)) == 0L
+  a <- 1 - conf_level
+  q <- vapply(seq_len(ncol(m)), function(j) {
+    stats::quantile(m[ok, j], c(a / 2, 1 - a / 2), names = FALSE)
+  }, numeric(2))
+  data.frame(component = names(draws), lower = q[1, ], upper = q[2, ],
+             stringsAsFactors = FALSE)
+}
+
+# Add the interval columns `lower` and `upper` to a variance-components table. A row
+# named in `draws` (see maihda_variance_draw_intervals()) gets its interval at
+# conf_level; every other row is NA: the Total, and a level-1 variance the caller left
+# out because the link or the count approximation fixes it. The table keeps its
+# attributes.
+maihda_add_variance_intervals <- function(tab, draws, conf_level) {
+  iv <- maihda_variance_draw_intervals(draws, conf_level)
+  idx <- match(tab$component, iv$component)
+  tab$lower <- iv$lower[idx]
+  tab$upper <- iv$upper[idx]
+  tab
+}
+
+# TRUE when a fit's level-1 variance is a parameter the model estimates, the Gaussian
+# residual variance, and so has an interval. FALSE when the link fixes it (pi^2 / 3,
+# 1, pi^2 / 6, a cumulative model's) and for a count family, whose level-1 variance is
+# an approximation at the marginal expected count.
+maihda_level1_is_estimated <- function(model) {
+  fam <- tryCatch(maihda_family(model), error = function(e) NULL)
+  !is.null(fam) && identical(fam$family, "gaussian")
+}
+
+# The replicates of a single-stratum variance-components table, named by its rows:
+# the stratum, any other random effects, and the level-1 variance when the model
+# estimates it.
+maihda_standard_variance_draws <- function(stratum, other, residual, level1_estimated) {
+  c(list(`Between-stratum (random)` = stratum, `Other random effects` = other),
+    if (isTRUE(level1_estimated)) list(`Within-stratum (residual)` = residual))
+}
+
+# Component replicates -- a matrix with one column per row label of a
+# variance-components table, or such a named list -- as the named list
+# maihda_add_variance_intervals() takes, without the level-1 row (cross-sectional or
+# longitudinal label) when the model does not estimate that variance.
+maihda_component_draw_list <- function(component_draws, level1_estimated) {
+  if (is.matrix(component_draws)) {
+    component_draws <- stats::setNames(
+      lapply(seq_len(ncol(component_draws)), function(j) component_draws[, j]),
+      colnames(component_draws))
+  }
+  if (!isTRUE(level1_estimated)) {
+    component_draws <- component_draws[!names(component_draws) %in%
+                                         c("Within-stratum (residual)", "Within (residual)")]
+  }
+  component_draws
+}
+
 # ---- Cross-classified (group-aware) variance partition ---------------------
 # These generalise the single-"stratum" extractors above to a model with several
 # crossed intercept-only random effects, as fitted by the cross-classified MAIHDA
@@ -5095,6 +5164,9 @@ maihda_simulate_lme4 <- function(model, nsim) {
 # matrix, which carries no na.action of its own. lme4 only ever tests is.null()
 # on the attribute and never reads its value. A fit that dropped no rows is
 # untouched, so those refits stay bit-identical.
+#
+# The refit starts from maihda_refit_start(model): the fit's own estimates, with a
+# variance parameter just above zero started at zero.
 maihda_refit_draw <- function(model, newresp) {
   # The premise above -- "a draw has one value per row of the MODEL FRAME" -- holds
   # for na.omit but NOT for na.exclude, where simulate() pads its draws back out to
@@ -5108,7 +5180,73 @@ maihda_refit_draw <- function(model, newresp) {
     na_act <- attr(tryCatch(model@frame, error = function(e) NULL), "na.action")
     if (!is.null(na_act)) attr(newresp, "na.action") <- na_act
   }
-  lme4::refit(model, newresp = newresp)
+  lme4::refit(maihda_refit_start(model), newresp = newresp)
+}
+
+# A variance parameter of an lme4 fit whose standard deviation is below this share of the
+# residual one starts a bootstrap refit at zero (maihda_refit_start()): a variance under
+# 1/10,000 of the residual variance. Beside larger variance parameters, one at 1.1e-4 to
+# 1.7e-3 left 9 to 37 of 100 refits of crossed-dimensions fits more than 1e-3 REML units
+# above fresh fits of the same draws; from zero, 0 to 2 of them (at most 0.0124).
+.maihda_refit_near_zero <- 0.01
+
+# The optimisers whose first step for a parameter just above its bound is a fraction of its
+# distance from the bound: NLopt's BOBYQA (lmer's default, nloptwrap: three quarters of the
+# distance) and minqa's bobyqa (glmer with nAGQ = 0, or a control naming it: a fifth of the
+# largest parameter).
+.maihda_refit_bound_steppers <- c("nloptwrap", "bobyqa")
+
+# `model` as lme4::refit() should start it: the fit's own estimates, except that a variance
+# parameter whose standard deviation is below .maihda_refit_near_zero of the residual one
+# starts at zero when the fit records one of .maihda_refit_bound_steppers. refit() starts
+# that optimiser at the fit's parameters, and its first step for one just above the bound of
+# zero is a fraction of that distance, on a REML or deviance criterion that is flat at the
+# bound, so the refit stops within a few evaluations at the fit's value: over 200 draws of a
+# fit at 8.3e-9 the stratum variance's 95% range was 6e-17 to 2e-16, where fresh fits of the
+# same draws gave 0 to 0.036, and beside larger variance parameters one at 1e-4 to 1e-3
+# stays where it is in a third of the draws (NLopt scales each parameter's steps by its
+# first one). On the bound NLopt's first step is 1. The other parameters start at the fit, as
+# fit_maihda()'s restarts left them. Other optimisers are left as they are: glmer's
+# Nelder-Mead refit takes first steps of 0.02 and is not held at the bound, and nlminb,
+# started on the bound where the criterion's slope is zero, stays there (on 100 draws of a
+# fit at 1.6e-5 it left 14 more than 1e-3 above fresh fits, none from the fit).
+#
+# lmer's theta is a standard deviation over sigma, the residual standard deviation of a row
+# of weight 1; with precision weights the residual variance the package reports is sigma^2
+# times the mean of 1 / w (maihda_gaussian_residual_variance_lme4()), and theta is measured
+# against that. glmer's theta is a standard deviation on the latent scale.
+#
+# The change is made in a copy of the fit's predictor, which lme4::refit() copies to start
+# from; the fit is not touched, and a fit without such a parameter is returned as it is, as
+# is a fit with a block whose optimiser parameters are not theta (cs(), ar1()).
+maihda_refit_start <- function(model) {
+  optimizer <- tryCatch(model@optinfo$optimizer, error = function(e) NULL)
+  if (!is.character(optimizer) || length(optimizer) != 1L ||
+      !optimizer %in% .maihda_refit_bound_steppers) {
+    return(model)
+  }
+  theta <- tryCatch(lme4::getME(model, "theta"), error = function(e) NULL)
+  lower <- tryCatch(lme4::getME(model, "lower"), error = function(e) NULL)
+  if (!is.numeric(theta) || !is.numeric(lower) || length(theta) != length(lower) ||
+      !isTRUE(all.equal(unname(maihda_lme4_parameters(model)), unname(theta),
+                        tolerance = 1e-6))) {
+    return(model)
+  }
+  sd_share <- theta
+  if (lme4::isLMM(model)) {
+    vc <- lme4::VarCorr(model)
+    resid_scale <- sqrt(maihda_gaussian_residual_variance_lme4(model, vc)) / attr(vc, "sc")
+    if (is.finite(resid_scale) && resid_scale > 0) sd_share <- theta / resid_scale
+  }
+  near <- lower == 0 & theta > 0 & sd_share < .maihda_refit_near_zero
+  if (!any(near)) {
+    return(model)
+  }
+  theta[near] <- 0
+  pp <- model@pp$copy()
+  pp$setTheta(unname(theta))
+  model@pp <- pp
+  model
 }
 
 # Prior (precision/frequency) weights of a RAW fitted model object (glmerMod /
@@ -6050,7 +6188,8 @@ maihda_vpc_posterior_summary <- function(var_stratum, var_other_random,
 # from these rows: for a model whose level-1 variance is fixed by the link and whose
 # only random effect is the stratum, the stratum proportion is then the posterior
 # median of the per-draw VPC (up to the interpolation between the two middle draws when
-# their number is even), and otherwise close to it.
+# their number is even), and otherwise close to it. `draws` holds the per-draw
+# components themselves, for their credible intervals.
 maihda_vpc_draws_brms <- function(model, conf_level = 0.95, group = "stratum",
                                   point = c("median", "mean"),
                                   approximation = "lognormal") {
@@ -6075,7 +6214,8 @@ maihda_vpc_draws_brms <- function(model, conf_level = 0.95, group = "stratum",
     vpc = vpc,
     var_stratum = stats::median(rv$stratum),
     var_other_random = stats::median(rv$other),
-    var_residual = stats::median(var_residual)
+    var_residual = stats::median(var_residual),
+    draws = list(stratum = rv$stratum, other = rv$other, residual = var_residual)
   )
 }
 
@@ -6087,6 +6227,25 @@ maihda_vpc_has_interval <- function(vpc) {
     !is.null(vpc$ci_lower) && !is.null(vpc$ci_upper) &&
     length(vpc$ci_lower) == 1L && length(vpc$ci_upper) == 1L &&
     is.finite(vpc$ci_lower) && is.finite(vpc$ci_upper)
+}
+
+# The one-line note print() puts under a variance-components table that carries
+# intervals: their kind and level. Rows that are not variance parameters of the model
+# (the Total, a level-1 variance the model does not estimate) have none. NULL for a
+# table without intervals.
+maihda_variance_interval_label <- function(x) {
+  vc <- x$variance_components
+  if (!is.data.frame(vc) || !all(c("lower", "upper") %in% names(vc))) {
+    return(NULL)
+  }
+  level <- format(round(100 * (if (is.null(x$conf_level)) 0.95 else x$conf_level), 1),
+                  trim = TRUE)
+  what <- if (identical(x$vpc$method, "posterior")) {
+    "Posterior %s%% credible"
+  } else {
+    "Bootstrap %s%% percentile"
+  }
+  paste0("(", sprintf(what, level), " intervals of the model's variance parameters)")
 }
 
 # Human-readable label for the VPC interval, distinguishing the lme4 parametric

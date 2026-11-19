@@ -12,7 +12,7 @@
 
 <meta name="author" content="Hamid Bulut" />
 
-<meta name="date" content="2026-10-28" />
+<meta name="date" content="2026-11-18" />
 
 <title>Case study: BRFSS mental distress</title>
 
@@ -146,6 +146,28 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; }
 
 
 
+<style type="text/css">
+
+div.csl-bib-body { }
+div.csl-entry {
+clear: both;
+}
+.hanging div.csl-entry {
+margin-left:2em;
+text-indent:-2em;
+}
+div.csl-left-margin {
+min-width:2em;
+float:left;
+}
+div.csl-right-inline {
+margin-left:2em;
+padding-left:1em;
+}
+div.csl-indent {
+margin-left: 2em;
+}
+</style>
 
 <style type="text/css">body {
 background-color: #fff;
@@ -341,14 +363,16 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 <h1 class="title toc-ignore">Case study: BRFSS mental distress</h1>
 <h4 class="author">Hamid Bulut</h4>
-<h4 class="date">2026-10-28</h4>
+<h4 class="date">2026-11-18</h4>
 
 
 
 <p>This case uses the 2024 Behavioral Risk Factor Surveillance System
 (BRFSS), a U.S. health survey released by the Centers for Disease
-Control and Prevention. The outcome is frequent mental distress: 14 or
-more of the past 30 days when mental health was not good.</p>
+Control and Prevention <span class="citation">(Centers for Disease
+Control and Prevention 2024)</span>. The outcome is frequent mental
+distress: 14 or more of the past 30 days when mental health was not
+good.</p>
 <p>The intersectional strata combine respondent sex, race/ethnicity,
 age, education, income, and disability. The question is whether mental
 distress is concentrated in particular social strata, and whether any of
@@ -471,9 +495,9 @@ than 20 adults, 20 fewer than 50).</p>
 </div>
 <div id="fit-the-maihda" class="section level2">
 <h2>Fit the MAIHDA</h2>
-<p>The analysis is a single call, a binomial MAIHDA fitting a null model
-(strata only) and an adjusted model (the six dimensions additive main
-effects), on the full individual data:</p>
+<p>The analysis is a single call, a binomial MAIHDA <span class="citation">(Evans et al. 2018, 2024; Merlo 2018)</span> fitting a
+null model (strata only) and an adjusted model (the six dimensions
+additive main effects), on the full individual data:</p>
 <div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a>brfss_fit <span class="ot">&lt;-</span> <span class="fu">maihda</span>(</span>
 <span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a>  frequent_distress <span class="sc">~</span> sex <span class="sc">+</span> race_ethnicity <span class="sc">+</span> age_group <span class="sc">+</span> education <span class="sc">+</span> income <span class="sc">+</span> disability <span class="sc">+</span></span>
 <span id="cb3-3"><a href="#cb3-3" tabindex="-1"></a>    (<span class="dv">1</span> <span class="sc">|</span> sex<span class="sc">:</span>race_ethnicity<span class="sc">:</span>age_group<span class="sc">:</span>education<span class="sc">:</span>income<span class="sc">:</span>disability),</span>
@@ -819,9 +843,10 @@ equivalence</strong> (ROPE) sets a smallest intersectional effect of
 interest on the log-odds scale and classifies each stratum’s interval as
 practically <strong>relevant</strong> (outside the ROPE),
 <strong>negligible</strong> (inside it), or
-<strong>inconclusive</strong> (Schuirmann 1987; Kruschke 2018). The
-<code>rope</code> argument of <code>maihda_interactions()</code> adds
-this <code>decision</code> column:</p>
+<strong>inconclusive</strong> <span class="citation">(Schuirmann 1987;
+Kruschke 2018)</span>. The <code>rope</code> argument of
+<code>maihda_interactions()</code> adds this <code>decision</code>
+column:</p>
 <div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">maihda_interactions</span>(brfss_fit, <span class="at">rope =</span> <span class="fl">0.4</span>)   <span class="co"># ROPE = +/- 0.4 log-odds (OR ~ 1.5)</span></span></code></pre></div>
 <p>At a ROPE of ±0.4 log-odds (an odds ratio within roughly 0.67–1.49 of
 the additive expectation), <strong>2 of 432</strong> strata are
@@ -908,23 +933,46 @@ conclusion is a predominantly additive structure, with a small number of
 intersections showing a practically meaningful departure from
 additivity.</p>
 </div>
-<div id="references" class="section level2">
-<h2>References</h2>
-<ul>
-<li>Centers for Disease Control and Prevention. Behavioral Risk Factor
-Surveillance System: 2024 Survey Data and Documentation.</li>
-<li>Evans, C. R., Leckie, G., Subramanian, S. V., Bell, A., &amp; Merlo,
-J. (2024). A tutorial for conducting intersectional multilevel analysis
-of individual heterogeneity and discriminatory accuracy (MAIHDA).
-<em>SSM - Population Health</em>, 26, 101664.</li>
-<li>Evans, C. R., Williams, D. R., Onnela, J. P., &amp; Subramanian, S.
-V. (2018). A multilevel approach to modeling health inequalities at the
-intersection of multiple social identities. <em>Social Science &amp;
-Medicine</em>, 203, 64-73.</li>
-<li>Merlo, J. (2018). Multilevel analysis of individual heterogeneity
-and discriminatory accuracy (MAIHDA) within an intersectional framework.
-<em>Social Science &amp; Medicine</em>, 203, 74-80. ```</li>
-</ul>
+<div id="references" class="section level2 unnumbered">
+<h2 class="unnumbered">References</h2>
+<div id="refs" class="references csl-bib-body hanging-indent">
+<div id="ref-cdc2024brfss" class="csl-entry">
+Centers for Disease Control and Prevention. 2024. <em>Behavioral Risk
+Factor Surveillance System Survey Data</em>. <span>U.S. Department of
+Health and Human Services, Centers for Disease Control and
+Prevention</span>. <a href="https://www.cdc.gov/brfss/annual_data/annual_2024.html">https://www.cdc.gov/brfss/annual_data/annual_2024.html</a>.
+</div>
+<div id="ref-evans2024tutorial" class="csl-entry">
+Evans, Clare R., George Leckie, S. V. Subramanian, Andrew Bell, and Juan
+Merlo. 2024. <span>“A Tutorial for Conducting Intersectional Multilevel
+Analysis of Individual Heterogeneity and Discriminatory Accuracy
+(<span>MAIHDA</span>).”</span> <em><span>SSM</span> - Population
+Health</em> 26: 101664. <a href="https://doi.org/10.1016/j.ssmph.2024.101664">https://doi.org/10.1016/j.ssmph.2024.101664</a>.
+</div>
+<div id="ref-evans2018" class="csl-entry">
+Evans, Clare R., David R. Williams, Jukka-Pekka Onnela, and S. V.
+Subramanian. 2018. <span>“A Multilevel Approach to Modeling Health
+Inequalities at the Intersection of Multiple Social Identities.”</span>
+<em>Social Science &amp; Medicine</em> 203: 64–73. <a href="https://doi.org/10.1016/j.socscimed.2017.11.011">https://doi.org/10.1016/j.socscimed.2017.11.011</a>.
+</div>
+<div id="ref-kruschke2018" class="csl-entry">
+Kruschke, John K. 2018. <span>“Rejecting or Accepting Parameter Values
+in <span>Bayesian</span> Estimation.”</span> <em>Advances in Methods and
+Practices in Psychological Science</em> 1 (2): 270–80. <a href="https://doi.org/10.1177/2515245918771304">https://doi.org/10.1177/2515245918771304</a>.
+</div>
+<div id="ref-merlo2018" class="csl-entry">
+Merlo, Juan. 2018. <span>“Multilevel Analysis of Individual
+Heterogeneity and Discriminatory Accuracy (<span>MAIHDA</span>) Within
+an Intersectional Framework.”</span> <em>Social Science &amp;
+Medicine</em> 203: 74–80. <a href="https://doi.org/10.1016/j.socscimed.2017.12.026">https://doi.org/10.1016/j.socscimed.2017.12.026</a>.
+</div>
+<div id="ref-schuirmann1987" class="csl-entry">
+Schuirmann, Donald J. 1987. <span>“A Comparison of the Two One-Sided
+Tests Procedure and the Power Approach for Assessing the Equivalence of
+Average Bioavailability.”</span> <em>Journal of Pharmacokinetics and
+Biopharmaceutics</em> 15 (6): 657–80. <a href="https://doi.org/10.1007/BF01068419">https://doi.org/10.1007/BF01068419</a>.
+</div>
+</div>
 </div>
 
 

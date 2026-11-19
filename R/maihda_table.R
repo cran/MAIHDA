@@ -31,8 +31,10 @@
 #' when one is available (the intercept's interval, the VPC bootstrap or posterior
 #' interval, and the bootstrap PCV interval) and \code{NA} otherwise. The intercept
 #' carries the same interval \code{summary()} reports for it -- a Wald interval
-#' for the likelihood engines, a credible interval for brms. The variance and SD
-#' rows are point estimates. The \code{print()} method renders the same table in the familiar
+#' for the likelihood engines, a credible interval for brms. The between-stratum
+#' variance carries the interval \code{summary()} reports for it -- a bootstrap
+#' percentile interval when bootstrapped, a credible interval for brms -- and the
+#' SD row the square roots of its bounds. The \code{print()} method renders the same table in the familiar
 #' \dQuote{estimate [low, high]} layout.
 #'
 #' For a \code{"crossed-dimensions"} analysis (one model, no null/adjusted pair) the
@@ -256,8 +258,10 @@ maihda_collect_model_stats <- function(s) {
   st[["Intercept"]] <- maihda_extract_intercept(s)
 
   bv <- maihda_between_stratum_variance(s)
-  st[["Between-stratum variance"]] <- triple(bv)
-  st[["Between-stratum SD"]] <- triple(if (is.finite(bv) && bv >= 0) sqrt(bv) else NA_real_)
+  bv_ci <- maihda_between_stratum_variance_ci(s)
+  root <- function(v) if (isTRUE(is.finite(v) && v >= 0)) sqrt(v) else NA_real_
+  st[["Between-stratum variance"]] <- triple(bv, bv_ci[1], bv_ci[2])
+  st[["Between-stratum SD"]] <- triple(root(bv), root(bv_ci[1]), root(bv_ci[2]))
 
   v <- s$vpc
   if (!is.null(v)) {
@@ -365,6 +369,28 @@ maihda_between_stratum_variance <- function(s) {
     if (length(row) >= 1) return(as.numeric(vc$variance[row[1]]))
   }
   NA_real_
+}
+
+# The interval of maihda_between_stratum_variance(s), c(lower, upper): the
+# decomposition's between_var_ci for a crossed-dimensions fit, the longitudinal
+# summary's var_stratum_ref_ci for a growth fit, and otherwise the
+# "Between-stratum (random)" row's lower / upper. NA when the summary has none.
+maihda_between_stratum_variance_ci <- function(s) {
+  pick <- function(ci) {
+    if (is.numeric(ci) && length(ci) == 2L) as.numeric(ci) else c(NA_real_, NA_real_)
+  }
+  if (!is.null(s$decomposition) && !is.null(s$decomposition$between_var)) {
+    return(pick(s$decomposition$between_var_ci))
+  }
+  if (!is.null(s$longitudinal)) {
+    return(pick(s$longitudinal$var_stratum_ref_ci))
+  }
+  vc <- s$variance_components
+  if (is.data.frame(vc) && all(c("component", "lower", "upper") %in% names(vc))) {
+    row <- which(vc$component == "Between-stratum (random)")
+    if (length(row) >= 1) return(c(vc$lower[row[1]], vc$upper[row[1]]))
+  }
+  c(NA_real_, NA_real_)
 }
 
 # Assemble the wide model-results data frame from per-model statistics. Columns:
@@ -528,6 +554,49 @@ maihda_table_fmt <- function(est, lo = NA_real_, hi = NA_real_, digits = 3) {
   s
 }
 
+# The footer print() puts under the tables: which estimates carry an interval and of
+# what kind, read from the intervals the results table holds. Every brms interval is a
+# posterior credible interval. On the likelihood engines the intercept's is the Wald
+# interval summary() reports and the others come from the parametric bootstrap, which
+# only the lme4 engine runs. Returns the lines, wrapped to `width`.
+maihda_table_interval_note <- function(x, width = 76) {
+  m <- x$models
+  has_interval <- function(stats) {
+    i <- which(m$statistic %in% stats)
+    any(vapply(x$model_keys, function(k) {
+      any(!is.na(m[[paste0(k, "_lower")]][i]) & !is.na(m[[paste0(k, "_upper")]][i]))
+    }, logical(1)))
+  }
+  intercept_ci <- has_interval("Intercept")
+  other_ci <- has_interval(setdiff(m$statistic, "Intercept"))
+  variance_ci <- has_interval(c("Between-stratum variance", "Between-stratum SD", "VPC/ICC"))
+
+  txt <- "Estimates are point values unless a [low, high] interval is shown."
+  if (identical(x$engine, "brms")) {
+    if (intercept_ci || other_ci) {
+      txt <- c(txt, "In the model results, every interval is a posterior credible interval.")
+    }
+  } else {
+    wald <- "the intercept interval is the Wald one summary() reports"
+    boot <- "parametric bootstrap percentile intervals"
+    if (intercept_ci && other_ci) {
+      txt <- c(txt, sprintf("In the model results, %s and the others are %s.", wald, boot))
+    } else if (intercept_ci) {
+      txt <- c(txt, sprintf("In the model results, %s.", wald))
+    } else if (other_ci) {
+      txt <- c(txt, sprintf("In the model results, the intervals are %s.", boot))
+    }
+    if (!variance_ci) {
+      txt <- c(txt, if (identical(x$engine, "lme4")) {
+        sprintf("With bootstrap = TRUE the variance, SD and VPC rows get %s.", boot)
+      } else {
+        sprintf("The %s engine gives the variance, SD and VPC rows no interval.", x$engine)
+      })
+    }
+  }
+  strwrap(paste(txt, collapse = " "), width = width)
+}
+
 #' Print a MAIHDA results table
 #'
 #' @param x A \code{maihda_table} object from \code{\link{maihda_table}}.
@@ -605,8 +674,6 @@ print.maihda_table <- function(x, digits = x$digits, ...) {
     cat("\nRanked strata: ", x$strata_note, "\n", sep = "")
   }
 
-  cat("\nEstimates are point values unless a [low, high] interval is shown. The\n",
-      "intercept interval is the Wald one summary() reports; the variance and SD\n",
-      "rows carry no interval.\n", sep = "")
+  cat("\n", paste(maihda_table_interval_note(x), collapse = "\n"), "\n", sep = "")
   invisible(x)
 }

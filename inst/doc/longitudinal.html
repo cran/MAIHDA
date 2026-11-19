@@ -12,7 +12,7 @@
 
 <meta name="author" content="Hamid Bulut" />
 
-<meta name="date" content="2026-10-28" />
+<meta name="date" content="2026-11-18" />
 
 <title>Longitudinal MAIHDA: intersectional inequalities over time</title>
 
@@ -146,6 +146,28 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; }
 
 
 
+<style type="text/css">
+
+div.csl-bib-body { }
+div.csl-entry {
+clear: both;
+}
+.hanging div.csl-entry {
+margin-left:2em;
+text-indent:-2em;
+}
+div.csl-left-margin {
+min-width:2em;
+float:left;
+}
+div.csl-right-inline {
+margin-left:2em;
+padding-left:1em;
+}
+div.csl-indent {
+margin-left: 2em;
+}
+</style>
 
 <style type="text/css">body {
 background-color: #fff;
@@ -342,7 +364,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 <h1 class="title toc-ignore">Longitudinal MAIHDA: intersectional
 inequalities over time</h1>
 <h4 class="author">Hamid Bulut</h4>
-<h4 class="date">2026-10-28</h4>
+<h4 class="date">2026-11-18</h4>
 
 
 
@@ -355,11 +377,11 @@ strata differ in how they <strong>change</strong> over time?”</em> – and
 decompose those trajectory differences into an additive part (the
 dimensions’ main effects and their interactions with time) and a
 multiplicative part (an intersectional trajectory beyond additive).</p>
-<p>This is the longitudinal MAIHDA of Bell, Evans, Holman &amp; Leckie
-(2024). It is a 3-level growth-curve model with measurement occasions
-(level 1) within individuals (level 2) within intersectional strata
-(level 3), with a random intercept and a slope on time at both the
-individual and stratum levels:</p>
+<p>This is the longitudinal MAIHDA of <span class="citation">Bell et al.
+(2024)</span>. It is a 3-level growth-curve model with measurement
+occasions (level 1) within individuals (level 2) within intersectional
+strata (level 3), with a random intercept and a slope on time at both
+the individual and stratum levels:</p>
 <p><span class="math display">\[
 y_{tij} = \beta_0 + \beta_1 t + \underbrace{(u_{0j} +
 u_{1j}\,t)}_{\text{stratum}}
@@ -482,8 +504,7 @@ measurement</em> a stratum accounts for:</p>
 \frac{\operatorname{Var}_S(t)}
   {\operatorname{Var}_S(t) + \operatorname{Var}_I(t) +
 \sigma^2_e}.\]</span></p>
-<p>The <strong>trajectory VPCs</strong> drop this term, following Bell
-et al. (2024), equation (5):</p>
+<p>The <strong>trajectory VPCs</strong> drop this term, following <span class="citation">Bell et al. (2024)</span>, equation (5):</p>
 <p><span class="math display">\[\operatorname{VPC}_{\text{intercept}} =
 \frac{\operatorname{Var}_S(t_0)}
   {\operatorname{Var}_S(t_0) + \operatorname{Var}_I(t_0)},
@@ -540,10 +561,10 @@ dimensionally meaningless. (The headline VPC is well formed because
 <span class="math inline">\(\text{outcome}^2\)</span>.) The intercept
 VPC drops it for symmetry with the slope.</p>
 <p>Both are evaluated at the baseline <span class="math inline">\(t_0\)</span>; the intercept VPC depends on where
-time is zeroed and the slope VPC does not, as Bell et al. note. Their
-own examples centre on mean age rather than the baseline, so an
-intercept VPC replicated from the paper will differ from the one
-reported here unless the reference points are aligned.</p>
+time is zeroed and the slope VPC does not, as <span class="citation">Bell et al. (2024)</span> note. Their own examples
+centre on mean age rather than the baseline, so an intercept VPC
+replicated from the paper will differ from the one reported here unless
+the reference points are aligned.</p>
 </div>
 </div>
 <div id="decomposing-the-trajectory-additive-vs.-multiplicative" class="section level2">
@@ -698,22 +719,27 @@ in part of that divergence.</p></li>
 deliberately refuse a longitudinal model; use the longitudinal
 decomposition above.</p></li>
 <li><p><strong>Which VPC.</strong> <code>summary()</code> reports both
-the discriminatory-accuracy VPC(t) and the Bell et al. trajectory VPCs,
-which use a different denominator; see <a href="#two-vpcs-and-which-one-to-report">Two VPCs, and which one to
-report</a>.</p></li>
+the discriminatory-accuracy VPC(t) and the trajectory VPCs of <span class="citation">Bell et al. (2024)</span>, which use a different
+denominator; see <a href="#two-vpcs-and-which-one-to-report">Two VPCs,
+and which one to report</a>.</p></li>
 <li><p><strong>Out of scope (v1).</strong> Design-weighted, contextual
 (stratum <span class="math inline">\(\times\)</span> place <span class="math inline">\(\times\)</span> time), and
 <code>wemix</code>/<code>ordinal</code> longitudinal models are not yet
 supported.</p></li>
 </ul>
 </div>
-<div id="reference" class="section level2">
-<h2>Reference</h2>
-<p>Bell, A., Evans, C., Holman, D., &amp; Leckie, G. (2024). Extending
-intersectional multilevel analysis of individual heterogeneity and
-discriminatory accuracy (MAIHDA) to study individual longitudinal
-trajectories, with application to mental health in the UK. <em>Social
-Science &amp; Medicine</em>, 351, 116955. <a href="doi:10.1016/j.socscimed.2024.116955" class="uri">doi:10.1016/j.socscimed.2024.116955</a></p>
+<div id="references" class="section level2 unnumbered">
+<h2 class="unnumbered">References</h2>
+<div id="refs" class="references csl-bib-body hanging-indent">
+<div id="ref-bell2024" class="csl-entry">
+Bell, Andrew, Clare Evans, Dan Holman, and George Leckie. 2024.
+<span>“Extending Intersectional Multilevel Analysis of Individual
+Heterogeneity and Discriminatory Accuracy (<span>MAIHDA</span>) to Study
+Individual Longitudinal Trajectories, with Application to Mental Health
+in the <span>UK</span>.”</span> <em>Social Science &amp; Medicine</em>
+351: 116955. <a href="https://doi.org/10.1016/j.socscimed.2024.116955">https://doi.org/10.1016/j.socscimed.2024.116955</a>.
+</div>
+</div>
 </div>
 
 

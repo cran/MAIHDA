@@ -913,6 +913,165 @@ maihda_pick_lowest <- function(crit, tol = 1e-4) {
   if (length(better)) better[which.min(crit[better])] else 1L
 }
 
+# Whether lme4's convergence checks flagged the fit `model`: its record holds a message of
+# the gradient or Hessian check, the note of a singular fit apart. FALSE for anything that is
+# not an lme4 fit.
+maihda_lme4_check_flagged <- function(model) {
+  if (!inherits(model, "merMod")) {
+    return(FALSE)
+  }
+  msgs <- tryCatch(as.character(unlist(model@optinfo$conv$lme4$messages)),
+                   error = function(e) character(0))
+  any(nzchar(msgs) & !grepl("boundary (singular)", msgs, fixed = TRUE))
+}
+
+# Whether lme4 checked the fit `model` and accepted it: its convergence checks ran and left
+# no message, its optimiser reported no failure (maihda_lme4_optimizer_failed()) and lme4 does
+# not call the fit singular. lme4 runs no gradient or Hessian check on a singular fit, nor, by
+# default, on a fit of 10,000 rows or of 10 variance parameters on; such a fit is not flagged
+# and not accepted. FALSE for anything that is not an lme4 fit.
+maihda_lme4_check_accepted <- function(model) {
+  if (!inherits(model, "merMod")) {
+    return(FALSE)
+  }
+  checks <- tryCatch(model@optinfo$conv$lme4, error = function(e) NULL)
+  is.list(checks) && length(unlist(checks$messages)) == 0L &&
+    !maihda_lme4_optimizer_failed(model) &&
+    isFALSE(tryCatch(lme4::isSingular(model), error = function(e) NA))
+}
+
+# Which of several fits to keep when lme4's convergence checks flagged the one chosen: `kept`,
+# the choice of maihda_pick_lowest() from the criteria `crit`, unless lme4 flagged it
+# (`flagged`, one logical per fit) and checked and accepted another (`accepted`) whose
+# criterion is within `tol` of its own; then the lowest of those. Fits within `tol` of each
+# other are the same optimum reached by another path, and lme4's gradient check tells such
+# fits apart: on the bundled panel maihda_long_data its tolerance of 0.002 is a criterion
+# about 2e-6 above the optimum, and lmer's default optimiser stops between 1e-8 and 2e-4
+# above it, 15 to 26% of the fits in four sets of 150 copies of the panel changed in the 12th
+# or 13th digit above lme4's line. On which side of the line a fit ends follows the last bits
+# of the criterion, and those differ between processors: Eigen, lme4's linear algebra, sizes
+# the blocks of its products by the L1 data cache. lme4 flags lmer's own fit of the panel on
+# processors with a 48 KB L1 data cache, 3e-6 above the optimum, and on Apple Silicon, 6e-6
+# above it, and not, 1e-6 above it, on those with 32 KB. A restart within 1e-4 that lme4
+# accepts was there for each of the 6 flagged fits seen on five combinations of build and
+# processor, and for 48 of 49 flagged fits of such copies. A singular fit is not accepted in
+# this sense, lme4 having run no check on it; whether one takes the place of a fit on fewer
+# variance bounds is for maihda_pick_singular() to say.
+maihda_pick_accepted <- function(crit, flagged, accepted, kept, tol = 1e-4) {
+  if (!isTRUE(flagged[kept])) {
+    return(kept)
+  }
+  equal <- which(is.finite(crit) & crit <= crit[kept] + tol & accepted)
+  if (length(equal)) equal[which.min(crit[equal])] else kept
+}
+
+# Whether lme4 calls the fit `model` singular. FALSE for anything that is not an lme4 fit.
+maihda_lme4_calls_singular <- function(model) {
+  inherits(model, "merMod") &&
+    isTRUE(tryCatch(lme4::isSingular(model), error = function(e) NA))
+}
+
+# Whether the lmer fit `model` is a singular fit that stands at an optimum of its criterion:
+# lme4 calls it singular, its optimiser reported no failure (maihda_lme4_optimizer_failed())
+# and maihda_lmer_stationary_distance() puts it within `tol` of a stationary point of the
+# criterion where the Hessian is positive definite. lme4 runs no gradient or Hessian check on
+# a singular fit. That measure can be taken on one: its differences may cross a variance
+# bound, and its square is the height of the criterion above the stationary point, so that
+# within `tol` is a distance below sqrt(tol). On 344 singular fits of growth models it was
+# 0.85 to 1.04 times (median 1.000) the square root of the fit's criterion above the optimum
+# of a multi-start search, none of them more than 3.1e-5 above it. It cannot be taken where
+# the Hessian is not positive definite: so on each of the 5 singular fits on a bound the
+# optimum was not on (3 of them 0.003 to 0.018 above an optimum elsewhere, 2 on a bound 1e-5
+# and 5e-5 above an optimum inside it), and on 4 of the 348 that stood at the optimum. The
+# optimum it vouches for is a local one: a search for bound points that are local optima
+# above the optimum found one, 0.049 above, in 364 data sets. FALSE for anything that is not
+# an lmer fit.
+maihda_lme4_singular_at_optimum <- function(model, tol = 1e-4) {
+  if (!inherits(model, "lmerMod") || !maihda_lme4_calls_singular(model) ||
+      maihda_lme4_optimizer_failed(model)) {
+    return(FALSE)
+  }
+  distance <- tryCatch(maihda_lmer_stationary_distance(model), error = function(e) NA_real_)
+  !is.na(distance) && distance < sqrt(tol)
+}
+
+# The variance bounds the lme4 fit `model` is on: one logical per diagonal entry of its
+# random-effect blocks' factors, in theta's order, TRUE where the entry lies below lme4's
+# tolerance for a singular fit (maihda_re_boundary_components_lme4()). lme4 calls a fit
+# singular when it is on any of them. NULL for anything that is not an lme4 fit, or whose
+# blocks cannot be read.
+maihda_lme4_bounds_reached <- function(model) {
+  if (!inherits(model, "merMod")) {
+    return(NULL)
+  }
+  reached <- maihda_re_boundary_components_lme4(model)
+  if (is.null(reached)) NULL else unlist(reached, use.names = FALSE)
+}
+
+# Which of the fits `fits` (value / conditions pairs, NULL for a fit that failed) are on more
+# variance bounds than the fit `kept` and stand at an optimum: their criterion (`crit`) within
+# `tol` of its own, on every bound it is on and on at least one more (`bounds`, per fit the
+# value of maihda_lme4_bounds_reached()), and singular fits at an optimum
+# (maihda_lme4_singular_at_optimum()), which is measured for those fits only. All FALSE when
+# the bounds of `kept` are not known.
+maihda_singular_fits_beside <- function(fits, crit, bounds, kept, tol = 1e-4) {
+  beside <- logical(length(fits))
+  if (is.na(kept) || !is.finite(crit[kept])) {
+    return(beside)
+  }
+  on <- bounds[[kept]]
+  if (is.null(on) || anyNA(on)) {
+    return(beside)
+  }
+  more <- vapply(bounds, function(b) {
+    !is.null(b) && length(b) == length(on) && !anyNA(b) && all(b[on]) && any(b & !on)
+  }, logical(1))
+  near <- which(is.finite(crit) & crit <= crit[kept] + tol & more)
+  beside[near] <- vapply(fits[near], function(f) {
+    maihda_lme4_singular_at_optimum(f$value, tol)
+  }, logical(1))
+  beside
+}
+
+# Which of several fits to keep when another is on more variance bounds: `kept`, the choice so
+# far, unless a fit whose criterion is within `tol` of its own is one of `at_optimum`
+# (maihda_singular_fits_beside(): on every bound `kept` is on and at least one more, and at an
+# optimum); then the one of those on the most bounds (`n_bounds`, the number per fit), and of
+# several the lowest. Fits within `tol` of each other are the same optimum reached by another
+# path, and where that optimum lies on a variance bound one path ends on the bound and
+# another a little short of it, at an entry of 1e-4 to 4e-2 of the residual SD (median 3e-4),
+# which lme4's test of a singular fit does not see. A fit at an optimum that is on a bound
+# shows that the optimum is on it: were the optimum inside the bound, the criterion would fall
+# off the bound there and the measure could not be taken. What the two fits estimate differs
+# little (VPC(t) by at most 0.002, median 2e-5; a fixed effect by at most 0.004 residual
+# SDs; an SD by more than 0.01 of them in about 1 fit in 100), but the variance that is zero
+# at the optimum is a small number in the fit short of the bound, and that fit is reported
+# accordingly: where it is on no other bound, without the caveat of a singular fit and, when
+# it stopped more than about 2e-6 above the optimum, flagged by lme4's gradient check; and on any
+# bound with a PCV that divides by that variance (49 PCVs in 627 analyses with such a fit: a
+# PCV_slope of -62.75 to 1.00, a PCV_intercept of -15,600,000 to 1.00). A PCV that is a
+# number for both fits, a ratio of two small variances, can differ by much too (by more than
+# 0.01 in 18 of those analyses, as far as from -193 to 0.97). On simulated
+# designs of 6 to 48 strata the fit of the lowest criterion was short of a bound that a fit
+# within `tol` was on in 4.8% of linear growth fits with a stratum slope, 18.1% of quadratic
+# ones without and 16% of quadratic ones with one, and on no bound at all in three quarters
+# of those; the optimum was on that bound in 349 of 354 fits searched, and a fit on it stood
+# at an optimum in 703 of 722. Which path ends on the bound differs between processors, as
+# lme4's flag does (maihda_pick_accepted()), and this choice does not consult the flag.
+maihda_pick_singular <- function(crit, n_bounds, at_optimum, kept, tol = 1e-4) {
+  if (is.na(kept) || !is.finite(crit[kept])) {
+    return(kept)
+  }
+  equal <- which(is.finite(crit) & crit <= crit[kept] + tol & at_optimum %in% TRUE)
+  if (!length(equal)) {
+    return(kept)
+  }
+  reached <- n_bounds[equal]
+  reached[is.na(reached)] <- 0L
+  most <- equal[reached == max(reached)]
+  most[which.min(crit[most])]
+}
+
 # Evaluate a fitting call while holding back its warnings and messages, so that only the
 # fit that is kept speaks. Errors pass through.
 maihda_eval_holding_conditions <- function(call, env) {
@@ -942,7 +1101,12 @@ maihda_signal_conditions <- function(conditions) {
 }
 
 # Fit an lmer growth model (`fit_call`, evaluated in `fit_env`), refit it from more starts
-# and return the fit with the lowest criterion, signalling that fit's warnings and messages
+# and return the fit with the lowest criterion (maihda_pick_lowest()); or, when another fit
+# within `tol` of it stands at an optimum on every variance bound that fit is on and on at
+# least one more, the one of those on the most bounds (maihda_pick_singular()); or, when
+# lme4's convergence checks flag the fit so chosen and accept another within `tol` of it, the
+# lowest of those
+# (maihda_pick_accepted()), signalling the returned fit's warnings and messages
 # only. A linear model is refitted from the starts of maihda_growth_restart_starts(); a
 # model whose time polynomial (in the model's time variable `time`) has degree 2 or more
 # from the start of maihda_growth_centred_start() and, when that refit and lmer's fit
@@ -990,7 +1154,14 @@ maihda_fit_lmer_growth <- function(fit_call, fit_env, id, tol = 1e-4, time = NUL
     }
   }
   crit <- vapply(fits, criterion, numeric(1))
-  kept <- fits[[maihda_pick_lowest(crit, tol)]]
+  flagged <- vapply(fits, function(f) maihda_lme4_check_flagged(f$value), logical(1))
+  accepted <- vapply(fits, function(f) maihda_lme4_check_accepted(f$value), logical(1))
+  bounds <- lapply(fits, function(f) maihda_lme4_bounds_reached(f$value))
+  n_bounds <- vapply(bounds, function(b) if (is.null(b)) NA_integer_ else sum(b), integer(1))
+  choice <- maihda_pick_lowest(crit, tol)
+  at_optimum <- maihda_singular_fits_beside(fits, crit, bounds, choice, tol)
+  choice <- maihda_pick_singular(crit, n_bounds, at_optimum, choice, tol)
+  kept <- fits[[maihda_pick_accepted(crit, flagged, accepted, choice, tol)]]
   maihda_signal_conditions(kept$conditions)
   kept$value
 }
@@ -1694,8 +1865,10 @@ maihda_glmer_rise <- function(to, from) {
 # 0.1% of each estimate, and 1e-6 for an estimate below 1e-3 in size. The pass's pair unless it
 # ends higher than the fit by more than `tol` (maihda_glmer_rise()); NULL when the fit records
 # that optimiser already, when the control names a function, or when the pass fails or its
-# optimiser reports a failure.
-maihda_glmer_finish <- function(kept, fit_call, fit_env, tol = 1e-4) {
+# optimiser reports a failure. With `again`, a fit that records that optimiser already is
+# refitted by it once more: the refit of a fit that lme4's convergence checks flag
+# (maihda_lme4_flagged_refit()).
+maihda_glmer_finish <- function(kept, fit_call, fit_env, tol = 1e-4, again = FALSE) {
   model <- kept$value
   control <- if (is.null(fit_call$control)) {
     lme4::glmerControl()
@@ -1703,7 +1876,7 @@ maihda_glmer_finish <- function(kept, fit_call, fit_env, tol = 1e-4) {
     eval(fit_call$control, fit_env)
   }
   own <- control$optimizer[[length(control$optimizer)]]
-  if (!is.character(own) || identical(model@optinfo$optimizer, own)) {
+  if (!is.character(own) || (!isTRUE(again) && identical(model@optinfo$optimizer, own))) {
     return(NULL)
   }
   control$nAGQ0initStep <- FALSE
@@ -2387,6 +2560,12 @@ maihda_longitudinal_summary_lme4 <- function(object, bootstrap = FALSE,
   if (bootstrap) {
     boot <- matrix(NA_real_, nrow = n_boot, ncol = length(grid))
     ref_boot <- rep(NA_real_, n_boot)
+    # And of every entry of the components table (the two blocks and the level-1
+    # variance at the reference time), and of the between-stratum variance there.
+    comp_boot <- matrix(NA_real_, n_boot,
+                        length(maihda_lng_block_entries(Sigma_s)) +
+                          length(maihda_lng_block_entries(Sigma_i)) + 1L)
+    var_s_ref_boot <- rep(NA_real_, n_boot)
     sim <- maihda_simulate_lme4(model, nsim = n_boot)
     # Each draw is refitted as fit_maihda() fits the model (maihda_refit_growth_draw()).
     spec <- maihda_lme4_growth_spec(model, lng)
@@ -2407,6 +2586,9 @@ maihda_longitudinal_summary_lme4 <- function(object, bootstrap = FALSE,
                                                       approximation = count_approx,
                                                       scale = scale)
         ref_boot[i] <- rs / (rs + ri + vr_ref)
+        comp_boot[i, ] <- c(maihda_lng_block_entries(Ss), maihda_lng_block_entries(Si),
+                            vr_ref)
+        var_s_ref_boot[i] <- rs
         # Same helper as the point estimate below, so the replicates cannot drift
         # from the quantity the interval is meant to cover (and the 1x1 stratum
         # block keeps returning NA for the slope rather than 0).
@@ -2460,6 +2642,24 @@ maihda_longitudinal_summary_lme4 <- function(object, bootstrap = FALSE,
     c(NA_real_, NA_real_)
   }
 
+  # The components table, with the interval of each entry from the refits that formed
+  # the VPC interval.
+  variance_components <- maihda_longitudinal_components_table(
+    Sigma_s, Sigma_i, var_resid, lng$time, lng$id, center = center)
+  var_s_ref_ci <- c(NA_real_, NA_real_)
+  if (bootstrap) {
+    ok <- is.finite(ref_boot)
+    colnames(comp_boot) <- variance_components$component
+    variance_components <- maihda_add_variance_intervals(
+      variance_components,
+      maihda_component_draw_list(comp_boot[ok, , drop = FALSE],
+                                 maihda_level1_is_estimated(model)),
+      conf_level)
+    iv <- maihda_variance_draw_intervals(list(var_stratum_ref = var_s_ref_boot[ok]),
+                                         conf_level)
+    var_s_ref_ci <- c(iv$lower, iv$upper)
+  }
+
   longitudinal <- list(
     vpc_t = data.frame(time = grid, estimate = vpc_t_est,
                        lower = vpc_lower, upper = vpc_upper),
@@ -2469,6 +2669,7 @@ maihda_longitudinal_summary_lme4 <- function(object, bootstrap = FALSE,
     vpc_slope_ci = traj_slope_ci,
     trajectory_vpc_method = if (bootstrap) "bootstrap" else NA_character_,
     var_stratum_t = var_s_grid,
+    var_stratum_ref_ci = var_s_ref_ci,
     var_id_t = var_i_grid,
     var_resid = var_resid,
     var_resid_t = as.numeric(resid_grid),
@@ -2488,8 +2689,7 @@ maihda_longitudinal_summary_lme4 <- function(object, bootstrap = FALSE,
 
   list(
     vpc_result = vpc_result,
-    variance_components = maihda_longitudinal_components_table(
-      Sigma_s, Sigma_i, var_resid, lng$time, lng$id, center = center),
+    variance_components = variance_components,
     longitudinal = longitudinal
   )
 }
@@ -2634,6 +2834,24 @@ maihda_longitudinal_summary_brms <- function(object, conf_level = 0.95) {
     has_slope = stratum_deg >= 1L && lng$time_degree >= 1L,
     conf_level = conf_level)
 
+  # The components table, with the credible interval of each entry: per draw, the
+  # block entries in the table's order (maihda_lng_block_entries(): the variances, then
+  # the covariance) and the level-1 variance at the reference time.
+  variance_components <- maihda_longitudinal_components_table(
+    Sigma_s, Sigma_i, var_resid, lng$time, lng$id, center = center)
+  block_draws <- function(blk, Sigma) {
+    if (nrow(Sigma) >= 2L) list(blk$v0, blk$v1, blk$cov) else list(blk$v0)
+  }
+  comp_draws <- stats::setNames(
+    c(block_draws(sig_s, Sigma_s), block_draws(sig_i, Sigma_i), list(resid_ref_draws)),
+    variance_components$component)
+  variance_components <- maihda_add_variance_intervals(
+    variance_components,
+    maihda_component_draw_list(comp_draws, maihda_level1_is_estimated(model)),
+    conf_level)
+  iv <- maihda_variance_draw_intervals(list(var_stratum_ref = var_at(sig_s, ref_c)),
+                                       conf_level)
+
   longitudinal <- list(
     vpc_t = data.frame(time = grid, estimate = mat[1, ],
                        lower = mat[2, ], upper = mat[3, ]),
@@ -2643,6 +2861,7 @@ maihda_longitudinal_summary_brms <- function(object, conf_level = 0.95) {
     vpc_slope_ci = traj_vpc$vpc_slope_ci,
     trajectory_vpc_method = "posterior",
     var_stratum_t = maihda_var_at_time(Sigma_s, grid_c),
+    var_stratum_ref_ci = c(iv$lower, iv$upper),
     var_id_t = maihda_var_at_time(Sigma_i, grid_c),
     var_resid = var_resid,
     var_resid_t = resid_grid,
@@ -2661,8 +2880,7 @@ maihda_longitudinal_summary_brms <- function(object, conf_level = 0.95) {
 
   list(
     vpc_result = vpc_result,
-    variance_components = maihda_longitudinal_components_table(
-      Sigma_s, Sigma_i, var_resid, lng$time, lng$id, center = center),
+    variance_components = variance_components,
     longitudinal = longitudinal
   )
 }
@@ -2748,11 +2966,19 @@ maihda_longitudinal_components_table <- function(Sigma_s, Sigma_i, var_resid,
   tab
 }
 
+# The entries of a covariance block in the order maihda_longitudinal_components_table()
+# lists them: the variances, then the covariance of every pair i < j.
+maihda_lng_block_entries <- function(Sigma) {
+  c(diag(Sigma),
+    if (nrow(Sigma) >= 2L) Sigma[t(utils::combn(nrow(Sigma), 2L))])
+}
+
 # ---- proportional change in variance (additive vs multiplicative) -----------
 
 # estimation = "ML" for the growth pair. maihda_pcv_refit_ml() (calculate_pcv.R)
 # deliberately skips growth fits; this applies its rule to them: refit a REML lmer
-# growth fit with ML (lme4::refitML) before maihda_longitudinal_pcv() reads its
+# growth fit with ML (maihda_lmer_refit_ml(): the lower of lme4::refitML() and the
+# model's own call fitted by ML) before maihda_longitudinal_pcv() reads its
 # stratum covariance block. ML shrinks the adjusted block by more than the null one
 # and so overstates both PCVs with few strata (see ?calculate_pcv), which is why it
 # is not the default. glmer (GLMM) fits and the brms engine are already on the ML /
@@ -2774,7 +3000,9 @@ maihda_longitudinal_refit_ml <- function(model) {
   # off the boundary. Mirrors maihda_pcv_refit_ml()'s boundary guard. If
   # refitML() itself fails, the tryCatch below keeps the original (REML) fit.
   if (maihda_stratum_growth_at_boundary_lme4(model$model)) return(model)
-  refit <- tryCatch(lme4::refitML(model$model), error = function(e) NULL)
+  refit <- tryCatch(
+    maihda_lmer_refit_ml(model$model, longitudinal = model$longitudinal_info),
+    error = function(e) NULL)
   if (!is.null(refit)) {
     model$model <- refit
   } else {
@@ -2878,7 +3106,9 @@ maihda_longitudinal_pcv_variances <- function(object, Sigma, ref_c, t_c, has_slo
 #' variance-estimation basis. With \code{estimation = "fitted"} (the default) each
 #' fit's own REML covariance block is used, matching the single-model summaries. With
 #' \code{estimation = "ML"}, REML \code{lmer} growth fits are refitted with maximum
-#' likelihood (\code{\link[lme4]{refitML}}) before the comparison, which overstates
+#' likelihood before the comparison (by \code{\link[lme4]{refitML}} and from the
+#' model's own call, the fit with the lower deviance being used; see
+#' \code{\link{maihda_ic}}), which overstates
 #' both PCVs when strata are few. The stored models (and the single-model summaries
 #' computed from them, e.g. the time-varying VPC) always keep their REML fit;
 #' \code{ml_refit} on the result records

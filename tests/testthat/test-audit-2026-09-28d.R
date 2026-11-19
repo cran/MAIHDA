@@ -238,6 +238,7 @@ test_that("controls: sampling weights keep their own check; no trials() term, no
 })
 
 test_that("the addition-term parser reads either term off a formula or a brmsformula", {
+  skip_on_cran()
   skip_if_not_installed("brms")
   expect_identical(maihda_brms_addition_arg(y | trials(n) ~ x, "trials"), as.name("n"))
   expect_identical(maihda_brms_addition_arg(y | trials(n) + weights(w) ~ x, "weights"),
@@ -277,6 +278,8 @@ test_that("real brms fits: different trials are refused end to end (opt-in Stan)
   skip_if(Sys.getenv("MAIHDA_TEST_BRMS") != "true",
           "brms Stan tests are opt-in; set MAIHDA_TEST_BRMS=true to run them")
   skip_if_not_installed("brms")
+  # brms::waic() and brms::loo(), behind maihda_ic(), need digest.
+  skip_if_not_installed("digest")
   d <- a28d_data()
   dB <- d
   dB$n <- 24L

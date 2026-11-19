@@ -19,12 +19,18 @@
 \item{object}{A maihda_model object from \code{fit_maihda()}.}
 
 \item{bootstrap}{Logical indicating whether to compute parametric bootstrap
-confidence intervals for VPC/ICC. Default is FALSE. Supported for lme4
+confidence intervals for VPC/ICC and, from the same refits, for the variance
+components (see the section Intervals for the variance components). Default is
+FALSE. Supported for lme4
 models only; \code{brms} models always return a posterior credible interval
 (see Details), so \code{bootstrap = TRUE} is rejected for them.
 Each simulated response is refitted from the fitted model's estimates
-(\code{lme4::refit()}); for a growth fit (\code{fit_maihda(id =, time =)}) it is
-then refitted as \code{fit_maihda()} fits the model, from the further starting
+(\code{lme4::refit()}), except that under the \code{nloptwrap} (the \code{lmer}
+default) and \code{bobyqa} optimisers a random-effect standard deviation below 0.01
+(of the residual one for a Gaussian model) starts at zero, as their first step from
+just above zero is too small to leave it; for a growth fit
+(\code{fit_maihda(id =, time =)}) it is then refitted as \code{fit_maihda()} fits
+the model, from the further starting
 values and, for a \code{glmer} fit, across a variance bound (see
 \code{\link{fit_maihda}}, arguments \code{time} and \code{stratum_slope}), and
 the best fit is kept, at two to five times the time of one refit.
@@ -76,7 +82,12 @@ A maihda_summary object containing:
     unexplained variance (net of the context)}
   \item{variance_components}{Data frame of variance components. For a
     contextual cross-classified fit (\code{fit_maihda(context = )}) each
-    context appears as its own \code{Context: <name>} row}
+    context appears as its own \code{Context: <name>} row. When an interval was
+    computed (\code{bootstrap = TRUE} for lme4, always for brms), the columns
+    \code{lower} and \code{upper} hold each variance's interval at
+    \code{conf_level}, \code{NA} for the \code{Total} row and for a level-1
+    variance the model does not estimate (see the section Intervals for the
+    variance components)}
   \item{longitudinal}{For a longitudinal (growth-curve) fit, the time-varying
     summary: \code{vpc_t} (the VPC over a reporting grid, with bootstrap or
     posterior bands), the per-level variances over that grid, the stratum and
@@ -85,7 +96,9 @@ A maihda_summary object containing:
     interval in \code{vpc_intercept_ci} / \code{vpc_slope_ci} (a posterior
     credible interval for brms, a bootstrap interval for a bootstrapped lme4
     fit, \code{NA} otherwise) and the basis in
-    \code{trajectory_vpc_method}. \code{NULL} for a cross-sectional fit}
+    \code{trajectory_vpc_method}, and the interval of the between-stratum
+    variance at the reference time in \code{var_stratum_ref_ci} (\code{NA} for an
+    lme4 fit without the bootstrap). \code{NULL} for a cross-sectional fit}
   \item{context}{For a contextual cross-classified fit, the stratum vs.
     context partition: per-context variances and shares, the contexts' total
     share (\code{vpc_context_total}, with an interval when bootstrapped or for
@@ -162,7 +175,8 @@ posterior median of the per-draw VPC (\eqn{E[\sigma^2]}-based, not the biased
 The variance-components table of a cross-sectional \code{brms} fit reports the
 posterior median of each variance component -- the between-stratum row is the
 variance the PCV and the Median Odds Ratio use, and its \code{sd} the posterior
-median SD -- with the total and the proportions computed from those rows. The
+median SD -- with the total and the proportions computed from those rows, and
+each component's credible interval in \code{lower} and \code{upper}. The
 stratum proportion therefore equals the headline VPC when the level-1 variance
 is fixed by the link and the stratum is the only random effect, and differs
 from it slightly otherwise, because the median of a ratio is not the ratio of
@@ -284,6 +298,31 @@ binomial one about a second at \eqn{n = 1000} and tens of seconds at
 \code{summary()} warns when the draws are too few for the requested level; the
 check is level-aware: 99, 199 and 999 are the smallest counts that put ten
 draws beyond the cut-off at the 10\%, 5\% and 1\% levels.
+}
+
+\section{Intervals for the variance components}{
+
+With \code{bootstrap = TRUE} an \code{lme4} summary gives each estimated variance
+-- the between-stratum variance, any other random-effect, context or dimension
+variance, a growth model's covariances, and the residual variance of a Gaussian
+fit -- the percentile interval of its values over the refits that form the VPC
+interval, so both intervals come from the same draws and no further refit is made.
+A \code{brms} summary gives the equal-tailed credible interval of the posterior
+draws whose median (for a growth model, mean) the table reports. Both are at
+\code{conf_level}. A level-1 variance the model does not estimate has no interval:
+the latent \eqn{\pi^2/3}, 1 or \eqn{\pi^2/6} a binomial or ordinal link fixes, and
+a count model's approximation at the marginal expected count. Nor has the
+\code{Total} row, a sum of the components. The WeMix and ordinal engines report
+point estimates only.
+
+The percentile interval of a between-stratum variance behaves like the VPC
+interval. With few strata and a variance larger than the sampling variance of a
+stratum's mean (in a Gaussian model, the residual variance divided by the stratum
+size), it covers the true variance less often than its level says, and when it
+misses, it lies below it. With a variance well below that sampling variance, its
+lower bound is often zero and it covers the true value more often than its level
+says. The interval of a Gaussian residual variance is accurate when the
+observations far outnumber the strata.
 }
 
 \section{Two VPCs for a longitudinal fit}{

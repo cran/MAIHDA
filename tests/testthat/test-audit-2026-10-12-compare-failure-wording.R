@@ -24,6 +24,8 @@
 # builds its design with model.matrix(), which stops in `contrasts<-`; the text is
 # translated ("Kontraste koennen nur auf Faktoren ...", with an o-umlaut, on a German
 # system). Which dimension it is comes from the strata the group's null fit populated.
+# That holds in R 4.6 and earlier; the error later versions raise in
+# model.matrix.default() itself is in test-audit-2026-11-15-rdevel-one-level-factor.R.
 #
 # No block draws a random number: the fixtures are built from fixed sequences.
 
@@ -138,7 +140,7 @@ test_that("a one-level factor is told by its erroring call, not its text", {
 
   # The same words from anywhere else are not it, nor is an error without a call.
   expect_false(maihda_one_level_factor_error(
-    simpleError(words, quote(model.matrix.default(mt, mf)))))
+    simpleError(words, quote(model.frame.default(formula = mt, data = d)))))
   expect_false(maihda_one_level_factor_error(simpleError(words, quote(contrasts(x)))))
   expect_false(maihda_one_level_factor_error(simpleError(words)))
 
@@ -247,6 +249,7 @@ test_that("failed fits: the first line in status and one warning for all groups"
 })
 
 test_that("a one-level dimension is named as the cause, for its groups only", {
+  skip_on_cran()
   for (as_factor in c(FALSE, TRUE)) {
     d <- cf12_one_level_data(gender_factor = as_factor)
     obs <- cf12_observe(compare_maihda_groups(y ~ (1 | gender:ses), data = d,
@@ -275,6 +278,7 @@ test_that("a one-level dimension is named as the cause, for its groups only", {
 })
 
 test_that("a zero null variance is not blamed on a constant dimension", {
+  skip_on_cran()
   d <- cf12_zero_null_data()
   obs <- cf12_observe(compare_maihda_groups(y ~ (1 | gender:ses), data = d,
                                             group = "country"))

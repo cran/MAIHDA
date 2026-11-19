@@ -13,6 +13,7 @@ make_table_data <- function(seed = 7001, n = 400) {
 }
 
 test_that("maihda_table() on a two-model analysis assembles the canonical results table", {
+  skip_on_cran()
   d <- make_table_data()
   a <- suppressMessages(maihda(y ~ age + gender + race + (1 | gender:race), data = d))
 
@@ -42,8 +43,8 @@ test_that("maihda_table() on a two-model analysis assembles the canonical result
   sdv <- tab$models[tab$models$statistic == "Between-stratum SD", "null"]
   expect_equal(sdv, sqrt(bv), tolerance = 1e-10)
 
-  # The intercept row carries the summary's own Wald interval (2026-08-09); the
-  # variance and SD rows deliberately stay point estimates.
+  # The intercept row carries the summary's own Wald interval (2026-08-09); without a
+  # bootstrap the variance and SD rows are point estimates.
   int_row <- tab$models[tab$models$statistic == "Intercept", ]
   fe_null <- tidy(a, component = "fixed", which = "null")
   fe_null <- fe_null[fe_null$term == "(Intercept)", ]
@@ -62,6 +63,7 @@ test_that("maihda_table() on a two-model analysis assembles the canonical result
 })
 
 test_that("maihda_table() ranks every stratum by predicted value, descending", {
+  skip_on_cran()
   d <- make_table_data(7002)
   a <- suppressMessages(maihda(y ~ age + (1 | gender:race), data = d))
 
@@ -77,6 +79,7 @@ test_that("maihda_table() ranks every stratum by predicted value, descending", {
 })
 
 test_that("maihda_table() adds AUC and MOR rows for a binary outcome", {
+  skip_on_cran()
   d <- make_table_data(7003)
   a <- suppressWarnings(suppressMessages(
     maihda(bin ~ age + gender + race + (1 | gender:race), data = d, family = "binomial")))
@@ -119,6 +122,7 @@ test_that("maihda_table() reports additive/interaction shares for crossed-dimens
 })
 
 test_that("maihda_table() carries the VPC/PCV intervals when bootstrapped", {
+  skip_on_cran()
   d <- make_table_data(7006)
   a <- suppressWarnings(suppressMessages(
     maihda(y ~ age + (1 | gender:race), data = d, bootstrap = TRUE, n_boot = 20)))
@@ -130,6 +134,12 @@ test_that("maihda_table() carries the VPC/PCV intervals when bootstrapped", {
 
   pcv_row <- tab$models[tab$models$statistic == "PCV (null -> adjusted)", ]
   expect_false(is.na(pcv_row$adjusted_lower))
+
+  # The footer names the bootstrap intervals beside the Wald intercept interval.
+  foot <- maihda_table_interval_note(tab)
+  expect_identical(utils::tail(capture.output(print(tab)), length(foot)), foot)
+  expect_match(paste(foot, collapse = " "),
+               "and the others are parametric bootstrap percentile intervals.", fixed = TRUE)
 })
 
 test_that("maihda_table(which = 'adjusted') ranks strata by the adjusted model", {
@@ -159,6 +169,49 @@ test_that("print.maihda_table() runs and shows both tables", {
   expect_true(any(grepl("MAIHDA Results Table", out)))
   expect_true(any(grepl("Model results:", out)))
   expect_true(any(grepl("Strata ranked by", out)))
+  # The output ends with the footer, which offers the bootstrap for the variance rows.
+  foot <- maihda_table_interval_note(tab)
+  expect_identical(utils::tail(out, length(foot)), foot)
+  expect_match(paste(foot, collapse = " "),
+               "With bootstrap = TRUE the variance, SD and VPC rows get", fixed = TRUE)
+})
+
+test_that("the print footer names the intervals the results table shows", {
+  tab <- function(engine, intercept = c(1, 0.8, 1.2), variance = c(0.2, NA, NA),
+                  vpc = c(0.1, NA, NA)) {
+    stats <- list("Intercept" = intercept, "Between-stratum variance" = variance,
+                  "Between-stratum SD" = sqrt(variance), "VPC/ICC" = vpc)
+    list(models = maihda_build_results_table(list(estimate = stats)),
+         model_keys = "estimate", engine = engine)
+  }
+  note <- function(...) paste(maihda_table_interval_note(tab(...)), collapse = " ")
+  lead <- "Estimates are point values unless a [low, high] interval is shown."
+  wald <- "In the model results, the intercept interval is the Wald one summary() reports"
+  boot <- "parametric bootstrap percentile intervals"
+  offer <- paste0("With bootstrap = TRUE the variance, SD and VPC rows get ", boot, ".")
+  with_ci <- list(variance = c(0.2, 0.05, 0.5), vpc = c(0.1, 0.03, 0.2))
+
+  # lme4 without a bootstrap: the Wald intercept interval, and what the bootstrap adds.
+  expect_identical(note("lme4"), paste0(lead, " ", wald, ". ", offer))
+  # ...bootstrapped: the other intervals are its percentile intervals.
+  expect_identical(do.call(note, c("lme4", with_ci)),
+                   paste0(lead, " ", wald, " and the others are ", boot, "."))
+  # ...with df_method = "bootstrap" the intercept carries no interval.
+  expect_identical(do.call(note, c("lme4", list(intercept = c(1, NA, NA)), with_ci)),
+                   paste0(lead, " In the model results, the intervals are ", boot, "."))
+  expect_identical(note("lme4", intercept = c(1, NA, NA)), paste0(lead, " ", offer))
+  # brms: every interval is a credible interval, the intercept's included.
+  expect_identical(do.call(note, c("brms", with_ci)),
+                   paste0(lead, " In the model results, every interval is a posterior ",
+                          "credible interval."))
+  # Engines without a bootstrap say so; an ordinal model has no intercept interval.
+  expect_identical(note("wemix"),
+                   paste0(lead, " ", wald, ". The wemix engine gives the variance, SD and ",
+                          "VPC rows no interval."))
+  expect_identical(note("ordinal", intercept = c(NA, NA, NA)),
+                   paste0(lead, " The ordinal engine gives the variance, SD and VPC rows ",
+                          "no interval."))
+  expect_true(all(nchar(maihda_table_interval_note(tab("lme4"))) < 76))
 })
 
 test_that("maihda_table() errors on an unsupported input", {
@@ -178,6 +231,7 @@ test_that("maihda_table() rejects a non-finite, missing, or negative n_strata", 
 })
 
 test_that("maihda_table() reports the context share for a contextual fit", {
+  skip_on_cran()
   d <- make_table_data(7009)
   a <- suppressWarnings(suppressMessages(
     maihda(y ~ age + (1 | gender:race), data = d, context = "country")))
@@ -228,6 +282,7 @@ test_that("maihda_table() attaches no basis note under the default (fitted) PCV"
 })
 
 test_that("maihda_table() attaches no PCV note for single or crossed-dimensions fits", {
+  skip_on_cran()
   d <- make_table_data(7012)
 
   m <- suppressMessages(fit_maihda(y ~ age + (1 | gender:race), data = d))

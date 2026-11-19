@@ -12,7 +12,7 @@
 
 <meta name="author" content="Hamid Bulut" />
 
-<meta name="date" content="2026-10-28" />
+<meta name="date" content="2026-11-18" />
 
 <title>Reporting MAIHDA results: tidy output and publication tables</title>
 
@@ -146,6 +146,28 @@ code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; }
 
 
 
+<style type="text/css">
+
+div.csl-bib-body { }
+div.csl-entry {
+clear: both;
+}
+.hanging div.csl-entry {
+margin-left:2em;
+text-indent:-2em;
+}
+div.csl-left-margin {
+min-width:2em;
+float:left;
+}
+div.csl-right-inline {
+margin-left:2em;
+padding-left:1em;
+}
+div.csl-indent {
+margin-left: 2em;
+}
+</style>
 
 <style type="text/css">body {
 background-color: #fff;
@@ -342,7 +364,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 <h1 class="title toc-ignore">Reporting MAIHDA results: tidy output and
 publication tables</h1>
 <h4 class="author">Hamid Bulut</h4>
-<h4 class="date">2026-10-28</h4>
+<h4 class="date">2026-11-18</h4>
 
 
 
@@ -415,12 +437,19 @@ intersection, with the human-readable label:</p>
 <span id="cb3-11"><a href="#cb3-11" tabindex="-1"></a><span class="co">#&gt; 6 6       male × White × College Grad      -0.743     0.357  -1.44     -0.0431</span></span></code></pre></div>
 <p>The <strong>variance components</strong>:</p>
 <div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">tidy</span>(a, <span class="at">component =</span> <span class="st">&quot;variance&quot;</span>)</span>
-<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a><span class="co">#&gt; # A tibble: 3 × 4</span></span>
-<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a><span class="co">#&gt;   component                 variance    sd proportion</span></span>
-<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a><span class="co">#&gt;   &lt;chr&gt;                        &lt;dbl&gt; &lt;dbl&gt;      &lt;dbl&gt;</span></span>
-<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a><span class="co">#&gt; 1 Between-stratum (random)      2.90  1.70     0.0627</span></span>
-<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a><span class="co">#&gt; 2 Within-stratum (residual)    43.4   6.59     0.937 </span></span>
-<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a><span class="co">#&gt; 3 Total                        46.3   6.80     1</span></span></code></pre></div>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a><span class="co">#&gt; # A tibble: 3 × 6</span></span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a><span class="co">#&gt;   component                 variance    sd proportion conf.low conf.high</span></span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a><span class="co">#&gt;   &lt;chr&gt;                        &lt;dbl&gt; &lt;dbl&gt;      &lt;dbl&gt;    &lt;dbl&gt;     &lt;dbl&gt;</span></span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a><span class="co">#&gt; 1 Between-stratum (random)      2.90  1.70     0.0627       NA        NA</span></span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a><span class="co">#&gt; 2 Within-stratum (residual)    43.4   6.59     0.937        NA        NA</span></span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a><span class="co">#&gt; 3 Total                        46.3   6.80     1            NA        NA</span></span></code></pre></div>
+<p><code>conf.low</code> and <code>conf.high</code> are <code>NA</code>
+here because the analysis was not bootstrapped; with
+<code>maihda(bootstrap = TRUE)</code> they hold percentile intervals
+over the refits behind the VPC interval, and with
+<code>engine = &quot;brms&quot;</code> posterior credible intervals, for every row
+except the <code>Total</code> and a level-1 variance the model does not
+estimate.</p>
 <p>And the <strong>fixed effects</strong>
 (<code>component = &quot;fixed&quot;</code>). For a two-model analysis,
 <code>which = &quot;adjusted&quot;</code> reads the adjusted model instead of the
@@ -469,11 +498,12 @@ the adjusted model instead:
 <div id="maihda_table-the-two-canonical-write-up-tables" class="section level2">
 <h2><code>maihda_table()</code> – the two canonical write-up tables</h2>
 <p><code>maihda_table()</code> assembles the two deliverables a MAIHDA
-paper reports (cf. Evans et al. 2024): a <strong>model-results
-table</strong> contrasting the null (Model 1) and adjusted (Model 2)
-fits, and a <strong>ranked-strata table</strong> ordering the
-intersections by predicted outcome. The <code>print()</code> method
-shows both in the familiar “estimate [low, high]” layout:</p>
+paper reports <span class="citation">(cf. Evans et al. 2024)</span>: a
+<strong>model-results table</strong> contrasting the null (Model 1) and
+adjusted (Model 2) fits, and a <strong>ranked-strata table</strong>
+ordering the intersections by predicted outcome. The
+<code>print()</code> method shows both in the familiar “estimate [low,
+high]” layout:</p>
 <div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>tab <span class="ot">&lt;-</span> <span class="fu">maihda_table</span>(a)</span>
 <span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>tab</span>
 <span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a><span class="co">#&gt; MAIHDA Results Table</span></span>
@@ -538,9 +568,10 @@ shows both in the familiar “estimate [low, high]” layout:</p>
 <span id="cb7-62"><a href="#cb7-62" tabindex="-1"></a><span class="co">#&gt;   (30 strata between ranks 11 and 40 not shown; see $strata)</span></span>
 <span id="cb7-63"><a href="#cb7-63" tabindex="-1"></a><span class="co">#&gt;   Predicted intervals are conditional (random-effect) only; Stratum RE is the stratum BLUP.</span></span>
 <span id="cb7-64"><a href="#cb7-64" tabindex="-1"></a><span class="co">#&gt; </span></span>
-<span id="cb7-65"><a href="#cb7-65" tabindex="-1"></a><span class="co">#&gt; Estimates are point values unless a [low, high] interval is shown. The</span></span>
-<span id="cb7-66"><a href="#cb7-66" tabindex="-1"></a><span class="co">#&gt; intercept interval is the Wald one summary() reports; the variance and SD</span></span>
-<span id="cb7-67"><a href="#cb7-67" tabindex="-1"></a><span class="co">#&gt; rows carry no interval.</span></span></code></pre></div>
+<span id="cb7-65"><a href="#cb7-65" tabindex="-1"></a><span class="co">#&gt; Estimates are point values unless a [low, high] interval is shown. In the</span></span>
+<span id="cb7-66"><a href="#cb7-66" tabindex="-1"></a><span class="co">#&gt; model results, the intercept interval is the Wald one summary() reports.</span></span>
+<span id="cb7-67"><a href="#cb7-67" tabindex="-1"></a><span class="co">#&gt; With bootstrap = TRUE the variance, SD and VPC rows get parametric</span></span>
+<span id="cb7-68"><a href="#cb7-68" tabindex="-1"></a><span class="co">#&gt; bootstrap percentile intervals.</span></span></code></pre></div>
 <p>The <code>$models</code> element is a <strong>numeric,
 export-ready</strong> data frame (statistics in rows, a column per model
 with <code>*_lower</code>/<code>*_upper</code> interval columns), so it
@@ -675,17 +706,17 @@ expectations.</li>
 diagnostics</a> – and how to restyle the built-in plots.</li>
 </ul>
 </div>
-<div id="references" class="section level2">
-<h2>References</h2>
-<ul>
-<li>Evans, C. R., Leckie, G., Subramanian, S. V., Bell, A., &amp; Merlo,
-J. (2024). A tutorial for conducting intersectional multilevel analysis
-of individual heterogeneity and discriminatory accuracy (MAIHDA).
-<em>SSM - Population Health</em>, 26,
-<ol start="101664" style="list-style-type: decimal">
-<li></li>
-</ol></li>
-</ul>
+<div id="references" class="section level2 unnumbered">
+<h2 class="unnumbered">References</h2>
+<div id="refs" class="references csl-bib-body hanging-indent">
+<div id="ref-evans2024tutorial" class="csl-entry">
+Evans, Clare R., George Leckie, S. V. Subramanian, Andrew Bell, and Juan
+Merlo. 2024. <span>“A Tutorial for Conducting Intersectional Multilevel
+Analysis of Individual Heterogeneity and Discriminatory Accuracy
+(<span>MAIHDA</span>).”</span> <em><span>SSM</span> - Population
+Health</em> 26: 101664. <a href="https://doi.org/10.1016/j.ssmph.2024.101664">https://doi.org/10.1016/j.ssmph.2024.101664</a>.
+</div>
+</div>
 </div>
 
 

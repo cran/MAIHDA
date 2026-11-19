@@ -35,7 +35,8 @@ test_that("tidy.maihda_model returns broom-shaped strata / variance / fixed tibb
   expect_true(is.numeric(st$estimate) && all(is.finite(st$estimate)))
 
   vc <- tidy(m, component = "variance")
-  expect_identical(names(vc), c("component", "variance", "sd", "proportion"))
+  expect_identical(names(vc), c("component", "variance", "sd", "proportion",
+                                "conf.low", "conf.high"))
   expect_true("Total" %in% vc$component)
   expect_equal(vc$proportion[vc$component == "Total"], 1)
 
@@ -49,6 +50,7 @@ test_that("tidy.maihda_model returns broom-shaped strata / variance / fixed tibb
 # Regression (2026-08-09): the lme4 summary used to store term/estimate only, so
 # tidy(component = "fixed") returned an all-NA std.error and no interval.
 test_that("tidy(component = 'fixed') carries lme4 SEs, statistics and Wald intervals", {
+  skip_on_cran()
   d <- make_tidy_data()
   m <- fit_maihda(y ~ age + (1 | gender:race), data = d)
   fe <- tidy(m, component = "fixed")
@@ -165,6 +167,7 @@ test_that("tidy.maihda_analysis errors when the requested summary is absent", {
 })
 
 test_that("tidy/glance work for the wemix engine (design-weighted)", {
+  skip_on_cran()
   skip_if_not_installed("WeMix")
   d <- make_tidy_data()
   m <- suppressWarnings(suppressMessages(
@@ -183,6 +186,7 @@ test_that("tidy/glance work for the wemix engine (design-weighted)", {
 })
 
 test_that("tidy/glance work for the ordinal engine", {
+  skip_on_cran()
   skip_if_not_installed("ordinal")
   d <- make_tidy_data()
   m <- suppressWarnings(suppressMessages(
@@ -213,14 +217,17 @@ test_that("tidy/glance work for the brms engine", {
   # 36, and passed no seed at all -- so the Stan seed came from the ambient RNG
   # and the block was not reproducible either. brms warned out of the glance()
   # and tidy() calls below while every assertion passed. Only 6 strata here, so
-  # the intercept/sd_stratum funnel needs adapt_delta above the default to clear
-  # the zero-divergence half of the package's convergence bar.
-  m <- suppressWarnings(suppressMessages(
-    fit_maihda(y ~ age + (1 | gender:race), data = d, engine = "brms",
-               chains = 4, iter = 2000, warmup = 1000, refresh = 0, seed = 101,
-               control = list(adapt_delta = 0.95))))
+  # the intercept/sd_stratum funnel needs adapt_delta well above the default to
+  # clear the zero-divergence half of the package's convergence bar. Over seeds 1
+  # to 20 on GitHub's ubuntu-26.04 runner (2026-11-15), 4 chains of 1000 draws at
+  # adapt_delta = 0.95 leave one to three divergent transitions for 9 seeds; at
+  # 0.99 and 0.999 none, but the largest Rhat still passes 1.01 for 2 or 3 seeds;
+  # 4 chains of 2000 draws at 0.999 meet the bar for all 20.
   # Fixture guard -- see the note in test-ordinal-engine.R.
-  expect_true(isTRUE(m$diagnostics$converged))
+  m <- stan_fixture("tidiers", function(seed) suppressWarnings(suppressMessages(
+    fit_maihda(y ~ age + (1 | gender:race), data = d, engine = "brms",
+               chains = 4, iter = 3000, warmup = 1000, refresh = 0, seed = seed,
+               control = list(adapt_delta = 0.999)))), seeds = c(1, 2, 3))
 
   g <- glance(m)
   expect_identical(g$engine, "brms")

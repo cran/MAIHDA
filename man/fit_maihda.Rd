@@ -322,7 +322,19 @@ variance and the residual, so this is a time-constant between-stratum
 from lme4's starting values and again from more starts, and a refit replaces lmer's
 fit when its REML criterion (deviance for a maximum-likelihood fit) is lower by more
 than 1e-4: lme4's default optimiser can stop at a boundary of a random-effect block
-away from the optimum. With linear growth the starts are scaled by the person-level
+away from the optimum. When another of these fits within 1e-4 of the criterion of the
+fit that would be kept lies on every variance bound that fit lies on and on at least
+one more, and stands at an optimum of the criterion, the one of them on the most
+bounds is kept: where the optimum lies on a variance bound, a fit can stop just short
+of it, and the fit on the bound is the one whose singular-fit caveat and \code{NA}
+PCVs describe that optimum. lme4 runs no convergence check on a singular fit; it
+counts as standing at an optimum when the package's own measure puts it within 1e-4
+of a stationary point of the criterion. When lme4's convergence check flags the fit
+that would be kept and accepts another of these fits whose criterion is within 1e-4
+of it, that one is kept: the check's tolerance lies within the range in which the
+optimiser stops, so that the same optimum is flagged from one start and not from
+another, and on one processor and not on another. With linear growth the starts are
+scaled by the person-level
 block, with a positive and a negative stratum intercept-slope correlation; with
 quadratic or higher growth one start is lmer's fit of the same model on time
 centred at the middle of its range, and, when that refit and lmer's fit differ by
@@ -436,6 +448,17 @@ A maihda_model object containing:
     centred and scaled (a slope in a \code{diag()} block only scaled); the distance is
     \code{stationary_distance}, and lme4's
     messages are kept in \code{lme4_overruled} when the fit converged by it.
+    lme4's warnings are then not passed on: \code{print()} and \code{summary()} say
+    what lme4 warned of and how far the fit is. A fit that does not count as converged
+    keeps its warnings. lme4's gradient tolerance also lies inside the range in which
+    its optimisers stop, so it flags fits a few millionths of a deviance unit above
+    their optimum. A fit that lme4's checks flag is therefore first fitted once more
+    from its estimates, and that fit is returned when lme4 checks and accepts it and
+    its criterion is not higher by more than 1e-4: an \code{lmer()} fit with a tighter
+    stop of its optimiser (\code{xtol_rel = 1e-5}, \code{ftol_abs = 1e-10}) unless you
+    pass a \code{control}, a \code{glmer()} fit by its second stage with the control
+    of its call. A fit from your own \code{start} and a \code{glmer.nb()} fit are not
+    fitted again.
     lme4's singular-fit test, a diagonal entry of a random-effect block's relative
     Cholesky factor below 1e-4, is taken in the same units and can fire on a block
     with a slope on such a covariate that is not at the boundary: in an lmer fit, or a

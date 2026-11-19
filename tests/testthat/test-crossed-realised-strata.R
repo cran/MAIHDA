@@ -282,6 +282,7 @@ test_that("the median odds ratio is taken over every pair, in blocks of draws", 
 })
 
 test_that("a brms crossed summary carries the realised strata of its draws", {
+  skip_on_cran()
   skip_if_not_installed("brms")
   crs_mock_brms()
   m <- crs_stub()
@@ -291,8 +292,8 @@ test_that("a brms crossed summary carries the realised strata of its draws", {
   # Placed after the level counts; the elements of today are untouched.
   expect_identical(names(d), c(
     "additive_var", "interaction_var", "between_var", "within_var", "additive_share",
-    "interaction_share", "additive_share_ci", "interaction_share_ci", "per_dim",
-    "dim_levels", "realised", "bootstrap", "method", "conf_level"))
+    "interaction_share", "additive_share_ci", "interaction_share_ci", "between_var_ci",
+    "per_dim", "dim_levels", "realised", "bootstrap", "method", "conf_level"))
   m0 <- crs_stub(level_draws = FALSE)
   d0 <- maihda_cc_summary_brms(m0, m0$cc_info, conf_level = 0.95)$decomposition
   expect_identical(d[names(d) != "realised"], d0)
@@ -315,6 +316,7 @@ test_that("a brms crossed summary carries the realised strata of its draws", {
 })
 
 test_that("the VPC line and the median odds ratio follow the family and the context", {
+  skip_on_cran()
   skip_if_not_installed("brms")
   crs_mock_brms()
   dr <- crs_draws()

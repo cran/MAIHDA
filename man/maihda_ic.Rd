@@ -43,7 +43,18 @@ comparison. When more than one model is supplied, \code{maihda_ic()} therefore
 refits any REML \code{lmer} model with maximum likelihood
 (\code{\link[lme4]{refitML}}) before computing AIC/BIC, matching the behaviour of
 \code{anova()} on \code{lme4} models; the \code{estimator} column records when
-this happened. For a single model the criterion is reported as fitted (the
+this happened. Where \code{lme4}'s optimiser ends that refit with an exit code,
+as it can at a between-stratum variance of zero while standing at the maximum,
+the model is refitted once more by \code{lmer}'s default optimiser, and that
+refit is used when its deviance is lower by more than 1e-4; \code{lme4}'s
+warning is passed on only when the second refit ends with a code as well or
+fails. A model with a random slope, a longitudinal model included, is also
+fitted by maximum likelihood from its own call, as \code{\link{fit_maihda}}
+fits it, and that fit is used when its deviance is lower than the refit's by
+more than 1e-4: with a slope on a covariate far from zero or in large units,
+such as an age, a calendar year or an income, \code{lme4}'s refit can end far
+above the maximum without a warning. This takes about as long as fitting the
+model did. For a single model the criterion is reported as fitted (the
 \code{estimator} column then reads \code{"REML"}).
 
 \strong{Comparability.} Like the VPC, information criteria are only comparable
@@ -102,6 +113,13 @@ treated the same way: its sampling weights enter as likelihood weights, giving a
 pseudo-posterior whose weighted pointwise log-likelihoods are not log predictive
 densities, so WAIC/LOOIC are likewise reported as \code{NA} (the
 \code{estimator} column reads \code{"Bayesian (weighted pseudo-posterior)"}).
+
+\strong{Criteria that brms cannot compute.} \code{brms::waic()} and
+\code{brms::loo()} need the \code{digest} package, which \code{brms} suggests
+and does not require, so a library can hold \code{brms} without it. When
+\code{brms} stops on a criterion, for that or any other reason, the criterion is
+\code{NA} for that model and \code{maihda_ic()} issues one warning that names
+the criteria and the models concerned and quotes the error.
 }
 \examples{
 \donttest{
